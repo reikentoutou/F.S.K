@@ -19,7 +19,7 @@ function formatYen(n: number): string {
       <p class="deviation-num">{{ formatYen(deviationYenPreview) }}</p>
     </div>
     <el-form-item label="偏差理由（負偏差時は必須）" class="item-plain">
-      <el-input v-model="form.deviationReason" type="textarea" :rows="3" />
+      <el-input v-model="form.expenseReason" type="textarea" :rows="3" />
     </el-form-item>
   </DailyReportSection>
 </template>

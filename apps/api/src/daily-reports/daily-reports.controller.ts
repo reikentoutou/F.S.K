@@ -8,47 +8,15 @@ import {
   Put,
   Query,
   Req,
-  UploadedFiles,
-  UseInterceptors,
 } from '@nestjs/common';
-import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import {
   IsInt,
-  IsObject,
   IsOptional,
   IsString,
   Matches,
   Min,
   Max,
 } from 'class-validator';
-import { diskStorage } from 'multer';
-import { join } from 'path';
-import { randomUUID } from 'crypto';
-
-function pickUploadExtension(file: Express.Multer.File): string {
-  const name = file.originalname || '';
-  if (name.includes('.')) {
-    return name.slice(name.lastIndexOf('.')).toLowerCase();
-  }
-  const mt = (file.mimetype || '').toLowerCase();
-  if (mt === 'application/pdf') return '.pdf';
-  if (mt === 'text/plain') return '.txt';
-  if (
-    mt === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-  ) {
-    return '.xlsx';
-  }
-  if (mt === 'application/vnd.ms-excel') return '.xls';
-  if (mt === 'image/jpeg' || mt === 'image/jpg') return '.jpg';
-  if (mt === 'image/png') return '.png';
-  if (mt === 'image/webp') return '.webp';
-  if (mt === 'image/gif') return '.gif';
-  if (mt.startsWith('image/')) {
-    const sub = mt.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
-    return `.${sub}`;
-  }
-  return '.bin';
-}
 import type { Request } from 'express';
 import { Role } from '@prisma/client';
 import { DailyReportsService } from './daily-reports.service';
@@ -74,18 +42,13 @@ class CreateDailyReportDto {
   @Max(1439)
   endMinuteOfDay!: number;
 
-  /** 税抜円（サーバーで×1.1 し税込で保存） */
   @IsInt()
   @Min(0)
-  chargeNightPackYen!: number;
+  previousImosBalanceYen!: number;
 
   @IsInt()
   @Min(0)
-  productSalesYen!: number;
-
-  /** 券种 id → 枚数（仅允许有效券种 id） */
-  @IsObject()
-  taxFreeCouponCounts!: Record<string, unknown>;
+  currentImosBalanceYen!: number;
 
   @IsInt()
   @Min(0)
@@ -93,15 +56,15 @@ class CreateDailyReportDto {
 
   @IsInt()
   @Min(0)
-  airpayQrYen!: number;
+  cashTotalYen!: number;
 
   @IsInt()
   @Min(0)
-  cashTotalYen!: number;
+  expenseYen!: number;
 
   @IsOptional()
   @IsString()
-  deviationReason?: string;
+  expenseReason?: string;
 
   /** 管理员 POST 补录时必填：归属网管的用户 id */
   @IsOptional()
@@ -134,20 +97,15 @@ class UpdateDailyReportDto {
   @Max(1439)
   endMinuteOfDay?: number;
 
-  /** 税抜円（サーバーで×1.1 し税込で保存） */
   @IsOptional()
   @IsInt()
   @Min(0)
-  chargeNightPackYen?: number;
+  previousImosBalanceYen?: number;
 
   @IsOptional()
   @IsInt()
   @Min(0)
-  productSalesYen?: number;
-
-  @IsOptional()
-  @IsObject()
-  taxFreeCouponCounts?: Record<string, unknown>;
+  currentImosBalanceYen?: number;
 
   @IsOptional()
   @IsInt()
@@ -157,16 +115,16 @@ class UpdateDailyReportDto {
   @IsOptional()
   @IsInt()
   @Min(0)
-  airpayQrYen?: number;
+  cashTotalYen?: number;
 
   @IsOptional()
   @IsInt()
   @Min(0)
-  cashTotalYen?: number;
+  expenseYen?: number;
 
   @IsOptional()
   @IsString()
-  deviationReason?: string;
+  expenseReason?: string;
 }
 
 @Controller('daily-reports')
@@ -225,33 +183,4 @@ export class DailyReportsController {
     return this.svc.update(this.auth(req), id, dto);
   }
 
-  @Post(':id/photos')
-  @UseInterceptors(
-    FileFieldsInterceptor(
-      [
-        { name: 'ddn', maxCount: 1 },
-        { name: 'taxFree', maxCount: 1 },
-      ],
-      {
-        storage: diskStorage({
-          destination: (_r, _f, cb) => {
-            const dir = process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
-            cb(null, dir);
-          },
-          filename: (_req, file, cb) => {
-            cb(null, `${randomUUID()}${pickUploadExtension(file)}`);
-          },
-        }),
-        limits: { fileSize: 8 * 1024 * 1024 },
-      },
-    ),
-  )
-  async uploadPhotos(
-    @Req() req: Request,
-    @Param('id') id: string,
-    @UploadedFiles()
-    files: { ddn?: Express.Multer.File[]; taxFree?: Express.Multer.File[] },
-  ) {
-    return this.svc.applyUploadedPhotos(id, this.auth(req), files);
-  }
 }

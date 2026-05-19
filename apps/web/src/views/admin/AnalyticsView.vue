@@ -4,8 +4,6 @@ import { http } from '@/api/http';
 import { todayTokyo } from '@/utils/tokyo';
 import {
   deviationYenFromStoredFields,
-  formatCouponCountsLine,
-  type TaxTier,
 } from '@/utils/daily-report-calc';
 import { useEchartsBarChart } from '@/composables/useEchartsBarChart';
 
@@ -16,16 +14,16 @@ type DayReportRow = {
   shiftNameSnapshot: string;
   timeRangeLabelSnapshot: string;
   responsiblePersonSnapshot: string;
-  chargeNightPackYen: number;
-  productSalesYen: number;
-  taxFreeCouponCounts: Record<string, unknown>;
+  previousImosBalanceYen: number;
+  currentImosBalanceYen: number;
+  imosSalesYen: number;
   newageYen: number;
-  airpayQrYen: number;
   cashTotalYen: number;
+  expenseYen: number;
+  expenseReason: string | null;
   totalSalesYen: number;
-  taxFreeCardAmountYen: number;
+  cashDepositYen: number;
   deviationYen: number;
-  deviationReason: string | null;
   shift: { sortOrder: number };
   createdBy: { username: string };
 };
@@ -34,23 +32,26 @@ const period = ref<Period>('week');
 const anchorDate = ref(todayTokyo());
 const loading = ref(false);
 const registerFloatAmount = ref(0);
-const taxTiers = ref<TaxTier[]>([]);
 const summary = ref<{
   range: { start: string; end: string };
-  totals: { totalSalesYen: number; taxFreeCardAmountYen: number; deviationYen: number };
+  totals: {
+    totalSalesYen: number;
+    imosSalesYen: number;
+    expenseYen: number;
+    cashDepositYen: number;
+    deviationYen: number;
+  };
   byShift: {
     shiftName: string;
     totalSalesYen: number;
-    taxFreeCardAmountYen: number;
+    imosSalesYen: number;
+    expenseYen: number;
+    cashDepositYen: number;
     deviationYen: number;
     count: number;
   }[];
   rows?: DayReportRow[];
 } | null>(null);
-
-function couponCountsLine(r: DayReportRow): string {
-  return formatCouponCountsLine(taxTiers.value, r.taxFreeCouponCounts ?? {});
-}
 
 const sortedDayRows = computed(() => {
   const rows = summary.value?.rows;
@@ -62,25 +63,25 @@ const sortedDayRows = computed(() => {
 const grandTotals = computed(() => {
   const rows = summary.value?.rows ?? [];
   let totalSalesYen = 0;
-  let taxFreeCardAmountYen = 0;
+  let imosSalesYen = 0;
   let newageYen = 0;
-  let airpayQrYen = 0;
-  let cashTotalYen = 0;
+  let cashDepositYen = 0;
+  let expenseYen = 0;
   let deviationYen = 0;
   for (const r of rows) {
     totalSalesYen += r.totalSalesYen;
-    taxFreeCardAmountYen += r.taxFreeCardAmountYen;
+    imosSalesYen += r.imosSalesYen;
     newageYen += r.newageYen;
-    airpayQrYen += r.airpayQrYen;
-    cashTotalYen += Math.max(0, r.cashTotalYen - registerFloatAmount.value);
-    deviationYen += deviationYenFromStoredFields(r, registerFloatAmount.value);
+    cashDepositYen += r.cashDepositYen;
+    expenseYen += r.expenseYen;
+    deviationYen += deviationYenFromStoredFields(r);
   }
   return {
     totalSalesYen,
-    taxFreeCardAmountYen,
+    imosSalesYen,
     newageYen,
-    airpayQrYen,
-    cashTotalYen,
+    cashDepositYen,
+    expenseYen,
     deviationYen,
     count: rows.length,
   };
@@ -107,16 +108,14 @@ const { setBarData } = useEchartsBarChart(chartEl);
 async function load() {
   loading.value = true;
   try {
-    const [{ data }, { data: st }, { data: tiers }] = await Promise.all([
+    const [{ data }, { data: st }] = await Promise.all([
       http.get('/analytics/summary', {
         params: { period: period.value, anchorDate: anchorDate.value },
       }),
       http.get<{ registerFloatAmount?: number }>('/meta/settings'),
-      http.get<TaxTier[]>('/meta/tax-tiers'),
     ]);
     summary.value = data;
     registerFloatAmount.value = st?.registerFloatAmount ?? 0;
-    taxTiers.value = tiers ?? [];
     await nextTick();
     renderChart();
   } finally {
@@ -130,7 +129,7 @@ function renderChart() {
     summary.value.byShift.map((b) => b.shiftName),
     [
       {
-        name: '総売上',
+        name: '実際売上',
         data: summary.value.byShift.map((b) => b.totalSalesYen),
       },
     ],
@@ -142,11 +141,11 @@ function cashInDrawer(r: DayReportRow): number {
 }
 
 function cashNetRow(r: DayReportRow): number {
-  return Math.max(0, r.cashTotalYen - registerFloatAmount.value);
+  return r.cashDepositYen;
 }
 
 function rowDeviation(r: DayReportRow): number {
-  return deviationYenFromStoredFields(r, registerFloatAmount.value);
+  return deviationYenFromStoredFields(r);
 }
 
 onMounted(load);
@@ -197,7 +196,7 @@ async function downloadAggregate(format: 'xlsx' | 'pdf') {
       <h2 class="grand-headline">{{ summaryHeadline }}</h2>
       <p class="range-sub">
         <template v-if="period === 'day'">
-          業務日（早番→白1番→白2番→夜番）: {{ summary.range.start }} ／ 対象
+          業務日（白班→夜班）: {{ summary.range.start }} ／ 対象
           {{ grandTotals.count }} 件
         </template>
         <template v-else>
@@ -206,27 +205,27 @@ async function downloadAggregate(format: 'xlsx' | 'pdf') {
       </p>
 
       <el-descriptions :column="1" border size="small" class="grand-totals-desc">
-        <el-descriptions-item label="総売上">
-          {{ grandTotals.totalSalesYen }} 円
-        </el-descriptions-item>
-        <el-descriptions-item label="10％クーポン額">
-          {{ grandTotals.taxFreeCardAmountYen }} 円
+        <el-descriptions-item label="Imos売上合計">
+          {{ grandTotals.imosSalesYen }} 円
         </el-descriptions-item>
         <el-descriptions-item label="Newage売上">
           {{ grandTotals.newageYen }} 円
         </el-descriptions-item>
-        <el-descriptions-item label="Airpay＋QR売上">
-          {{ grandTotals.airpayQrYen }} 円
+        <el-descriptions-item label="現金入金金額">
+          {{ grandTotals.cashDepositYen }} 円
         </el-descriptions-item>
-        <el-descriptions-item label="現金売上">
-          {{ grandTotals.cashTotalYen }} 円
+        <el-descriptions-item label="支出">
+          {{ grandTotals.expenseYen }} 円
         </el-descriptions-item>
-        <el-descriptions-item label="偏差値">
+        <el-descriptions-item label="実際売上">
+          {{ grandTotals.totalSalesYen }} 円
+        </el-descriptions-item>
+        <el-descriptions-item label="偏差">
           <span class="deviation">{{ grandTotals.deviationYen }} 円</span>
         </el-descriptions-item>
       </el-descriptions>
       <p class="cash-note">
-        ※現金売上は各日報の「現金合計（実点 − 底銭）」の合算です。
+        ※現金入金金額は各日報の「お手元残高 − 底銭」の合算です。
       </p>
 
       <template v-if="period === 'day'">
@@ -238,40 +237,37 @@ async function downloadAggregate(format: 'xlsx' | 'pdf') {
             <el-descriptions-item label="責任者">
               {{ r.responsiblePersonSnapshot }}
             </el-descriptions-item>
-            <el-descriptions-item label="時間帯">
+            <el-descriptions-item label="Newage時間">
               {{ r.timeRangeLabelSnapshot }}
             </el-descriptions-item>
-            <el-descriptions-item label="チャージ・ナイト（税込）">
-              {{ r.chargeNightPackYen }} 円
+            <el-descriptions-item label="前期Imos残高">
+              {{ r.previousImosBalanceYen }} 円
             </el-descriptions-item>
-            <el-descriptions-item label="商品売上">
-              {{ r.productSalesYen }} 円
+            <el-descriptions-item label="現在Imos残高">
+              {{ r.currentImosBalanceYen }} 円
             </el-descriptions-item>
-            <el-descriptions-item label="総売上">
-              {{ r.totalSalesYen }} 円
-            </el-descriptions-item>
-            <el-descriptions-item label="10％クーポン（枚数）">
-              {{ couponCountsLine(r) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="10％クーポン額">
-              {{ r.taxFreeCardAmountYen }} 円
+            <el-descriptions-item label="Imos売上合計">
+              {{ r.imosSalesYen }} 円
             </el-descriptions-item>
             <el-descriptions-item label="Newage">{{ r.newageYen }} 円</el-descriptions-item>
-            <el-descriptions-item label="Airpay+QR">{{ r.airpayQrYen }} 円</el-descriptions-item>
-            <el-descriptions-item label="レジ実点（底銭込）">
+            <el-descriptions-item label="お手元残高">
               {{ cashInDrawer(r) }} 円
             </el-descriptions-item>
-            <el-descriptions-item label="レジ底銭（設定）">
+            <el-descriptions-item label="底銭">
               {{ registerFloatAmount }} 円
             </el-descriptions-item>
-            <el-descriptions-item label="現金合計（実点 − 底銭）">
+            <el-descriptions-item label="現金入金金額">
               {{ cashNetRow(r) }} 円
+            </el-descriptions-item>
+            <el-descriptions-item label="支出">{{ r.expenseYen }} 円</el-descriptions-item>
+            <el-descriptions-item label="支出理由">
+              {{ r.expenseReason || '—' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="実際売上">
+              {{ r.totalSalesYen }} 円
             </el-descriptions-item>
             <el-descriptions-item label="偏差">
               <span class="deviation">{{ rowDeviation(r) }} 円</span>
-            </el-descriptions-item>
-            <el-descriptions-item v-if="r.deviationReason" label="偏差理由">
-              {{ r.deviationReason }}
             </el-descriptions-item>
             <el-descriptions-item label="提出者">
               {{ r.createdBy.username }}
@@ -289,8 +285,10 @@ async function downloadAggregate(format: 'xlsx' | 'pdf') {
       >
         <el-descriptions :column="1" border size="small" :title="b.shiftName">
           <el-descriptions-item label="件数">{{ b.count }}</el-descriptions-item>
-          <el-descriptions-item label="総売上">{{ b.totalSalesYen }} 円</el-descriptions-item>
-          <el-descriptions-item label="10％クーポン額">{{ b.taxFreeCardAmountYen }} 円</el-descriptions-item>
+          <el-descriptions-item label="Imos売上合計">{{ b.imosSalesYen }} 円</el-descriptions-item>
+          <el-descriptions-item label="実際売上">{{ b.totalSalesYen }} 円</el-descriptions-item>
+          <el-descriptions-item label="現金入金金額">{{ b.cashDepositYen }} 円</el-descriptions-item>
+          <el-descriptions-item label="支出">{{ b.expenseYen }} 円</el-descriptions-item>
           <el-descriptions-item label="偏差">{{ b.deviationYen }} 円</el-descriptions-item>
         </el-descriptions>
       </div>

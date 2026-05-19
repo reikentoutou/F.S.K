@@ -6,8 +6,8 @@
 
 ### 改进
 
-- **Web**：网管与管理员日报表单共用 `useReportAttachmentFiles`、`daily-report-form-sync`、`httpErrorMessage`；确认步骤抽为 `DailyReportConfirmSummary.vue`；输入主区域抽为 `DailyReportFormFields.vue`；`validateDailyReportGoToConfirm` / `validateDailyReportSubmit` 统一校验。加载/提交错误提示统一；移除调试用 `console.error`。管理员日报列表表格 `max-height` 内滚动以减轻长列表布局压力。
-- **类型与运行时安全**：`apps/api/tsconfig.json` 启用 **`strict: true`**；`apps/web` 中 `localStorage` 用户 JSON 经 **`parseStoredUser`** 校验后再写入 Pinia；`env.d.ts` 为 **`vue-router` 的 `RouteMeta.role`** 声明类型，路由守卫不再断言。日报服务合并 `taxFreeCouponCounts` 时用 **`hasOwnProperty`** 分支替代非空断言 `!`。
+- **Web**：网管与管理员日报表单共用 `httpErrorMessage`；确认步骤抽为 `DailyReportConfirmSummary.vue`；输入主区域抽为 `DailyReportFormFields.vue`；`validateDailyReportGoToConfirm` / `validateDailyReportSubmit` 统一校验。加载/提交错误提示统一；移除调试用 `console.error`。管理员日报列表表格 `max-height` 内滚动以减轻长列表布局压力。
+- **类型与运行时安全**：`apps/api/tsconfig.json` 启用 **`strict: true`**；`apps/web` 中 `localStorage` 用户 JSON 经 **`parseStoredUser`** 校验后再写入 Pinia；`env.d.ts` 为 **`vue-router` 的 `RouteMeta.role`** 声明类型，路由守卫不再断言。
 - **交付链路**：移除 `apps/desktop`、Electron 打包脚本、Windows 桌面发布工作流与相关根命令，仓库仅保留源码 + 终端 + 浏览器的运行方式。
 - **注释**：`apps/web`、`apps/api` 源码及 `schema.prisma` 中面向开发者的注释统一为**简体中文**（界面/导出中的日文产品文案未改）。
 
@@ -55,7 +55,7 @@
 ### 新增
 
 - 单体仓库：API、Web、Windows Electron 壳。
-- 日报、集计、导出（管理员）；东京时区与四班次业务规则。
+- 日报、集计、导出（管理员）；东京时区与两班次业务规则。
 - GitHub Actions：标签 `v*` 触发 Windows NSIS 构建并上传 Release 资产。
 
 [Unreleased]: https://github.com/reikentoutou/finance-system/compare/v0.0.4...HEAD

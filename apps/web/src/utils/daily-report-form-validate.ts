@@ -5,14 +5,14 @@ type FormSlice = {
   startStr: string;
   endStr: string;
   cashInDrawerYen: number;
-  deviationReason: string;
+  expenseYen: number;
+  expenseReason: string;
+  expenseReceiptStored: boolean;
 };
 
 /** 从「填写」进入「确认」前的共用校验；返回错误文案或 null */
 export function validateDailyReportGoToConfirm(opts: {
   form: FormSlice;
-  ddnFile: File | null;
-  savedDdnPhotoKey: string | null;
   /** 仅管理员新建 */
   admin?: {
     isNew: boolean;
@@ -21,7 +21,7 @@ export function validateDailyReportGoToConfirm(opts: {
     shiftId: string;
   };
 }): string | null {
-  const { form, ddnFile, savedDdnPhotoKey, admin } = opts;
+  const { form, admin } = opts;
   if (admin?.isNew) {
     if (!admin.createdByUserId || !admin.reportDate || !admin.shiftId) {
       return '日付・シフト・提出元（網管）を確認してください';
@@ -35,8 +35,11 @@ export function validateDailyReportGoToConfirm(opts: {
   if (sm === em) {
     return '開始と終了を同じ時刻にはできません';
   }
-  if (!ddnFile && !savedDdnPhotoKey) {
-    return 'DDN（画像／PDF）は必須です。ファイルを選択してください。';
+  if (form.expenseYen > 0 && !form.expenseReason?.trim()) {
+    return '支出理由を入力してください';
+  }
+  if (form.expenseYen > 0 && !form.expenseReceiptStored) {
+    return '領収書の受け取りと収納を確認してください';
   }
   return null;
 }
@@ -44,9 +47,6 @@ export function validateDailyReportGoToConfirm(opts: {
 /** 正式提交前（confirmCash 弹窗与发 HTTP 之前）的共用校验 */
 export function validateDailyReportSubmit(opts: {
   form: FormSlice;
-  ddnFile: File | null;
-  savedDdnPhotoKey: string | null;
-  previewDeviationYen: number;
   admin?: {
     isNew: boolean;
     createdByUserId: string;
@@ -54,7 +54,7 @@ export function validateDailyReportSubmit(opts: {
     shiftId: string;
   };
 }): string | null {
-  const { form, ddnFile, savedDdnPhotoKey, previewDeviationYen, admin } = opts;
+  const { form, admin } = opts;
   if (!form.responsiblePersonId) {
     return '責任者を選択してください';
   }
@@ -63,13 +63,11 @@ export function validateDailyReportSubmit(opts: {
       return '日付・シフト・提出元（網管）を確認してください';
     }
   }
-  if (!ddnFile && !savedDdnPhotoKey) {
-    return 'DDN（画像／PDF）は必須です。ファイルを選択してください。';
+  if (form.expenseYen > 0 && !form.expenseReason?.trim()) {
+    return '支出理由を入力してください';
   }
-  if (previewDeviationYen < 0) {
-    if (!form.deviationReason?.trim()) {
-      return '負の偏差の場合は理由を入力してください';
-    }
+  if (form.expenseYen > 0 && !form.expenseReceiptStored) {
+    return '領収書の受け取りと収納を確認してください';
   }
   return null;
 }

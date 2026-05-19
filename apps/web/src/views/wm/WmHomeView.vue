@@ -131,7 +131,7 @@ function formatYen(n: number): string {
                 </el-tag>
               </div>
               <div v-if="shiftRow(sh.id)" class="shift-body">
-                <p class="sales-line">売上</p>
+                <p class="sales-line">実際売上</p>
                 <p class="sales-num">{{ formatYen(shiftRow(sh.id)!.totalSalesYen) }}</p>
                 <p v-if="shiftRow(sh.id)!.timeRangeLabelSnapshot" class="time-line">
                   {{ shiftRow(sh.id)!.timeRangeLabelSnapshot }}

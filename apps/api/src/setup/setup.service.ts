@@ -7,6 +7,8 @@ import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { Role } from '@prisma/client';
 
+const DEFAULT_SHIFT_NAMES = ['白班', '夜班'] as const;
+
 @Injectable()
 export class SetupService {
   constructor(private readonly prisma: PrismaService) {}
@@ -19,24 +21,7 @@ export class SetupService {
   }
 
   async ensureSeedData() {
-    const shiftCount = await this.prisma.shift.count();
-    if (shiftCount === 0) {
-      const names = ['早番', '白1番', '白2番', '夜番'];
-      for (let i = 0; i < names.length; i++) {
-        await this.prisma.shift.create({
-          data: { name: names[i], sortOrder: i + 1, active: true },
-        });
-      }
-    }
-    const tierCount = await this.prisma.taxFreeCardTier.count();
-    if (tierCount === 0) {
-      const tiers = [5000, 10000];
-      for (let i = 0; i < tiers.length; i++) {
-        await this.prisma.taxFreeCardTier.create({
-          data: { denominationYen: tiers[i], sortOrder: i + 1, active: true },
-        });
-      }
-    }
+    await this.ensureShifts();
     await this.prisma.appSettings.upsert({
       where: { id: 'default' },
       create: { id: 'default', registerFloatAmount: 0, setupCompleted: false },
@@ -46,6 +31,50 @@ export class SetupService {
     if (pc === 0) {
       await this.prisma.responsiblePerson.create({
         data: { name: '担当者（要変更）', active: true },
+      });
+    }
+  }
+
+  private async ensureShifts() {
+    const shifts = await this.prisma.shift.findMany({
+      orderBy: { sortOrder: 'asc' },
+    });
+
+    if (shifts.length === 0) {
+      for (let i = 0; i < DEFAULT_SHIFT_NAMES.length; i++) {
+        await this.prisma.shift.create({
+          data: {
+            name: DEFAULT_SHIFT_NAMES[i],
+            sortOrder: i + 1,
+            active: true,
+          },
+        });
+      }
+      return;
+    }
+
+    const activeShiftIds = new Set<string>();
+    for (let i = 0; i < DEFAULT_SHIFT_NAMES.length; i++) {
+      const name = DEFAULT_SHIFT_NAMES[i];
+      const existing = shifts.find((shift) => shift.name === name);
+      if (existing) {
+        activeShiftIds.add(existing.id);
+        await this.prisma.shift.update({
+          where: { id: existing.id },
+          data: { sortOrder: i + 1, active: true },
+        });
+      } else {
+        await this.prisma.shift.create({
+          data: { name, sortOrder: i + 1, active: true },
+        });
+      }
+    }
+
+    for (const shift of shifts) {
+      if (activeShiftIds.has(shift.id) || !shift.active) continue;
+      await this.prisma.shift.update({
+        where: { id: shift.id },
+        data: { active: false },
       });
     }
   }

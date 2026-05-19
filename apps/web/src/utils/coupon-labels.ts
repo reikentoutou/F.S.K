@@ -43,7 +43,7 @@ export function confirmCashBeforeSubmit(opts: {
             },
             () => '上記の底銭で正しい',
           ),
-          h('p', { style: 'margin:14px 0 4px;font-size:15px' }, '取り出し現金（目安）'),
+          h('p', { style: 'margin:14px 0 4px;font-size:15px' }, '現金入金金額'),
           h(
             'p',
             {
@@ -58,7 +58,7 @@ export function confirmCashBeforeSubmit(opts: {
               style:
                 'margin:8px 0 0;font-size:12px;color:var(--el-text-color-secondary)',
             },
-            `内訳: 実点 ${fmtJa(cashInDrawerYen)} 円 − 底銭 ${fmtJa(registerFloatYen)} 円`,
+            `内訳: お手元残高 ${fmtJa(cashInDrawerYen)} 円 − 底銭 ${fmtJa(registerFloatYen)} 円`,
           ),
         ]);
     },

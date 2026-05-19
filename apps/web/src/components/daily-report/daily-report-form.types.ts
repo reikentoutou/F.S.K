@@ -2,13 +2,13 @@ export type DailyReportFormFieldsModel = {
   responsiblePersonId: string;
   startStr: string;
   endStr: string;
-  chargeNightPackYen: number;
-  productSalesYen: number;
-  taxFreeCouponCounts: Record<string, number>;
+  previousImosBalanceYen: number;
+  currentImosBalanceYen: number;
   newageYen: number;
-  airpayQrYen: number;
   cashInDrawerYen: number;
-  deviationReason: string;
+  expenseYen: number;
+  expenseReason: string;
+  expenseReceiptStored: boolean;
 };
 
 export type ResponsiblePersonOption = {

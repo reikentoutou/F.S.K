@@ -123,7 +123,7 @@ function edit(id: string) {
             <span class="meta-strong">{{ totalReports }}</span> 件
             <template v-if="totalReports > 0">
               <span class="meta-dot" aria-hidden="true">·</span>
-              表示期間の売上計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
+              表示期間の実際売上計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
             </template>
           </p>
           <p class="panel-hint">業務日を開くとシフト別の一覧が表示されます。</p>
@@ -151,7 +151,7 @@ function edit(id: string) {
             </template>
             <el-table :data="list" size="small" stripe border class="day-table">
               <el-table-column prop="shiftNameSnapshot" label="シフト" width="108" />
-              <el-table-column label="総売上" min-width="120">
+              <el-table-column label="実際売上" min-width="120">
                 <template #default="{ row }">
                   {{ formatYen(row.totalSalesYen) }}
                 </template>

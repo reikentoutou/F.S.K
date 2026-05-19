@@ -1,9 +1,5 @@
 <script setup lang="ts">
-import type { TaxTier } from '@/utils/daily-report-calc';
-import { REPORT_TAX_FREE_ACCEPT } from '@/composables/useReportAttachmentFiles';
-import DailyReportAttachmentFields from './DailyReportAttachmentFields.vue';
 import DailyReportBasicFields from './DailyReportBasicFields.vue';
-import DailyReportMemoFields from './DailyReportMemoFields.vue';
 import DailyReportSalesFields from './DailyReportSalesFields.vue';
 import DailyReportSubmitterFields from './DailyReportSubmitterFields.vue';
 import type {
@@ -12,39 +8,28 @@ import type {
   WebmasterOption,
 } from './daily-report-form.types';
 
-withDefaults(
-  defineProps<{
+defineProps<{
     form: DailyReportFormFieldsModel;
     persons: ResponsiblePersonOption[];
-    activeTiersSorted: TaxTier[];
     registerFloatAmount: number;
-    cashNetForReport: number;
-    deviationYenPreview: number;
-    savedDdnPhotoKey: string | null;
-    savedTaxFreePhotoKey: string | null;
-    ddnFile: File | null;
-    taxFile: File | null;
-    photoAccept: string;
-    taxFreePhotoAccept?: string;
-    couponEmptyHint: string;
+    preview: {
+      imosSalesYen: number;
+      totalSalesYen: number;
+      cashDepositYen: number;
+      deviationYen: number;
+    };
     variant: 'wm' | 'admin';
     showWmTimeHint?: boolean;
     startTimeFromPreviousShift?: boolean;
     showWebmasterSelect?: boolean;
     webmasters?: WebmasterOption[];
-  }>(),
-  {
-    taxFreePhotoAccept: REPORT_TAX_FREE_ACCEPT,
-  },
-);
+  }>();
 
 const createdByUserId = defineModel<string>('createdByUserId', {
   required: false,
 });
 
 defineEmits<{
-  pickDdn: [e: Event];
-  pickTax: [e: Event];
   confirm: [];
 }>();
 </script>
@@ -67,26 +52,8 @@ defineEmits<{
 
     <DailyReportSalesFields
       :form="form"
-      :active-tiers-sorted="activeTiersSorted"
       :register-float-amount="registerFloatAmount"
-      :cash-net-for-report="cashNetForReport"
-      :coupon-empty-hint="couponEmptyHint"
-    />
-
-    <DailyReportMemoFields
-      :form="form"
-      :deviation-yen-preview="deviationYenPreview"
-    />
-
-    <DailyReportAttachmentFields
-      :saved-ddn-photo-key="savedDdnPhotoKey"
-      :saved-tax-free-photo-key="savedTaxFreePhotoKey"
-      :ddn-file="ddnFile"
-      :tax-file="taxFile"
-      :photo-accept="photoAccept"
-      :tax-free-photo-accept="taxFreePhotoAccept"
-      @pick-ddn="$emit('pickDdn', $event)"
-      @pick-tax="$emit('pickTax', $event)"
+      :preview="preview"
     />
 
     <div class="actions">

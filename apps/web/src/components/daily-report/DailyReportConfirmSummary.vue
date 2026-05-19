@@ -3,35 +3,28 @@ import DailyReportSection from './DailyReportSection.vue';
 
 const props = defineProps<{
   preview: {
-    chargeNightPackTaxIncludedYen: number;
+    imosSalesYen: number;
     totalSalesYen: number;
-    taxFreeCardAmountYen: number;
+    cashDepositYen: number;
     deviationYen: number;
-    cashNetYen: number;
   };
   shiftName: string;
   personName: string;
-  couponCountsConfirmLine: string;
   registerFloatAmount: number;
   startStr: string;
   endStr: string;
-  productSalesYen: number;
+  previousImosBalanceYen: number;
+  currentImosBalanceYen: number;
   newageYen: number;
-  airpayQrYen: number;
   cashInDrawerYen: number;
-  deviationReason: string;
-  /** 仅管理员新建时展示 */
+  expenseYen: number;
+  expenseReason: string;
   showWebmasterRow?: boolean;
   webmasterLabel?: string;
 }>();
 
 function yen(n: number): string {
   return `${n.toLocaleString('ja-JP')} 円`;
-}
-
-function couponLine(): string {
-  const s = props.couponCountsConfirmLine?.trim();
-  return s && s !== '—' ? s : '—';
 }
 </script>
 
@@ -40,9 +33,7 @@ function couponLine(): string {
     <header class="intro">
       <p class="eyebrow">提出前の確認</p>
       <h2 class="title">入力内容の確認</h2>
-      <p class="lede">
-        問題なければ下部の「提出する」で確定してください。修正する場合は上の「入力に戻る」へ。
-      </p>
+      <p class="lede">問題なければ下部の「提出する」で確定してください。</p>
     </header>
 
     <DailyReportSection v-if="showWebmasterRow" title="提出元">
@@ -62,69 +53,59 @@ function couponLine(): string {
         <span class="kv-value">{{ personName }}</span>
       </div>
       <div class="kv-row">
-        <span class="kv-label">勤務時間</span>
+        <span class="kv-label">Newage時間</span>
         <span class="kv-value kv-mono">{{ startStr }} — {{ endStr }}</span>
       </div>
     </DailyReportSection>
 
-    <DailyReportSection title="売上・クーポン">
-      <div class="kv-grid">
-        <div class="kv-pair">
-          <span class="kv-sublabel">チャージ・ナイト（税込）</span>
-          <span class="kv-num">{{
-            yen(preview.chargeNightPackTaxIncludedYen)
-          }}</span>
-        </div>
-        <div class="kv-pair">
-          <span class="kv-sublabel">商品売上（税込）</span>
-          <span class="kv-num">{{ yen(productSalesYen) }}</span>
-        </div>
+    <DailyReportSection title="結算">
+      <div class="kv-row">
+        <span class="kv-label">前期Imos残高</span>
+        <span class="kv-value">{{ yen(previousImosBalanceYen) }}</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-label">現在Imos残高</span>
+        <span class="kv-value">{{ yen(currentImosBalanceYen) }}</span>
       </div>
       <div class="kv-row row-total">
-        <span class="kv-label">総売上（計算）</span>
-        <span class="kv-value kv-strong">{{ yen(preview.totalSalesYen) }}</span>
+        <span class="kv-label">Imos売上合計</span>
+        <span class="kv-value kv-strong">{{ yen(preview.imosSalesYen) }}</span>
       </div>
       <div class="kv-row">
-        <span class="kv-label">10％クーポン（枚数）</span>
-        <span class="kv-value">{{ couponLine() }}</span>
+        <span class="kv-label">Newage売上</span>
+        <span class="kv-value">{{ yen(newageYen) }}</span>
       </div>
       <div class="kv-row">
-        <span class="kv-label">10％クーポン額（計算・偏差に加算）</span>
-        <span class="kv-value">{{ yen(preview.taxFreeCardAmountYen) }}</span>
-      </div>
-      <div class="kv-grid kv-grid-tight">
-        <div class="kv-pair">
-          <span class="kv-sublabel">Newage</span>
-          <span class="kv-num">{{ yen(newageYen) }}</span>
-        </div>
-        <div class="kv-pair">
-          <span class="kv-sublabel">Airpay+QR</span>
-          <span class="kv-num">{{ yen(airpayQrYen) }}</span>
-        </div>
-      </div>
-    </DailyReportSection>
-
-    <DailyReportSection title="現金">
-      <div class="kv-row">
-        <span class="kv-label">レジ実点（底銭込）</span>
+        <span class="kv-label">お手元残高</span>
         <span class="kv-value">{{ yen(cashInDrawerYen) }}</span>
       </div>
       <div class="kv-row">
-        <span class="kv-label">レジ底銭（設定）</span>
+        <span class="kv-label">底銭</span>
         <span class="kv-value">{{ yen(registerFloatAmount) }}</span>
       </div>
-      <div class="kv-row row-total">
-        <span class="kv-label">現金合計（実点 − 底銭）</span>
-        <span class="kv-value kv-strong">{{ yen(preview.cashNetYen) }}</span>
+      <div class="kv-row">
+        <span class="kv-label">支出</span>
+        <span class="kv-value">{{ yen(expenseYen) }}</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-label">支出理由</span>
+        <span class="kv-value">{{ expenseReason }}</span>
       </div>
     </DailyReportSection>
 
-    <DailyReportSection title="偏差（計算）" class="block-highlight">
-      <p class="deviation-num">{{ yen(preview.deviationYen) }}</p>
-    </DailyReportSection>
-
-    <DailyReportSection v-if="deviationReason" title="メモ">
-      <p class="reason-body">{{ deviationReason }}</p>
+    <DailyReportSection title="総計" class="block-highlight">
+      <div class="kv-row">
+        <span class="kv-label">実際売上</span>
+        <span class="kv-value kv-strong">{{ yen(preview.totalSalesYen) }}</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-label">現金入金金額</span>
+        <span class="kv-value kv-strong">{{ yen(preview.cashDepositYen) }}</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-label">偏差</span>
+        <span class="kv-value kv-strong">{{ yen(preview.deviationYen) }}</span>
+      </div>
     </DailyReportSection>
   </div>
 </template>
@@ -154,14 +135,12 @@ function couponLine(): string {
   margin: 0 0 8px;
   font-size: 1.35rem;
   font-weight: 700;
-  letter-spacing: 0.02em;
   color: var(--fs-ink, var(--el-text-color-primary));
   line-height: 1.25;
 }
 
 .lede {
   margin: 0;
-  max-width: 52ch;
   font-size: 0.88rem;
   line-height: 1.5;
   color: var(--fs-muted, var(--el-text-color-secondary));
@@ -179,10 +158,6 @@ function couponLine(): string {
 .kv-row:last-child {
   border-bottom: none;
   padding-bottom: 0;
-}
-
-.kv-row:first-of-type {
-  padding-top: 0;
 }
 
 .row-total {
@@ -207,7 +182,6 @@ function couponLine(): string {
 
 .kv-mono {
   font-weight: 600;
-  letter-spacing: 0.02em;
 }
 
 .kv-strong {
@@ -215,65 +189,12 @@ function couponLine(): string {
   font-size: 1.05rem;
 }
 
-.kv-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 20px;
-  padding: 4px 0 12px;
-  border-bottom: 1px solid var(--fs-border, var(--el-border-color-lighter));
-}
-
-.kv-grid-tight {
-  padding-top: 12px;
-  margin-top: 4px;
-}
-
-.kv-pair {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.kv-sublabel {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--fs-muted, var(--el-text-color-secondary));
-}
-
-.kv-num {
-  font-size: 1rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--fs-ink, var(--el-text-color-primary));
-}
-
 .block-highlight {
   border-color: var(--fs-border-strong, var(--el-border-color));
   background: var(--fs-surface, var(--el-fill-color-blank));
 }
 
-.deviation-num {
-  margin: 0;
-  font-size: 1.5rem;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  color: var(--fs-ink, var(--el-text-color-primary));
-}
-
-.reason-body {
-  margin: 0;
-  font-size: 0.92rem;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  color: var(--fs-ink, var(--el-text-color-primary));
-}
-
 @media (max-width: 520px) {
-  .kv-grid {
-    grid-template-columns: 1fr;
-  }
-
   .kv-row {
     grid-template-columns: 1fr;
   }

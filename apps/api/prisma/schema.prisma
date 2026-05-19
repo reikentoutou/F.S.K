@@ -41,13 +41,6 @@ model ResponsiblePerson {
   active Boolean @default(true)
 }
 
-model TaxFreeCardTier {
-  id              String @id @default(cuid())
-  denominationYen Int
-  sortOrder       Int
-  active          Boolean @default(true)
-}
-
 /// 单行全局设置（收银底钱等）
 model AppSettings {
   id                  String  @id @default("default")
@@ -69,26 +62,20 @@ model DailyReport {
   endMinuteOfDay             Int
   timeRangeLabelSnapshot     String
 
-  /// チャージ・ナイト（税込円）— API 受信は税抜を×1.1 換算して保存
-  chargeNightPackYen         Int
-  /// 商品売上（税込円）
-  productSalesYen            Int
+  previousImosBalanceYen     Int @default(0)
+  currentImosBalanceYen      Int @default(0)
+  imosSalesYen               Int @default(0)
 
-  /** 券种 id → 枚数。SQLite 下 Json 的 @default 会生成非法 SQL，故省略默认值，由应用将 null 视为 {} */
-  taxFreeCouponCounts        Json?
+  newageYen                  Int @default(0)
+  /// お手元残高（底銭込）円 — ユーザー入力そのまま
+  cashTotalYen               Int @default(0)
+  expenseYen                 Int @default(0)
+  expenseReason              String?
 
-  newageYen                  Int
-  airpayQrYen                Int
-  /// レジ実点（底銭込）円 — ユーザー入力そのまま。偏差は本列＋他項目−総売上−底銭（設定）
-  cashTotalYen               Int
-
-  ddnPhotoKey                String?
-  taxFreeCardPhotoKey        String?
-
-  totalSalesYen              Int
-  taxFreeCardAmountYen       Int
-  deviationYen               Int
-  deviationReason            String?
+  /// 実際売上 = Newage売上 + お手元残高 - 底銭
+  totalSalesYen              Int @default(0)
+  cashDepositYen             Int @default(0)
+  deviationYen               Int @default(0)
 
   status                     DailyReportStatus @default(approved)
 
