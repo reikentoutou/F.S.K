@@ -12,3 +12,6 @@ apps/api/uploads/
 .agents/
 skills/
 skills-lock.json
+
+# 本机隔离开发工作区
+.worktrees/
