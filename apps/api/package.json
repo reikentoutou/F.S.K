@@ -12,6 +12,7 @@
     "start": "node dist/main",
     "start:prod": "node dist/main",
     "prisma": "prisma",
+    "test": "vitest run",
     "postinstall": "prisma generate"
   },
   "dependencies": {
@@ -54,6 +55,7 @@
     "@types/node": "^22.10.5",
     "@types/passport-jwt": "^4.0.1",
     "prisma": "^6.3.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
   }
 }
