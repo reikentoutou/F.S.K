@@ -6,8 +6,7 @@ import {
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { Role } from '@prisma/client';
-
-const DEFAULT_SHIFT_NAMES = ['白班', '夜班'] as const;
+import { reconcileFixedShifts } from '../shifts/reconcile-fixed-shifts';
 
 @Injectable()
 export class SetupService {
@@ -21,7 +20,9 @@ export class SetupService {
   }
 
   async ensureSeedData() {
-    await this.ensureShifts();
+    await this.prisma.$transaction(async (tx) => {
+      await reconcileFixedShifts(tx);
+    });
     await this.prisma.appSettings.upsert({
       where: { id: 'default' },
       create: { id: 'default', registerFloatAmount: 0, setupCompleted: false },
@@ -31,50 +32,6 @@ export class SetupService {
     if (pc === 0) {
       await this.prisma.responsiblePerson.create({
         data: { name: '担当者（要変更）', active: true },
-      });
-    }
-  }
-
-  private async ensureShifts() {
-    const shifts = await this.prisma.shift.findMany({
-      orderBy: { sortOrder: 'asc' },
-    });
-
-    if (shifts.length === 0) {
-      for (let i = 0; i < DEFAULT_SHIFT_NAMES.length; i++) {
-        await this.prisma.shift.create({
-          data: {
-            name: DEFAULT_SHIFT_NAMES[i],
-            sortOrder: i + 1,
-            active: true,
-          },
-        });
-      }
-      return;
-    }
-
-    const activeShiftIds = new Set<string>();
-    for (let i = 0; i < DEFAULT_SHIFT_NAMES.length; i++) {
-      const name = DEFAULT_SHIFT_NAMES[i];
-      const existing = shifts.find((shift) => shift.name === name);
-      if (existing) {
-        activeShiftIds.add(existing.id);
-        await this.prisma.shift.update({
-          where: { id: existing.id },
-          data: { sortOrder: i + 1, active: true },
-        });
-      } else {
-        await this.prisma.shift.create({
-          data: { name, sortOrder: i + 1, active: true },
-        });
-      }
-    }
-
-    for (const shift of shifts) {
-      if (activeShiftIds.has(shift.id) || !shift.active) continue;
-      await this.prisma.shift.update({
-        where: { id: shift.id },
-        data: { active: false },
       });
     }
   }
