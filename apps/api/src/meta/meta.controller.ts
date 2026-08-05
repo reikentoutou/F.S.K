@@ -7,28 +7,13 @@ import {
   Post,
 } from '@nestjs/common';
 import {
-  IsBoolean,
   IsInt,
-  IsOptional,
   IsString,
   Min,
 } from 'class-validator';
 import { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { Roles } from '../common/decorators/roles.decorator';
-
-class PatchShiftDto {
-  @IsString()
-  id!: string;
-
-  @IsOptional()
-  @IsString()
-  name?: string;
-
-  @IsOptional()
-  @IsBoolean()
-  active?: boolean;
-}
 
 class CreatePersonDto {
   @IsString()
@@ -50,18 +35,6 @@ export class MetaController {
     return this.prisma.shift.findMany({
       where: { active: true },
       orderBy: { sortOrder: 'asc' },
-    });
-  }
-
-  @Patch('shifts')
-  @Roles(Role.ADMIN)
-  patchShift(@Body() dto: PatchShiftDto) {
-    return this.prisma.shift.update({
-      where: { id: dto.id },
-      data: {
-        ...(dto.name != null ? { name: dto.name } : {}),
-        ...(dto.active != null ? { active: dto.active } : {}),
-      },
     });
   }
 

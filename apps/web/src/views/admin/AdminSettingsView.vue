@@ -4,20 +4,17 @@ import { http } from '@/api/http';
 import { ElMessage, ElMessageBox } from 'element-plus';
 
 const registerFloat = ref(0);
-const shifts = ref<{ id: string; name: string; sortOrder: number }[]>([]);
 const persons = ref<{ id: string; name: string }[]>([]);
 const newPerson = ref('');
 
 async function load() {
   try {
-    const [{ data: s }, { data: st }, { data: p }] =
+    const [{ data: s }, { data: p }] =
       await Promise.all([
         http.get('/meta/settings'),
-        http.get('/meta/shifts'),
         http.get<{ id: string; name: string }[]>('/meta/responsible-persons'),
       ]);
     registerFloat.value = s?.registerFloatAmount ?? 0;
-    shifts.value = Array.isArray(st) ? st : [];
     persons.value = Array.isArray(p) ? p : [];
   } catch (e: unknown) {
     console.error(e);
@@ -43,12 +40,6 @@ onMounted(load);
 async function saveFloat() {
   await http.patch('/meta/settings', { registerFloatAmount: registerFloat.value });
   ElMessage.success('レジ底銭を保存しました');
-}
-
-async function saveShift(row: { id: string; name: string }) {
-  await http.patch('/meta/shifts', { id: row.id, name: row.name });
-  ElMessage.success('シフト名を更新しました');
-  load();
 }
 
 async function addPerson() {
@@ -90,17 +81,6 @@ async function removePerson(row: { id: string; name: string }) {
     <h3>レジ底銭（全店共通）</h3>
     <el-input-number v-model="registerFloat" :min="0" />
     <el-button type="primary" style="margin-left: 8px" @click="saveFloat">保存</el-button>
-
-    <h3 style="margin-top: 24px">シフト名</h3>
-    <el-table :data="shifts" size="small">
-      <el-table-column prop="sortOrder" label="#" width="60" />
-      <el-table-column label="名称">
-        <template #default="{ row }">
-          <el-input v-model="row.name" style="width: 200px" />
-          <el-button link type="primary" @click="saveShift(row)">保存</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
 
     <h3 style="margin-top: 24px">責任者</h3>
     <p class="section-hint">日報フォームの選択肢として使います。削除すると新規日報では選べなくなります。</p>
