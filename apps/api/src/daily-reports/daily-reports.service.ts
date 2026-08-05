@@ -7,6 +7,7 @@ import {
 import { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { computeDailyReportTotals } from '../calc/daily-report-calc';
+import { previousShiftNameFor } from '../shifts/fixed-shifts';
 import { assertValidRange, labelFromMinutes } from './time-range';
 
 export type AuthUser = { userId: string; role: Role };
@@ -282,33 +283,38 @@ export class DailyReportsService {
   }
 
   /**
-   * 业务日 = 当日白班→夜班。默认开始时间取同一 reportDate 内上一班的结束时刻；
-   * 首班没有上一班，不跨日回看。不按填报人过滤，以便网管在管理员已代填上一班次时仍能带出时间。
+   * 只有夜班默认承接同一业务日白班的结束时间；网管班是独立业务班次。
+   * 不跨日回看，也不按填报人过滤，以支持管理员代填白班后由网管填写夜班。
    */
   async businessDayHint(reportDate: string, shiftId: string) {
     if (!reportDate?.match(/^\d{4}-\d{2}-\d{2}$/) || !shiftId) {
       return { previousShiftEndMinute: null as number | null };
     }
-    const shifts = await this.prisma.shift.findMany({
-      where: { active: true },
-      orderBy: { sortOrder: 'asc' },
+    const shift = await this.prisma.shift.findFirst({
+      where: { id: shiftId, active: true },
+      select: { name: true },
     });
-    const idx = shifts.findIndex((s) => s.id === shiftId);
-    if (idx < 0 || shifts.length === 0) {
+    const previousShiftName = shift ? previousShiftNameFor(shift.name) : null;
+    if (!previousShiftName) {
       return { previousShiftEndMinute: null as number | null };
     }
 
-    if (idx === 0) {
+    const previousShift = await this.prisma.shift.findFirst({
+      where: { name: previousShiftName, active: true },
+      select: { id: true },
+    });
+    if (!previousShift) {
       return { previousShiftEndMinute: null as number | null };
     }
-    const prevShiftId = shifts[idx - 1]!.id;
 
     const row = await this.prisma.dailyReport.findUnique({
       where: {
-        reportDate_shiftId: { reportDate, shiftId: prevShiftId },
+        reportDate_shiftId: {
+          reportDate,
+          shiftId: previousShift.id,
+        },
       },
     });
-    if (!row) return { previousShiftEndMinute: null as number | null };
-    return { previousShiftEndMinute: row.endMinuteOfDay };
+    return { previousShiftEndMinute: row?.endMinuteOfDay ?? null };
   }
 }
