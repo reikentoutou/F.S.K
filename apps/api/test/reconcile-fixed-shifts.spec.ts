@@ -48,6 +48,12 @@ function fakeShiftTransaction(seed: ShiftRow[]) {
   return { rows, tx };
 }
 
+function normalizedRows(rows: ShiftRow[]) {
+  return rows
+    .map(({ id, name, sortOrder, active }) => ({ id, name, sortOrder, active }))
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+}
+
 describe('reconcileFixedShifts', () => {
   it('reuses day and night ids, creates missing shifts, and deactivates extras', async () => {
     const { rows, tx } = fakeShiftTransaction([
@@ -72,10 +78,12 @@ describe('reconcileFixedShifts', () => {
     ]);
     expect(rows.find((row) => row.id === 'extra')?.active).toBe(false);
     expect(rows.find((row) => row.id === 'day-copy')?.active).toBe(false);
+    const rowsAfterFirstReconciliation = normalizedRows(rows);
 
     await reconcileFixedShifts(tx);
     expect(rows).toHaveLength(6);
     expect(rows.filter((row) => row.active)).toHaveLength(4);
+    expect(normalizedRows(rows)).toEqual(rowsAfterFirstReconciliation);
   });
 
   it('runs shift reconciliation through a Prisma transaction during setup', async () => {

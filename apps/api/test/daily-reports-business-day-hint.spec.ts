@@ -67,6 +67,57 @@ describe('DailyReportsService.businessDayHint', () => {
     });
   });
 
+  it('does not query daily reports when the active day shift is missing', async () => {
+    const { service, shiftFindFirst, dailyReportFindUnique } = buildService();
+    shiftFindFirst
+      .mockResolvedValueOnce({ name: '夜班' })
+      .mockResolvedValueOnce(null);
+
+    await expect(service.businessDayHint('2026-08-05', 'night-id')).resolves.toEqual({
+      previousShiftEndMinute: null,
+    });
+    expect(shiftFindFirst).toHaveBeenCalledTimes(2);
+    expect(shiftFindFirst).toHaveBeenNthCalledWith(1, {
+      where: { id: 'night-id', active: true },
+      select: { name: true },
+    });
+    expect(shiftFindFirst).toHaveBeenNthCalledWith(2, {
+      where: { name: '白班', active: true },
+      select: { id: true },
+    });
+    expect(dailyReportFindUnique).not.toHaveBeenCalled();
+  });
+
+  it('does not query downstream records when the current shift is inactive', async () => {
+    const { service, shiftFindFirst, dailyReportFindUnique } = buildService();
+    shiftFindFirst.mockResolvedValueOnce(null);
+
+    await expect(service.businessDayHint('2026-08-05', 'inactive-id')).resolves.toEqual({
+      previousShiftEndMinute: null,
+    });
+    expect(shiftFindFirst).toHaveBeenCalledTimes(1);
+    expect(shiftFindFirst).toHaveBeenCalledWith({
+      where: { id: 'inactive-id', active: true },
+      select: { name: true },
+    });
+    expect(dailyReportFindUnique).not.toHaveBeenCalled();
+  });
+
+  it('does not query downstream records when the current shift is unknown', async () => {
+    const { service, shiftFindFirst, dailyReportFindUnique } = buildService();
+    shiftFindFirst.mockResolvedValueOnce(null);
+
+    await expect(service.businessDayHint('2026-08-05', 'unknown-id')).resolves.toEqual({
+      previousShiftEndMinute: null,
+    });
+    expect(shiftFindFirst).toHaveBeenCalledTimes(1);
+    expect(shiftFindFirst).toHaveBeenCalledWith({
+      where: { id: 'unknown-id', active: true },
+      select: { name: true },
+    });
+    expect(dailyReportFindUnique).not.toHaveBeenCalled();
+  });
+
   it('does not query the database for invalid parameters', async () => {
     const { service, shiftFindFirst, dailyReportFindUnique } = buildService();
 

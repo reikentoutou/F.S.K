@@ -65,7 +65,7 @@ async function loadMeta() {
   setDefaultResponsiblePerson(p[0]?.id);
 }
 
-/** 新建：同一日期内 sortOrder 上一档已有日报则开始时刻默认为其结束（与责任人无关），可手改 */
+/** 新建：仅夜班默认承接同一日期白班的结束时刻；其他班次不继承（与责任人无关），可手改 */
 async function applyStartFromPreviousShift() {
   startTimeFromPreviousShift.value = false;
   try {
