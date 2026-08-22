@@ -254,6 +254,41 @@ Lambda 同步调用存在请求大小和最长执行时间限制，因此大文�
 
 ## 11. PWA 与移动端兼容
 
+### 11.1 iOS 主屏幕独立模式
+
+iPhone 7 Plus 的 iOS 15.8.4 支持从 Safari 的分享菜单选择“添加到主屏幕”。从主屏幕图标启动后，FSK 必须以独立 Web App 运行，不显示 Safari 地址栏和底部工具栏，也不能表现为只会跳回 Safari 的网页书签。
+
+实现必须同时提供标准 Web App Manifest 和 iOS 兼容标签：
+
+```json
+{
+  "name": "FSK 班次账务",
+  "short_name": "FSK 账务",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff"
+}
+```
+
+```html
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FSK 账务">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+```
+
+- `display: "standalone"` 和 `apple-mobile-web-app-capable=yes` 共同保证主屏幕启动时隐藏 Safari 浏览器 UI。
+- 使用 `black-translucent` 时页面必须通过 `env(safe-area-inset-top)`、`env(safe-area-inset-bottom)` 避让状态栏和 Home Indicator。
+- iOS 系统状态栏仍可能显示，Web App 不能承诺像原生沉浸式应用一样强制隐藏所有系统 UI；本项目的“全屏”验收定义是“不显示 Safari 地址栏和底部工具栏”。
+- iOS 15.8.4 必须使用 Safari 执行“添加到主屏幕”；不能把第三方浏览器安装作为该设备的验收路径。
+- 提供专用 `apple-touch-icon.png`，并同时在 Manifest 中声明图标；iOS 15.8.4 优先验证 Apple Touch Icon 的实际显示效果。
+- 首次从主屏幕图标启动时按独立应用会话处理，必须验证 Cognito 登录、Token 持久化和退出登录，不能假定 Safari 标签页中的登录状态自动复用。
+- 应用启动后使用 `window.navigator.standalone === true` 或 `window.matchMedia('(display-mode: standalone)').matches` 做诊断提示；该检测只用于提示安装状态，不能改变授权逻辑。
+
+### 11.2 缓存与旧设备兼容
+
 - PWA 提供 manifest、Apple Touch Icon、standalone 显示、Safe Area 和 `viewport-fit=cover`。
 - Service Worker 只缓存带哈希的静态资源和离线壳；Cognito、AppSync、Storage、统计和账务提交全部 network-only。
 - 不实现离线账务队列，不在恢复联网后自动提交。
@@ -266,8 +301,8 @@ Lambda 同步调用存在请求大小和最长执行时间限制，因此大文�
 
 | 设备 | 系统 | 浏览器模式 | 必测流程 |
 | --- | --- | --- | --- |
-| iPhone 16 Pro Max | 当前最新 iOS | Safari、主屏幕 PWA | 登录、完整日报、附件、提交锁定、管理员统计/导出 |
-| iPhone 7 Plus | iOS 15.8.4 | Safari、主屏幕 PWA | 登录、金额输入、滚动/键盘、安全区、附件、重复提交、Token 过期 |
+| iPhone 16 Pro Max | 当前最新 iOS | Safari、主屏幕独立模式 | 安装图标、无 Safari UI、登录、完整日报、附件、提交锁定、管理员统计/导出 |
+| iPhone 7 Plus | iOS 15.8.4 | Safari 安装、主屏幕独立模式 | 安装图标、无 Safari UI、独立会话登录、金额输入、滚动/键盘、安全区、附件、重复提交、Token 过期 |
 
 ## 12. 错误处理与可观测性
 
@@ -332,6 +367,8 @@ Lambda 同步调用存在请求大小和最长执行时间限制，因此大文�
 
 - 当前阶段继续运行 API Vitest、Web Vitest、API/Web strict typecheck和两端 build。
 - Amplify 阶段增加 sandbox/staging 部署验证、授权集成测试和浏览器 E2E。
+- 两台 iPhone 均从主屏幕图标冷启动，确认 `navigator.standalone === true` 或 `window.matchMedia('(display-mode: standalone)').matches === true`，且画面没有 Safari 地址栏和底部工具栏。
+- iPhone 7 Plus 必须通过 Safari 分享菜单安装，并验证独立会话登录、退出后 Token 清除、重新启动和版本更新后的缓存刷新。
 - 完成两台实体 iPhone 验收后才能切换生产。
 
 ## 15. 分阶段交付
@@ -382,3 +419,6 @@ Lambda 同步调用存在请求大小和最长执行时间限制，因此大文�
 - RDS 自动备份保留：<https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.BackupRetention.html>
 - Amplify Hosting：<https://docs.aws.amazon.com/amplify/latest/userguide/welcome.html>
 - AWS root 用户最佳实践：<https://docs.aws.amazon.com/IAM/latest/UserGuide/root-user-best-practices.html>
+- Apple Safari Web Content Guide，主屏幕独立模式：<https://developer.apple.com/library/archive/documentation/AppleApplications/Reference/SafariWebContent/ConfiguringWebApplications/ConfiguringWebApplications.html>
+- Apple Safari HTML Reference，iOS Web App Meta Tags：<https://developer.apple.com/library/archive/documentation/AppleApplications/Reference/SafariHTMLRef/Articles/MetaTags.html>
+- WebKit，iOS 主屏幕 Web App 与 Manifest：<https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/>
