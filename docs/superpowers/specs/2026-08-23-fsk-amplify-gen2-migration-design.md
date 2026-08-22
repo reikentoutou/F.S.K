@@ -26,7 +26,7 @@
 - `apps/web`：Vue 3、Vite、Element Plus、Pinia、vue-router，通过 axios 调用 REST API。
 - 备份格式：`finance-system-backup-v1` ZIP，包含 `manifest.json`、`sqlite/app.sqlite` 和 `uploads/`。
 - 当前恢复机制会断开 Prisma、替换正在使用的 SQLite 文件并覆盖本地附件目录；该机制不能直接沿用到 PostgreSQL/S3。
-- 当前角色只有 `ADMIN` 和 `WEBMASTER`；目标系统新增严格受限的 `KITCHEN`。
+- 当前角色是 `ADMIN` 和 `WEBMASTER`；目标系统取消 `WEBMASTER`，只保留 `ADMIN` 和严格受限的 `KITCHEN`。
 - 固定班次为 `网管早班(1) → 白班(2) → 夜班(3) → 网管夜班(4)`，夜班只承接同一业务日白班的结束时间。
 - `DailyReport` 以 `[reportDate, shiftId]` 唯一，历史数据不能因迁移重建班次 ID 或改写快照。
 
@@ -37,7 +37,7 @@
 FSK 使用独立资源边界：
 
 1. Amplify Hosting 托管 Vue/PWA 静态产物并提供 CDN、HTTPS、分支预览与原子发布。
-2. Cognito User Pool 负责登录；Cognito Group 承载 `ADMIN`、`WEBMASTER`、`KITCHEN` 角色。
+2. Cognito User Pool 负责登录；Cognito Group 只承载 `ADMIN`、`KITCHEN` 两种角色。
 3. Amplify Data/AppSync 提供类型化读取接口和自定义 Query/Mutation。
 4. RDS PostgreSQL 保存账务主数据、日报、审计记录、导出任务和迁移状态。
 5. Amplify Storage/S3 保存日报附件、导出文件和一次性迁移暂存文件。
@@ -104,22 +104,25 @@ Cognito 保存认证身份；PostgreSQL `AppUser` 保存业务资料并映射：
 - `id`：保留旧用户 ID；新用户使用字符串 ID。
 - `cognitoSubject`：Cognito `sub`，唯一。
 - `usernameSnapshot`：用于历史显示，不依赖 Cognito 后续改名。
-- `role`：`ADMIN`、`WEBMASTER` 或 `KITCHEN`。
+- `role`：只允许 `ADMIN` 或 `KITCHEN`。
 - `active`、`createdAt`、`updatedAt`。
 
-现有 bcrypt 使用 cost 10。目标 User Pool 若支持 Cognito 密码哈希导入，则直接导入 bcrypt 哈希；导入前验证所有哈希格式和 cost。若目标 User Pool 不提供该能力，则创建用户并要求首次重设密码。不得为了保留旧密码而长期保留 NestJS/SQLite 登录服务。
+现有 `ADMIN` 用户保持 `ADMIN`；所有现有 `WEBMASTER` 用户迁移时转换为 `KITCHEN`。转换必须保留旧用户 ID、用户名、创建时间和既有日报关联，目标系统不创建 `WEBMASTER` Cognito Group，也不保留 `WEBMASTER` 运行权限。
+
+该角色转换发生在云迁移阶段。阶段 A 只完成网管餐费契约，不提前改动本地 JWT 角色，避免在 Cognito 切换前同时维护两套认证模型。
+
+现有 bcrypt 使用 cost 10。目标 User Pool 若支持 Cognito 密码哈希导入，则直接导入 bcrypt 哈希，使转换后的 `KITCHEN` 用户继续使用原用户名和密码；导入前验证所有哈希格式和 cost。若目标 User Pool 不提供该能力，则保留用户名并要求首次重设密码。不得为了保留旧密码而长期保留 NestJS/SQLite 登录服务。
 
 ### 6.2 权限矩阵
 
-| 能力 | `ADMIN` | `WEBMASTER` | `KITCHEN` |
-| --- | :---: | :---: | :---: |
-| 填写班次账务 | 是 | 是 | 是 |
-| 查看历史账务 | 是 | 仅自己的日报 | 否 |
-| 查看统计与导出 | 是 | 否 | 否 |
-| 修改设置与主数据 | 是 | 否 | 否 |
-| 修改自己提交的日报 | 是，必须写审计 | 是，保持当前行为 | 否 |
-| 修改厨房提交的日报 | 是，必须写审计 | 否 | 否 |
-| 删除已提交厨房日报 | 否，采用更正记录 | 否 | 否 |
+| 能力 | `ADMIN` | `KITCHEN` |
+| --- | :---: | :---: |
+| 填写班次账务 | 是 | 是 |
+| 查看历史账务 | 是 | 否 |
+| 查看统计与导出 | 是 | 否 |
+| 修改设置与主数据 | 是 | 否 |
+| 修改已提交账务 | 是，必须写审计 | 否 |
+| 删除已提交账务 | 否，采用更正记录 | 否 |
 
 `KITCHEN` 的菜单和后端接口同时收口：
 
@@ -246,6 +249,7 @@ Lambda 同步调用存在请求大小和最长执行时间限制，因此大文�
 - 所有外键孤儿数必须为 `0`。
 - uploads 文件数、总字节数和逐文件 SHA-256。
 - Cognito/AppUser 用户数量、用户名和角色。
+- 来源 `ADMIN` 必须逐个映射为目标 `ADMIN`，来源 `WEBMASTER` 必须逐个映射为目标 `KITCHEN`；目标角色集合中不能出现 `WEBMASTER`。
 - 固定四班 ID、名称、顺序和 active 状态。
 
 ## 11. PWA 与移动端兼容
@@ -312,6 +316,7 @@ Lambda 同步调用存在请求大小和最长执行时间限制，因此大文�
 ### 14.2 云端授权与事务
 
 - Cognito Group授权测试覆盖所有允许/拒绝组合。
+- 验证目标 Cognito 和 PostgreSQL 只接受 `ADMIN`、`KITCHEN`，并拒绝创建或授权 `WEBMASTER`。
 - `KITCHEN` 无法调用列表、详情、统计、导出和设置接口。
 - 厨房首次提交成功、重复提交冲突、相同幂等 Key 重试返回同一结果、提交后修改被拒绝。
 - 管理员更正产生完整 `DailyReportRevision`，原提交者不变。
