@@ -218,6 +218,8 @@ async function submit() {
         :cash-in-drawer-yen="form.cashInDrawerYen"
         :expense-yen="form.expenseYen"
         :expense-reason="form.expenseReason"
+        :staff-meal-cash-yen="form.staffMealCashYen"
+        :staff-meal-alipay-yen="form.staffMealAlipayYen"
       />
       <div class="confirm-actions">
         <el-button type="primary" size="large" class="submit-btn" :loading="saving" @click="submit">

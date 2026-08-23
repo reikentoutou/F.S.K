@@ -241,6 +241,8 @@ async function submit() {
         :cash-in-drawer-yen="form.cashInDrawerYen"
         :expense-yen="form.expenseYen"
         :expense-reason="form.expenseReason"
+        :staff-meal-cash-yen="form.staffMealCashYen"
+        :staff-meal-alipay-yen="form.staffMealAlipayYen"
         :show-webmaster-row="isNew"
         :webmaster-label="webmasterLabel"
       />

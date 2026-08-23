@@ -7,6 +7,7 @@ const props = defineProps<{
     totalSalesYen: number;
     cashDepositYen: number;
     deviationYen: number;
+    staffMealTotalYen: number;
   };
   shiftName: string;
   personName: string;
@@ -19,6 +20,8 @@ const props = defineProps<{
   cashInDrawerYen: number;
   expenseYen: number;
   expenseReason: string;
+  staffMealCashYen: number;
+  staffMealAlipayYen: number;
   showWebmasterRow?: boolean;
   webmasterLabel?: string;
 }>();
@@ -90,6 +93,18 @@ function yen(n: number): string {
       <div class="kv-row">
         <span class="kv-label">支出理由</span>
         <span class="kv-value">{{ expenseReason }}</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-label">网管餐費（現金）</span>
+        <span class="kv-value">{{ yen(staffMealCashYen) }}</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-label">网管餐費（支付宝）</span>
+        <span class="kv-value">{{ yen(staffMealAlipayYen) }}</span>
+      </div>
+      <div class="kv-row row-total">
+        <span class="kv-label">网管餐費合計</span>
+        <span class="kv-value kv-strong">{{ yen(preview.staffMealTotalYen) }}</span>
       </div>
     </DailyReportSection>
 
