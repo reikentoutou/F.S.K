@@ -42,7 +42,7 @@ export function applyStagingStorageBucketOverrides(
   bucket.lifecycleConfiguration = {
     rules: [
       ephemeralLifecycleRule('ExpirePendingObjects', 'pending/'),
-      ephemeralLifecycleRule('ExpireTestExports', 'exports/'),
+      ephemeralLifecycleRule('ExpireTestExports', 'test-exports/'),
       ephemeralLifecycleRule('ExpireMigrationStaging', 'migration-staging/'),
     ],
   };

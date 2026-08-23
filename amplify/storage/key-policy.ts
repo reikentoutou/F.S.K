@@ -2,6 +2,8 @@ import { posix } from 'node:path';
 
 const STORAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/gu;
+const UNSAFE_FORMAT_CONTROL_PATTERN =
+  /[\u00ad\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|\u{e0001}|[\u{e0020}-\u{e007f}]/u;
 
 export const MAX_STORAGE_FILE_NAME_BYTES = 255;
 
@@ -12,6 +14,13 @@ function assertStorageId(value: string, field: string): void {
 }
 
 function sanitizeFileName(fileName: string): string {
+  if (
+    !isWellFormedUnicode(fileName) ||
+    UNSAFE_FORMAT_CONTROL_PATTERN.test(fileName)
+  ) {
+    throw new Error('INVALID_STORAGE_FILE_NAME');
+  }
+
   const baseName = posix.basename(fileName.replaceAll('\\', '/'));
   const sanitized = baseName.replace(CONTROL_CHARACTER_PATTERN, '');
 
@@ -24,6 +33,18 @@ function sanitizeFileName(fileName: string): string {
   }
 
   return sanitized;
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+
+    if (codePoint !== undefined && codePoint >= 0xd800 && codePoint <= 0xdfff) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export function pendingKey(

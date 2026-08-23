@@ -84,6 +84,34 @@ describe('Storage key construction', () => {
       'STORAGE_FILE_NAME_TOO_LONG',
     );
   });
+
+  it.each(['bad\ud800.jpg', 'bad\udc00.jpg'])(
+    'rejects a non-well-formed UTF-16 filename %j',
+    (fileName) => {
+      expect(() => pendingKey('sub-a', 'draft-1', 'att-1', fileName)).toThrow(
+        'INVALID_STORAGE_FILE_NAME',
+      );
+    },
+  );
+
+  it.each([
+    'invoice\u202e.jpg',
+    'invoice\u2066.jpg',
+    'invoice\u200b.jpg',
+    'invoice\ufeff.jpg',
+  ])('rejects unsafe format or bidi control in filename %j', (fileName) => {
+    expect(() => pendingKey('sub-a', 'draft-1', 'att-1', fileName)).toThrow(
+      'INVALID_STORAGE_FILE_NAME',
+    );
+  });
+
+  it('preserves well-formed Unicode, including emoji joiner sequences', () => {
+    const fileName = '領収書-🧾-👨‍👩‍👧.jpg';
+
+    expect(pendingKey('sub-a', 'draft-1', 'att-1', fileName)).toBe(
+      `pending/sub-a/draft-1/att-1/${fileName}`,
+    );
+  });
 });
 
 describe('pending key ownership', () => {
@@ -155,7 +183,7 @@ describe('staging Storage bucket overrides', () => {
           expirationInDays: 7,
           id: 'ExpireTestExports',
           noncurrentVersionExpiration: { noncurrentDays: 7 },
-          prefix: 'exports/',
+          prefix: 'test-exports/',
           status: 'Enabled',
         },
         {
