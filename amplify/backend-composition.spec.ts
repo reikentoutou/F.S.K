@@ -310,6 +310,8 @@ describe('foundation backend composition', () => {
 
     for (const { template } of synthesizedTemplates) {
       template.resourceCountIs('AWS::AppSync::GraphQLApi', 0);
+      template.resourceCountIs('AWS::RDS::DBProxy', 0);
+      template.resourceCountIs('AWS::EC2::NatGateway', 0);
     }
 
     const rootTemplate = synthesizedTemplates.find(
@@ -373,9 +375,13 @@ describe('foundation backend composition', () => {
       ]),
     }).toLowerCase();
 
+    expect(synthesizedEvidence).not.toContain(
+      'com.amazonaws.ap-northeast-1.ssm',
+    );
     expect(synthesizedEvidence).not.toContain('submitkitchenreport');
     expect(synthesizedEvidence).not.toContain('generatedsqlschema');
     expect(synthesizedEvidence).not.toContain('schema.sql');
+    expect(synthesizedEvidence).not.toContain('sqlupdater');
     expect(synthesizedEvidence).not.toContain('production');
     expect(
       assembly.stacks.some((stack) => /data/i.test(stack.stackName)),
@@ -449,7 +455,7 @@ describe('foundation backend composition', () => {
       DatabaseName: 'fsk_staging',
       EnableHttpEndpoint: true,
       ServerlessV2ScalingConfiguration: {
-        MaxCapacity: 2,
+        MaxCapacity: 1,
         MinCapacity: 0,
         SecondsUntilAutoPause: Match.anyValue(),
       },

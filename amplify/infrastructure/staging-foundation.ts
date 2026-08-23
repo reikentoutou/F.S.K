@@ -50,11 +50,6 @@ export function createStagingFoundation(
   vpc.addGatewayEndpoint('S3Endpoint', {
     service: ec2.GatewayVpcEndpointAwsService.S3,
   });
-  vpc.addInterfaceEndpoint('SsmEndpoint', {
-    privateDnsEnabled: true,
-    service: ec2.InterfaceVpcEndpointAwsService.SSM,
-    subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-  });
 
   const databaseSecurityGroup = new ec2.SecurityGroup(
     foundationScope,
@@ -92,7 +87,7 @@ export function createStagingFoundation(
     parameterGroup,
     securityGroups: [databaseSecurityGroup],
     serverlessV2AutoPauseDuration: Duration.minutes(5),
-    serverlessV2MaxCapacity: 2,
+    serverlessV2MaxCapacity: 1,
     serverlessV2MinCapacity: 0,
     storageEncrypted: true,
     vpc,

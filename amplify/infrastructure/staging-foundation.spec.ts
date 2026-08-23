@@ -28,8 +28,8 @@ const EXPECTED_TAGGABLE_RESOURCE_COUNTS = {
   'AWS::EC2::VPC': 1,
   'AWS::EC2::Subnet': 4,
   'AWS::EC2::RouteTable': 4,
-  'AWS::EC2::VPCEndpoint': 2,
-  'AWS::EC2::SecurityGroup': 2,
+  'AWS::EC2::VPCEndpoint': 1,
+  'AWS::EC2::SecurityGroup': 1,
   'AWS::RDS::DBClusterParameterGroup': 1,
   'AWS::RDS::DBSubnetGroup': 1,
   'AWS::SecretsManager::Secret': 1,
@@ -75,6 +75,7 @@ describe('staging foundation', () => {
   it('has no NAT gateway or internet gateway and provides the required VPC endpoints', () => {
     template.resourceCountIs('AWS::EC2::NatGateway', 0);
     template.resourceCountIs('AWS::EC2::InternetGateway', 0);
+    template.resourceCountIs('AWS::EC2::VPCEndpoint', 1);
     template.hasResourceProperties('AWS::EC2::VPCEndpoint', {
       ServiceName: {
         'Fn::Join': [
@@ -84,11 +85,11 @@ describe('staging foundation', () => {
       },
       VpcEndpointType: 'Gateway',
     });
-    template.hasResourceProperties('AWS::EC2::VPCEndpoint', {
+    template.resourcePropertiesCountIs('AWS::EC2::VPCEndpoint', {
       PrivateDnsEnabled: true,
       ServiceName: 'com.amazonaws.ap-northeast-1.ssm',
       VpcEndpointType: 'Interface',
-    });
+    }, 0);
   });
 
   it('creates a private Aurora Serverless v2 cluster with the required safeguards', () => {
@@ -103,7 +104,7 @@ describe('staging foundation', () => {
       Engine: 'aurora-postgresql',
       EngineVersion: '18.4',
       ServerlessV2ScalingConfiguration: {
-        MaxCapacity: 2,
+        MaxCapacity: 1,
         MinCapacity: 0,
         SecondsUntilAutoPause: Match.anyValue(),
       },
