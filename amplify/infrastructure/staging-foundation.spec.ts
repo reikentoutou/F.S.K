@@ -24,6 +24,19 @@ const hasTag = (tags: unknown, key: string, value: string): boolean =>
       tag.Value === value,
   );
 
+const EXPECTED_TAGGABLE_RESOURCE_COUNTS = {
+  'AWS::EC2::VPC': 1,
+  'AWS::EC2::Subnet': 4,
+  'AWS::EC2::RouteTable': 4,
+  'AWS::EC2::VPCEndpoint': 2,
+  'AWS::EC2::SecurityGroup': 2,
+  'AWS::RDS::DBClusterParameterGroup': 1,
+  'AWS::RDS::DBSubnetGroup': 1,
+  'AWS::SecretsManager::Secret': 1,
+  'AWS::RDS::DBCluster': 1,
+  'AWS::RDS::DBInstance': 1,
+} as const;
+
 describe('staging foundation', () => {
   it('spans exactly two AZs with application and isolated database subnets', () => {
     const subnets = template.findResources('AWS::EC2::Subnet');
@@ -134,21 +147,27 @@ describe('staging foundation', () => {
 
   it('tags every taggable foundation resource for environment and cost ownership', () => {
     const requiredTags = Object.entries(STAGING_TAGS);
-    const resources = template.toJSON().Resources as Record<
-      string,
-      { Properties: Record<string, unknown> }
-    >;
-    const taggableResources = Object.entries(resources).filter(
-      ([, resource]) => 'Tags' in resource.Properties,
-    );
 
-    expect(taggableResources.length).toBeGreaterThan(0);
-    for (const [logicalId, resource] of taggableResources) {
-      for (const [key, value] of requiredTags) {
+    for (const [resourceType, expectedCount] of Object.entries(
+      EXPECTED_TAGGABLE_RESOURCE_COUNTS,
+    )) {
+      const resources = template.findResources(resourceType);
+
+      expect(
+        Object.keys(resources),
+        `${resourceType} resource count changed`,
+      ).toHaveLength(expectedCount);
+      for (const [logicalId, resource] of Object.entries(resources)) {
         expect(
-          hasTag(resource.Properties.Tags, key, value),
-          `${logicalId} is missing ${key}=${value}`,
-        ).toBe(true);
+          resource.Properties.Tags,
+          `${logicalId} is missing the Tags property`,
+        ).toBeDefined();
+        for (const [key, value] of requiredTags) {
+          expect(
+            hasTag(resource.Properties.Tags, key, value),
+            `${logicalId} is missing ${key}=${value}`,
+          ).toBe(true);
+        }
       }
     }
   });
