@@ -102,6 +102,30 @@ const parseJpyAmount = (value: string): number => {
   return amount;
 };
 
+const PENDING_PRE_BINDING_APPROVAL_EVIDENCE = {
+  ApprovalId: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
+  Approver: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
+  ApprovedAtJst: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
+  ExpiresAtJst: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
+  ApprovalScope: ['PENDING_USER_APPROVAL'],
+  UserApprovalStatement: ['PENDING_USER_APPROVAL'],
+  ApprovalMessageOrTaskId: ['PENDING_USER_APPROVAL'],
+  ApprovedStage: ['PENDING_USER_APPROVAL'],
+  ApprovedCommit: ['PENDING_USER_APPROVAL'],
+  CostOwner: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
+  CleanupOwner: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
+};
+
+const preBindingApprovalEvidence = (
+  document: string,
+): Record<string, string[]> =>
+  Object.fromEntries(
+    Object.keys(PENDING_PRE_BINDING_APPROVAL_EVIDENCE).map((field) => [
+      field,
+      documentFieldValues(document, field),
+    ]),
+  );
+
 const OWNERSHIP_TAGS = [
   { Key: 'Project', Value: 'FSK' },
   { Key: 'Environment', Value: 'staging' },
@@ -467,17 +491,43 @@ describe('staging deployment documentation contracts', () => {
     ]);
   });
 
+  it('keeps every required pre-binding approval evidence field pending', () => {
+    const fabricatedApproval = COST_APPROVAL.replace(
+      '| ApprovedCommit | `PENDING_USER_APPROVAL` |',
+      '| ApprovedCommit | `FABRICATED_APPROVAL` |',
+    );
+
+    expect(preBindingApprovalEvidence(COST_APPROVAL)).toEqual(
+      PENDING_PRE_BINDING_APPROVAL_EVIDENCE,
+    );
+    expect(preBindingApprovalEvidence(fabricatedApproval)).not.toEqual(
+      PENDING_PRE_BINDING_APPROVAL_EVIDENCE,
+    );
+  });
+
   it('auto-invalidates approval when the 1 ACU always-on scenario exceeds the ¥5,000 ceiling', () => {
+    const conflictingEstimate = COST_APPROVAL.replace(
+      '| OneAcuWorstMonthJpy | `约 ¥19,600` |',
+      '| OneAcuWorstMonthJpy | `约 ¥19,600` |\n| OneAcuWorstMonthJpy | `约 ¥18,000` |',
+    );
     const monthlyCeilings = documentFieldValues(
       COST_APPROVAL,
       'MonthlyCeilingJpy',
     ).map(parseJpyAmount);
-    const [oneAcuWorstMonth] = documentFieldValues(
+    const oneAcuWorstMonths = documentFieldValues(
       COST_APPROVAL,
       'OneAcuWorstMonthJpy',
-    ).map(parseJpyAmount);
+    );
+    const conflictingOneAcuWorstMonths = documentFieldValues(
+      conflictingEstimate,
+      'OneAcuWorstMonthJpy',
+    );
+    const [oneAcuWorstMonth] = oneAcuWorstMonths.map(parseJpyAmount);
 
     expect(monthlyCeilings).toEqual([5_000, 5_000, 5_000]);
+    expect(oneAcuWorstMonths).toEqual(['约 ¥19,600']);
+    expect(conflictingOneAcuWorstMonths).not.toEqual(['约 ¥19,600']);
+    expect(oneAcuWorstMonth).toBe(19_600);
     expect(oneAcuWorstMonth).toBeGreaterThan(Math.max(...monthlyCeilings));
     expect(
       documentFieldValues(COST_APPROVAL, 'OneAcuWorstMonthGateAction'),
