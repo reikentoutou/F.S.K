@@ -455,14 +455,16 @@ fsk_delete_task8_parameter_if_owned() {
 
 fsk_put_task8_worker_status() {
   local value="${1:?worker status value required}"
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
+  fsk_assert_task8_parameter_owned \
+    "$FSK_TASK8_WORKER_STATUS_PARAMETER" || return 1
   timeout --signal=TERM --kill-after=5 20 \
     aws ssm put-parameter \
       --region ap-northeast-1 \
       --name "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
       --type String --value "$value" --overwrite \
-      --query Version --output text >/dev/null
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
+      --query Version --output text >/dev/null || return 1
+  fsk_assert_task8_parameter_owned \
+    "$FSK_TASK8_WORKER_STATUS_PARAMETER" || return 1
 }
 
 fsk_worker_init_exit() {
@@ -575,14 +577,16 @@ fsk_run_before_temp_egress_deadline() {
 if [ "$FSK_TASK8_SHELL_ROLE" = control ]; then
 fsk_put_task8_control_status() {
   local value="${1:?control status value required}"
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
+  fsk_assert_task8_parameter_owned \
+    "$FSK_TASK8_CONTROL_STATUS_PARAMETER" || return 1
   timeout --signal=TERM --kill-after=5 20 \
     aws ssm put-parameter \
       --region ap-northeast-1 \
       --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
       --type String --value "$value" --overwrite \
-      --query Version --output text >/dev/null
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
+      --query Version --output text >/dev/null || return 1
+  fsk_assert_task8_parameter_owned \
+    "$FSK_TASK8_CONTROL_STATUS_PARAMETER" || return 1
 }
 fi
 
@@ -685,19 +689,19 @@ fsk_render_task8_state() {
 
 fsk_persist_temp_egress_state() {
   local state
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
-  state="$(fsk_render_task8_state)"
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER" || return 1
+  state="$(fsk_render_task8_state)" || return 1
   FSK_TASK8_STATE_PARAMETER_VERSION="$(
     fsk_run_before_temp_egress_deadline aws ssm put-parameter \
       --region ap-northeast-1 \
       --name "$FSK_TASK8_STATE_PARAMETER" \
       --type String --value "$state" --overwrite \
       --query Version --output text
-  )"
+  )" || return 1
   case "$FSK_TASK8_STATE_PARAMETER_VERSION" in
     ''|*[!0-9]*) echo 'TASK8_STATE_VERSION_INVALID_STOP' >&2; return 1 ;;
   esac
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER" || return 1
 }
 
 fsk_persist_cleanup_result() {
@@ -705,14 +709,14 @@ fsk_persist_cleanup_result() {
   local state
   FSK_CLEANUP_RESULT="$result"
   export FSK_CLEANUP_RESULT
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
-  state="$(fsk_render_task8_state)"
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER" || return 1
+  state="$(fsk_render_task8_state)" || return 1
   fsk_run_before_cleanup_deadline 20 aws ssm put-parameter \
       --region ap-northeast-1 \
       --name "$FSK_TASK8_STATE_PARAMETER" \
       --type String --value "$state" --overwrite \
-      --query Version --output text >/dev/null
-  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
+      --query Version --output text >/dev/null || return 1
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER" || return 1
 }
 
 fsk_run_before_cleanup_deadline() {
@@ -752,28 +756,94 @@ fsk_discover_owned_operations_security_group() {
   fi
 }
 
+fsk_select_owned_database_ingress_rule_ids() {
+  local rules_json="${1:?candidate security group rules JSON required}"
+  FSK_DB_INGRESS_RULES_JSON="$rules_json" \
+  FSK_AWS_ACCOUNT_ID="$FSK_AWS_ACCOUNT_ID" \
+  FSK_VPC_ID="$FSK_VPC_ID" \
+  FSK_CLOUDSHELL_TASK_ID="$FSK_CLOUDSHELL_TASK_ID" \
+  FSK_TASK8_OPERATION_TOKEN="$FSK_TASK8_OPERATION_TOKEN" \
+  FSK_DB_SECURITY_GROUP_ID="$FSK_DB_SECURITY_GROUP_ID" \
+  FSK_OPS_SECURITY_GROUP_ID="$FSK_OPS_SECURITY_GROUP_ID" \
+  node -e '
+    try {
+      const input = JSON.parse(process.env.FSK_DB_INGRESS_RULES_JSON ?? "");
+      const rules = Array.isArray(input) ? input : input.SecurityGroupRules;
+      if (!Array.isArray(rules)) process.exit(2);
+      const expectedTags = {
+        Project: "FSK",
+        Environment: "staging",
+        ManagedBy: "AmplifyGen2",
+        CostCenter: "FSK",
+        AccountId: process.env.FSK_AWS_ACCOUNT_ID,
+        VpcId: process.env.FSK_VPC_ID,
+        TaskId: process.env.FSK_CLOUDSHELL_TASK_ID,
+        OperationToken: process.env.FSK_TASK8_OPERATION_TOKEN,
+      };
+      const matches = [];
+      for (const rule of rules) {
+        if (!rule || rule.GroupId !== process.env.FSK_DB_SECURITY_GROUP_ID ||
+            rule.GroupOwnerId !== process.env.FSK_AWS_ACCOUNT_ID ||
+            rule.IsEgress !== false || rule.IpProtocol !== "tcp" ||
+            rule.FromPort !== 5432 || rule.ToPort !== 5432 ||
+            rule.ReferencedGroupInfo?.GroupId !==
+              process.env.FSK_OPS_SECURITY_GROUP_ID ||
+            rule.ReferencedGroupInfo?.UserId !== process.env.FSK_AWS_ACCOUNT_ID ||
+            !Array.isArray(rule.Tags) ||
+            typeof rule.SecurityGroupRuleId !== "string" ||
+            !rule.SecurityGroupRuleId.startsWith("sgr-")) {
+          continue;
+        }
+        const tags = new Map();
+        let tagsValid = true;
+        for (const tag of rule.Tags) {
+          if (typeof tag?.Key !== "string" || typeof tag?.Value !== "string" ||
+              tags.has(tag.Key)) {
+            tagsValid = false;
+            break;
+          }
+          tags.set(tag.Key, tag.Value);
+        }
+        if (!tagsValid || Object.entries(expectedTags).some(
+          ([key, value]) => !value || tags.get(key) !== value,
+        )) {
+          continue;
+        }
+        matches.push(rule.SecurityGroupRuleId);
+      }
+      process.stdout.write(matches.join("\n"));
+    } catch {
+      process.exit(2);
+    }
+  '
+}
+
 fsk_cleanup_operations_access_once() {
   local cleanup_failed=0
   local sg_ids=''
+  local rule_candidates_json=''
   local rule_ids=''
   local sg_id=''
   local rule_id=''
   local value=''
   sg_ids="$(fsk_discover_owned_operations_security_group)" || cleanup_failed=1
-  rule_ids="$(fsk_run_before_cleanup_deadline 30 \
-    aws ec2 describe-security-group-rules \
-      --region ap-northeast-1 \
-      --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
-        "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
-        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
-        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
-        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
-      --query 'SecurityGroupRules[?IsEgress==`false` && IpProtocol==`tcp` && FromPort==`5432` && ToPort==`5432` && ReferencedGroupInfo.GroupId!=`null`].SecurityGroupRuleId' \
-      --output text)" || {
+  if rule_candidates_json="$(fsk_run_before_cleanup_deadline 30 \
+      aws ec2 describe-security-group-rules \
+        --region ap-northeast-1 \
+        --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
+          "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+          "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+          "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+          "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+        --query 'SecurityGroupRules' --output json)" && \
+      rule_ids="$(fsk_select_owned_database_ingress_rule_ids \
+        "$rule_candidates_json")"; then
+    :
+  else
         echo 'OWNERSHIP_REVALIDATION_FAILED_BLOCKED:DB_INGRESS' >&2
         cleanup_failed=1
         rule_ids=''
-      }
+  fi
   for rule_id in $rule_ids; do
     [ "$rule_id" = None ] && continue
     FSK_TEMP_EGRESS_RESOURCES_DISCOVERED_THIS_ATTEMPT=1
@@ -791,17 +861,22 @@ fsk_cleanup_operations_access_once() {
       >/dev/null || cleanup_failed=1
   done
 
-  if value="$(fsk_run_before_cleanup_deadline 30 \
-    aws ec2 describe-security-group-rules \
-      --region ap-northeast-1 \
-      --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
-        "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
-        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
-        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
-        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
-      --query 'length(SecurityGroupRules[?IsEgress==`false` && IpProtocol==`tcp` && FromPort==`5432` && ToPort==`5432` && ReferencedGroupInfo.GroupId!=`null`])' \
-      --output text)" && \
-      [[ "$value" =~ ^[0-9]+$ ]]; then
+  if rule_candidates_json="$(fsk_run_before_cleanup_deadline 30 \
+      aws ec2 describe-security-group-rules \
+        --region ap-northeast-1 \
+        --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
+          "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+          "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+          "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+          "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+        --query 'SecurityGroupRules' --output json)" && \
+      rule_ids="$(fsk_select_owned_database_ingress_rule_ids \
+        "$rule_candidates_json")"; then
+    value=0
+    for rule_id in $rule_ids; do
+      [ "$rule_id" = None ] && continue
+      value=$((value + 1))
+    done
     FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT="$value"
   else
     FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT=UNKNOWN
@@ -1479,7 +1554,7 @@ fsk_assert_temp_egress_deadline
 : "${FSK_APP_ROUTE_TABLE_A_ID:?set application route table A}"
 : "${FSK_APP_ROUTE_TABLE_B_ID:?set application route table B}"
 FSK_TASK8_WORKER_INIT_TIMEOUT_SECONDS=600
-FSK_TEMP_EC2_TAGS="[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=AccountId,Value=${FSK_AWS_ACCOUNT_ID}},{Key=VpcId,Value=${FSK_VPC_ID}},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}},{Key=OperationToken,Value=${FSK_TASK8_OPERATION_TOKEN}]"
+FSK_TEMP_EC2_TAGS="[{\"Key\":\"Project\",\"Value\":\"FSK\"},{\"Key\":\"Environment\",\"Value\":\"staging\"},{\"Key\":\"ManagedBy\",\"Value\":\"AmplifyGen2\"},{\"Key\":\"CostCenter\",\"Value\":\"FSK\"},{\"Key\":\"AccountId\",\"Value\":\"${FSK_AWS_ACCOUNT_ID}\"},{\"Key\":\"VpcId\",\"Value\":\"${FSK_VPC_ID}\"},{\"Key\":\"TaskId\",\"Value\":\"${FSK_CLOUDSHELL_TASK_ID}\"},{\"Key\":\"OperationToken\",\"Value\":\"${FSK_TASK8_OPERATION_TOKEN}\"}]"
 fsk_require_single_owned_id() {
   local ids="${1:-}"
   local prefix="${2:?id prefix required}"
@@ -1510,9 +1585,12 @@ FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS="$(
     --region ap-northeast-1 \
     --route-table-ids "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID" \
     --query 'sort(RouteTables[].VpcId)' --output text
-)"
-test "$FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS" = \
-  "$FSK_VPC_ID\t$FSK_VPC_ID"
+)" || exit 1
+read -r -a FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS <<< \
+  "$FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS"
+test "${#FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS[@]}" -eq 2
+test "${FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS[0]}" = "$FSK_VPC_ID"
+test "${FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS[1]}" = "$FSK_VPC_ID"
 FSK_PREEXISTING_APP_DEFAULT_ROUTE_COUNT="$(
   fsk_run_before_temp_egress_deadline aws ec2 describe-route-tables \
     --region ap-northeast-1 \
@@ -1527,7 +1605,7 @@ if ! FSK_OPS_SECURITY_GROUP_ID="$(fsk_run_before_temp_egress_deadline \
     --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
     --group-name "fsk-staging-cloudshell-${FSK_CLOUDSHELL_TASK_ID}-${FSK_TASK8_OPERATION_TOKEN}" \
     --description "Temporary CloudShell access for ${FSK_CLOUDSHELL_TASK_ID}" \
-    --tag-specifications "ResourceType=security-group,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --tag-specifications "[{\"ResourceType\":\"security-group\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query GroupId --output text)"; then
   FSK_OPS_SECURITY_GROUP_ID=''
 fi
@@ -1545,7 +1623,7 @@ if ! FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(
       --group-id "$FSK_DB_SECURITY_GROUP_ID" \
       --protocol tcp --port 5432 \
       --source-group "$FSK_OPS_SECURITY_GROUP_ID" \
-      --tag-specifications "ResourceType=security-group-rule,Tags=${FSK_TEMP_EC2_TAGS}" \
+      --tag-specifications "[{\"ResourceType\":\"security-group-rule\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
       --query 'SecurityGroupRules[0].SecurityGroupRuleId' --output text
 )"; then
   FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID=''
@@ -1553,18 +1631,22 @@ fi
 case "$FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID" in
   sgr-*) ;;
   *)
-    FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(
+    FSK_DB_INGRESS_RULE_CANDIDATES_JSON="$(
       fsk_run_before_temp_egress_deadline \
         aws ec2 describe-security-group-rules \
           --region ap-northeast-1 \
           --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
-            "Name=referenced-group-id,Values=${FSK_OPS_SECURITY_GROUP_ID}" \
             "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
             "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
             "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
             "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
-          --query 'SecurityGroupRules[].SecurityGroupRuleId' --output text
-    )"
+          --query 'SecurityGroupRules' --output json
+    )" || exit 1
+    FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(
+      fsk_select_owned_database_ingress_rule_ids \
+        "$FSK_DB_INGRESS_RULE_CANDIDATES_JSON"
+    )" || exit 1
+    unset FSK_DB_INGRESS_RULE_CANDIDATES_JSON
     ;;
 esac
 FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(fsk_require_single_owned_id \
@@ -1574,7 +1656,7 @@ fsk_persist_temp_egress_state
 if ! FSK_TEMP_IGW_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 create-internet-gateway \
     --region ap-northeast-1 \
-    --tag-specifications "ResourceType=internet-gateway,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --tag-specifications "[{\"ResourceType\":\"internet-gateway\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query InternetGateway.InternetGatewayId --output text)"; then
   FSK_TEMP_IGW_ID=''
 fi
@@ -1605,7 +1687,7 @@ if ! FSK_TEMP_PUBLIC_SUBNET_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 create-subnet \
     --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
     --cidr-block "$FSK_TEMP_PUBLIC_CIDR" --availability-zone "$FSK_TEMP_AZ" \
-    --tag-specifications "ResourceType=subnet,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --tag-specifications "[{\"ResourceType\":\"subnet\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query Subnet.SubnetId --output text)"; then
   FSK_TEMP_PUBLIC_SUBNET_ID=''
 fi
@@ -1626,7 +1708,7 @@ fsk_persist_temp_egress_state
 if ! FSK_TEMP_PUBLIC_ROUTE_TABLE_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 create-route-table \
     --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
-    --tag-specifications "ResourceType=route-table,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --tag-specifications "[{\"ResourceType\":\"route-table\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query RouteTable.RouteTableId --output text)"; then
   FSK_TEMP_PUBLIC_ROUTE_TABLE_ID=''
 fi
@@ -1673,7 +1755,7 @@ fsk_persist_temp_egress_state
 if ! FSK_TEMP_EIP_ALLOCATION_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 allocate-address \
     --region ap-northeast-1 --domain vpc \
-    --tag-specifications "ResourceType=elastic-ip,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --tag-specifications "[{\"ResourceType\":\"elastic-ip\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query AllocationId --output text)"; then
   FSK_TEMP_EIP_ALLOCATION_ID=''
 fi
@@ -1695,7 +1777,7 @@ if ! FSK_TEMP_NAT_GATEWAY_ID="$(fsk_run_before_temp_egress_deadline \
     --region ap-northeast-1 --connectivity-type public \
     --subnet-id "$FSK_TEMP_PUBLIC_SUBNET_ID" \
     --allocation-id "$FSK_TEMP_EIP_ALLOCATION_ID" \
-    --tag-specifications "ResourceType=natgateway,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --tag-specifications "[{\"ResourceType\":\"natgateway\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query NatGateway.NatGatewayId --output text)"; then
   FSK_TEMP_NAT_GATEWAY_ID=''
 fi
