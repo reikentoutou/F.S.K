@@ -25,10 +25,11 @@
 5. migration 首次执行、第二次 no-op 和 verify；
 6. 设置 branch secret、两次生成 schema、无差异核对并安全带回；
 7. 立即删除临时出口，再删除 CloudShell environment、DB ingress 和运维 Security Group；
-8. full backend deploy；
-9. Hosting build。
+8. 从已审查的 exact commit 执行 full backend deploy；
+9. 取得独立共享 Git 写入批准，将 remote `staging` 从 foundation commit 以 CAS 更新为 full-backend commit；
+10. Hosting build 并核对 job commit 精确为 full-backend commit。
 
-不得跳步或并行推进。§2.1 的共享 Git 写入和首次 AWS 写入都必须等到 Task 7 批准；执行前展示 [`staging-cost-approval.md`](./staging-cost-approval.md) 的资源表和 `MonthlyCeilingJpy`，并取得用户对“建立不可变 remote foundation tag、建立远程 staging ref、首次 staging AWS 写入及该月上限”的明确批准。完整 backend、Task 8 临时访问、Budget/alarms 和销毁分别有独立审批门。
+不得跳步或并行推进。§2.1 的共享 Git 写入和首次 AWS 写入都必须等到 Task 7 批准；执行前展示 [`staging-cost-approval.md`](./staging-cost-approval.md) 的资源表和 `MonthlyCeilingJpy`，并取得用户对“建立不可变 remote foundation tag、建立远程 staging ref、首次 staging AWS 写入及该月上限”的明确批准。完整 backend、full-backend remote CAS、Task 8 临时访问、Budget/alarms 和销毁分别有独立审批门。
 
 共同约束：只允许 account `444083008754`、region `ap-northeast-1` 和 staging；不创建或复用 production；不读取真实 SQLite、用户 hash、备份或 uploads；不得记录密码、Token、Secret 值、连接串或 Cognito CSV。Storage key 在所有后续 Function 中保持 opaque，所有权验证前后都不得 percent-decode。
 
@@ -289,30 +290,13 @@ test "$FSK_FOUNDATION_PIPELINE_EXIT" -eq 0
 
 此步骤只在 foundation 部署成功且取得 **Task 8 独立批准** 后执行。在同一 VPC 的 application 私有子网创建临时 CloudShell VPC environment 和临时运维 Security Group；DB Security Group 只允许该组到 5432。不得把数据库设为 public，也不得增加长期 NAT Gateway。
 
-### 3.1 创建临时运维 Security Group
+### 3.1 临时运维访问的 control-owned 边界
 
-从 `FskStagingFoundation` outputs 取得 VPC 与 DB Security Group ID；先设置唯一任务编号，再运行下列已批准的写入。不得使用名称搜索猜测目标。
+从 `FskStagingFoundation` outputs 取得精确 VPC 与 DB Security Group ID，并用只读查询复验 DB SG 属于该 VPC。这里只准备 TaskId、application subnet IDs 和 Console 配置证据，**不提前创建**运维 Security Group 或 DB ingress。两者必须等到 §3.2 生成本次高熵 operation token、三个 SSM parameters 建立完成且 control EXIT/INT/TERM cleanup trap 已安装后，才由同一 control session 创建；成功和任意失败都由同一 cleanup/discovery 循环负责 revoke/delete。
 
-```bash
-set -euo pipefail
-: "${FSK_CLOUDSHELL_TASK_ID:?set an approved task id}"
-: "${FSK_VPC_ID:?set the VpcId stack output}"
-: "${FSK_DB_SECURITY_GROUP_ID:?set the DatabaseSecurityGroupId stack output}"
-FSK_OPS_SECURITY_GROUP_ID="$(aws ec2 create-security-group \
-  --region ap-northeast-1 \
-  --vpc-id "$FSK_VPC_ID" \
-  --group-name "fsk-staging-cloudshell-${FSK_CLOUDSHELL_TASK_ID}" \
-  --description "Temporary CloudShell access for ${FSK_CLOUDSHELL_TASK_ID}" \
-  --tag-specifications "ResourceType=security-group,Tags=[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}}]" \
-  --query GroupId --output text)"
-aws ec2 authorize-security-group-ingress \
-  --region ap-northeast-1 \
-  --group-id "$FSK_DB_SECURITY_GROUP_ID" \
-  --protocol tcp --port 5432 \
-  --source-group "$FSK_OPS_SECURITY_GROUP_ID"
-```
+运维 SG、DB ingress rule、临时出口资源与三个 SSM parameters 共同使用本次唯一 ownership tuple：AWS account `444083008754`、精确 Foundation VPC ID、TaskId 和高熵 operation token。能标记的 EC2 资源在 create/authorize 请求中一次性带齐该 tuple；响应丢失只允许用完整 tuple 反查。不能只按 group name、TaskId 或 state 中的 ID 猜测/删除。
 
-在 CloudShell Console 的 VPC environment 创建流程中，名称使用 `fsk-staging-${FSK_CLOUDSHELL_TASK_ID}`，VPC 精确选择 `$FSK_VPC_ID`，只选择 foundation 的 application 私有子网，并只附加 `$FSK_OPS_SECURITY_GROUP_ID`。创建完成后保存配置页截图；截图必须能核对 environment name、VPC ID、subnet IDs、Security Group ID 和 region，但不能包含 Secret。
+control 创建并留存 `$FSK_OPS_SECURITY_GROUP_ID` 与 `$FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID` 后，才在 CloudShell Console 的 VPC environment 创建流程中使用名称 `fsk-staging-${FSK_CLOUDSHELL_TASK_ID}`，VPC 精确选择 `$FSK_VPC_ID`，只选择 Foundation application 私有子网，并只附加该运维 SG。截图必须能核对 environment name/ID、VPC、subnets、SG 和 region，不能包含 Secret。若 worker/Console 失败，control 先撤销精确 tagged ingress 并清理所有可计费出口；SG 因 CloudShell ENI 暂时无法删除时保持 `BLOCKED`，CleanupOwner 删除 environment 后在 cleanup deadline 内继续重试，绝不把部分清理记为 PASS。
 
 ### 3.2 Task 8 单独批准的 REQUIRED 临时出口
 
@@ -325,27 +309,203 @@ Task 8 使用两个明确的 shell 角色：
 - **control session**：`ap-northeast-1` 的普通 CloudShell，负责创建临时出口、轮询任务状态并**独占执行 EC2 cleanup/residual check**；不得关闭该 tab；
 - **worker session**：出口可用后打开的 VPC CloudShell environment，负责源码准备、migration、secret 门、schema generation 和安全带回；从 worker arm 到 §4.3 必须是同一个持久 shell。worker 不删除自己的默认路由，失败时通过 foundation 已有的 SSM Interface Endpoint 写入非敏感失败状态，由 control 立即清理。
 
-两个 session 之间通过 `/fsk/staging/task8/<TaskId>/worker-status`、`/control-status` 和 `/state` 三个临时 SSM `String` parameters 只传递任务状态、资源 ID/marker、deadline、foundation commit 和 checksum 这些非敏感状态。worker-status 只有 worker 更新；control-status 与 state 只有 control 更新。parameters 必须带本项目四个标签和 `TaskId`，并纳入 Task 8 独立写入批准。不得传递或保存 Secret value、username/password、endpoint 或连接串。每次 AWS mutation 后立即覆盖 state；cleanup 同时按 `TaskId` 标签发现 NAT/EIP/route table/subnet/IGW，并反查 application route target、route association 和 IGW attachment，所以即使服务端成功但响应丢失，也不依赖单一 shell 变量。若 control session 丢失，`CleanupOwner` 必须用 TaskId 在新的普通 CloudShell 恢复 guard 并清理，不能把 shell 丢失解释为已清理。
+两个 session 之间通过 `/fsk/staging/task8/<TaskId>/<OperationToken>/worker-status`、`/control-status` 和 `/state` 三个临时 SSM `String` parameters 只传递非敏感运行状态。control 在任何 AWS mutation 前生成两个互不相同的 UUIDv4：`BootstrapToken` 只证明三个参数的创建归属，`OperationToken` 同时进入参数 namespace、state 和所有临时 EC2 ownership tags。worker-status 只有 worker 更新；control-status 与 state 只有 control 更新。parameters 同时带项目四标签、`AccountId`、`VpcId`、`TaskId`、`BootstrapToken` 和 `OperationToken`。不得传递 Secret value、username/password、endpoint 或连接串。
+
+control 先执行下列本地 token 生成；它不访问网络。token 是高熵、非秘密审计证据，必须与 TaskId 一起交给 worker/恢复 control，不能重新生成或只从可漂移的 state 猜测：
+
+```bash
+set -euo pipefail
+test "${FSK_TASK8_SHELL_ROLE:-}" = control
+FSK_TASK8_BOOTSTRAP_TOKEN="$(
+  node -e 'process.stdout.write(require("node:crypto").randomUUID())'
+)"
+FSK_TASK8_OPERATION_TOKEN="$(
+  node -e 'process.stdout.write(require("node:crypto").randomUUID())'
+)"
+test "$FSK_TASK8_BOOTSTRAP_TOKEN" != "$FSK_TASK8_OPERATION_TOKEN"
+export FSK_TASK8_BOOTSTRAP_TOKEN FSK_TASK8_OPERATION_TOKEN
+```
+
+每次 mutation 后 state 保留完整 ownership/commit/deadline/resource IDs，不以 cleanup-only JSON 覆盖。cleanup 只按完整 ownership tuple 发现可标记资源，再反查由 owned target 派生的 route/association/attachment；响应丢失不依赖 shell 返回 ID。若 control session 丢失，CleanupOwner 必须从非敏感证据恢复完整 tuple 和 deadline，再运行同一 guard/cleanup，不能只用 TaskId 扫描全区域。
 
 批准必须给出数值 Unix operation deadline `$FSK_TEMP_EGRESS_DEADLINE_EPOCH`、更晚但仍有明确上限的 cleanup deadline `$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH` 和具名 `$FSK_TEMP_EGRESS_CLEANUP_OWNER`。两个 deadline 都不得晚于审批所列的 operation/cleanup 最大持续时间；CleanupOwner 必须在独立计时器中登记 cleanup deadline，并在到期时主动进入普通 CloudShell 复查。control watchdog 每 15 秒轮询 worker-status，看到 worker `FAILED:*`、`READY_FOR_CLEANUP`、连续三次状态读取失败或 operation deadline 到达，就直接运行 cleanup，不依赖 worker 前台命令是否返回。worker 的 git/pnpm/migration/generation 命令使用 operation deadline 派生的 GNU `timeout`；不使用 `--foreground`，让 timeout 控制独立 process group 并向 pnpm/Node 子树发送 TERM/KILL。
 
-先在 control session 通过只读 VPC/subnet/route-table 查询选择未使用的 `$FSK_TEMP_PUBLIC_CIDR`、`$FSK_TEMP_AZ` 和两个 application route table IDs，并确认两个 application route tables 当前都没有 `0.0.0.0/0` route。control 首次执行下列初始化前必须 `export FSK_TASK8_SHELL_ROLE=control`；worker 稍后在自己的持久 session 恢复相同的非敏感批准字段、`export FSK_TASK8_SHELL_ROLE=worker` 后重跑同一 fence。临时资源变量使用 `${VAR:-}`；恢复 control 可以保持空值，cleanup 会以 TaskId 标签发现资源，不以 state 中的单一 ID 作为唯一事实来源。role guard 只在 control 定义 EC2 cleanup，在 worker 只定义失败通知，避免 worker 拥有或调用删除自身 route 的函数：
+先在 control session 通过只读 VPC/subnet/route-table 查询选择未使用的 `$FSK_TEMP_PUBLIC_CIDR`、`$FSK_TEMP_AZ` 和两个 application route table IDs，并确认两个 application route tables 当前都没有 `0.0.0.0/0` route。control 在执行下列初始化前必须设置 role 并保留刚生成的两个 token；worker 稍后从证据恢复相同 token/TaskId/VPC/deadlines，设置 `FSK_TASK8_SHELL_ROLE=worker` 后重跑同一 fence。worker 的 init EXIT/INT/TERM notification boundary 在 deadline 校验以及 state/status 读取/解析之前安装；通知自身失败时仍非零退出，control 的短 worker-init watchdog 不等待 operation 总 deadline。role guard 只让 control 定义 EC2 cleanup，worker 不拥有删除自身 route 的函数：
 
 ```bash
 set -euo pipefail
 export AWS_REGION=ap-northeast-1
 export AWS_DEFAULT_REGION=ap-northeast-1
+FSK_AWS_ACCOUNT_ID=444083008754
+FSK_TASK8_SHELL_ROLE="${FSK_TASK8_SHELL_ROLE:-}"
+case "$FSK_TASK8_SHELL_ROLE" in
+  control|worker) ;;
+  *) echo 'TASK8_SHELL_ROLE_INVALID_STOP' >&2; exit 1 ;;
+esac
+FSK_CLOUDSHELL_TASK_ID="${FSK_CLOUDSHELL_TASK_ID:-}"
+case "$FSK_CLOUDSHELL_TASK_ID" in
+  ''|*[!A-Za-z0-9_-]*) echo 'TASK8_ID_INVALID_STOP' >&2; exit 1 ;;
+esac
+FSK_TASK8_BOOTSTRAP_TOKEN="${FSK_TASK8_BOOTSTRAP_TOKEN:-}"
+FSK_TASK8_OPERATION_TOKEN="${FSK_TASK8_OPERATION_TOKEN:-}"
+FSK_TASK8_PARAMETER_PREFIX="/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}/${FSK_TASK8_OPERATION_TOKEN:-MISSING}"
+FSK_TASK8_WORKER_STATUS_PARAMETER="/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}/${FSK_TASK8_OPERATION_TOKEN}/worker-status"
+FSK_TASK8_CONTROL_STATUS_PARAMETER="/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}/${FSK_TASK8_OPERATION_TOKEN}/control-status"
+FSK_TASK8_STATE_PARAMETER="/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}/${FSK_TASK8_OPERATION_TOKEN}/state"
+
+fsk_snapshot_task8_parameter() {
+  local parameter_name="${1:?parameter name required}"
+  local metadata_json=''
+  local tags_json=''
+  metadata_json="$(
+    timeout --signal=TERM --kill-after=5 20 \
+      aws ssm get-parameter \
+        --region ap-northeast-1 --name "$parameter_name" \
+        --query 'Parameter.{Name:Name,Type:Type,Version:Version,DataType:DataType}' \
+        --output json
+  )" || return 1
+  tags_json="$(
+    timeout --signal=TERM --kill-after=5 20 \
+      aws ssm list-tags-for-resource \
+        --region ap-northeast-1 --resource-type Parameter \
+        --resource-id "$parameter_name" --output json
+  )" || return 1
+  FSK_PARAMETER_METADATA_JSON="$metadata_json" \
+  FSK_PARAMETER_TAGS_JSON="$tags_json" \
+  FSK_PARAMETER_EXPECTED_NAME="$parameter_name" \
+  FSK_AWS_ACCOUNT_ID="$FSK_AWS_ACCOUNT_ID" \
+  FSK_VPC_ID="${FSK_VPC_ID:-}" \
+  FSK_CLOUDSHELL_TASK_ID="$FSK_CLOUDSHELL_TASK_ID" \
+  FSK_TASK8_BOOTSTRAP_TOKEN="$FSK_TASK8_BOOTSTRAP_TOKEN" \
+  FSK_TASK8_OPERATION_TOKEN="$FSK_TASK8_OPERATION_TOKEN" \
+  node -e '
+    const metadataInput = JSON.parse(process.env.FSK_PARAMETER_METADATA_JSON ?? "");
+    const metadata = metadataInput.Parameter ?? metadataInput;
+    const tagsInput = JSON.parse(process.env.FSK_PARAMETER_TAGS_JSON ?? "");
+    const tags = tagsInput.TagList ?? tagsInput;
+    const expected = {
+      Project: "FSK",
+      Environment: "staging",
+      ManagedBy: "AmplifyGen2",
+      CostCenter: "FSK",
+      AccountId: process.env.FSK_AWS_ACCOUNT_ID,
+      VpcId: process.env.FSK_VPC_ID,
+      TaskId: process.env.FSK_CLOUDSHELL_TASK_ID,
+      BootstrapToken: process.env.FSK_TASK8_BOOTSTRAP_TOKEN,
+      OperationToken: process.env.FSK_TASK8_OPERATION_TOKEN,
+    };
+    if (!metadata || metadata.Name !== process.env.FSK_PARAMETER_EXPECTED_NAME ||
+        metadata.Type !== "String" || !Number.isInteger(metadata.Version) ||
+        !Array.isArray(tags) || Object.values(expected).some((value) => !value)) {
+      process.exit(2);
+    }
+    const byKey = new Map();
+    for (const tag of tags) {
+      if (typeof tag?.Key !== "string" || typeof tag?.Value !== "string" ||
+          byKey.has(tag.Key)) process.exit(2);
+      byKey.set(tag.Key, tag.Value);
+    }
+    if (Object.entries(expected).some(([key, value]) => byKey.get(key) !== value)) {
+      process.exit(2);
+    }
+    const canonicalTags = [...byKey.entries()].sort(([a], [b]) => a.localeCompare(b));
+    process.stdout.write(JSON.stringify({
+      name: metadata.Name,
+      type: metadata.Type,
+      version: metadata.Version,
+      dataType: metadata.DataType ?? "text",
+      tags: canonicalTags,
+    }));
+  '
+}
+
+fsk_assert_task8_parameter_owned() {
+  fsk_snapshot_task8_parameter "${1:?parameter name required}" >/dev/null
+}
+
+fsk_delete_task8_parameter_if_owned() {
+  local parameter_name="${1:?parameter name required}"
+  local snapshot_before=''
+  local snapshot_immediate=''
+  snapshot_before="$(fsk_snapshot_task8_parameter "$parameter_name")" || {
+    echo "TASK8_PARAMETER_OWNERSHIP_DRIFT_BLOCKED:${parameter_name}" >&2
+    return 1
+  }
+  snapshot_immediate="$(fsk_snapshot_task8_parameter "$parameter_name")" || {
+    echo "TASK8_PARAMETER_OWNERSHIP_DRIFT_BLOCKED:${parameter_name}" >&2
+    return 1
+  }
+  if [ "$snapshot_before" != "$snapshot_immediate" ]; then
+    echo "TASK8_PARAMETER_OWNERSHIP_DRIFT_BLOCKED:${parameter_name}" >&2
+    return 1
+  fi
+  timeout --signal=TERM --kill-after=5 20 \
+    aws ssm delete-parameter --region ap-northeast-1 \
+      --name "$parameter_name" >/dev/null || return 1
+  local residual_count=''
+  residual_count="$(timeout --signal=TERM --kill-after=5 20 \
+    aws ssm describe-parameters --region ap-northeast-1 \
+      --parameter-filters "Key=Name,Option=Equals,Values=${parameter_name}" \
+      --query 'length(Parameters)' --output text)" || return 1
+  if [ "$residual_count" -ne 0 ]; then
+    echo "TASK8_PARAMETER_REAPPEARED_BLOCKED:${parameter_name}" >&2
+    return 1
+  fi
+}
+
+fsk_put_task8_worker_status() {
+  local value="${1:?worker status value required}"
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
+  timeout --signal=TERM --kill-after=5 20 \
+    aws ssm put-parameter \
+      --region ap-northeast-1 \
+      --name "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
+      --type String --value "$value" --overwrite \
+      --query Version --output text >/dev/null
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
+}
+
+fsk_worker_init_exit() {
+  local original_status="${1:-1}"
+  local phase="${FSK_WORKER_INIT_PHASE:-UNKNOWN}"
+  trap - EXIT
+  trap '' HUP INT TERM
+  set +e
+  unset DATABASE_URL
+  if ! fsk_put_task8_worker_status "FAILED:WORKER_INIT_${phase}"; then
+    echo 'WORKER_INIT_NOTIFICATION_FAILED_WATCHDOG_REQUIRED' >&2
+    original_status=1
+  fi
+  if [ "$original_status" -eq 0 ]; then original_status=1; fi
+  exit "$original_status"
+}
+
+if [ "$FSK_TASK8_SHELL_ROLE" = worker ]; then
+  FSK_WORKER_INIT_PHASE=COMMON_GUARD
+  trap 'fsk_worker_init_exit "$?"' EXIT
+  trap 'FSK_WORKER_INIT_PHASE=SIGNAL_HUP; exit 129' HUP
+  trap 'FSK_WORKER_INIT_PHASE=SIGNAL_TERM; exit 130' INT TERM
+fi
+
 test "$AWS_REGION" = ap-northeast-1
 test "$AWS_DEFAULT_REGION" = ap-northeast-1
-: "${FSK_CLOUDSHELL_TASK_ID:?set the approved Task 8 id}"
 : "${FSK_VPC_ID:?set the exact Foundation VpcId output}"
+: "${FSK_DB_SECURITY_GROUP_ID:?set the exact Foundation database SG output}"
 : "${FSK_APP_ROUTE_TABLE_A_ID:?set application route table A}"
 : "${FSK_APP_ROUTE_TABLE_B_ID:?set application route table B}"
 : "${FSK_FOUNDATION_COMMIT:?restore the verified foundation commit evidence}"
 : "${FSK_TEMP_EGRESS_DEADLINE_EPOCH:?set the approved Unix deadline}"
 : "${FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH:?set the approved cleanup Unix deadline}"
 : "${FSK_TEMP_EGRESS_CLEANUP_OWNER:?set the approved cleanup owner}"
-: "${FSK_TASK8_SHELL_ROLE:?set control or worker for this CloudShell session}"
+case "$FSK_TASK8_BOOTSTRAP_TOKEN" in
+  ????????-????-4???-[89abAB]???-????????????) ;;
+  *) echo 'TASK8_BOOTSTRAP_TOKEN_INVALID_STOP' >&2; exit 1 ;;
+esac
+case "$FSK_TASK8_OPERATION_TOKEN" in
+  ????????-????-4???-[89abAB]???-????????????) ;;
+  *) echo 'TASK8_OPERATION_TOKEN_INVALID_STOP' >&2; exit 1 ;;
+esac
+test "$FSK_TASK8_BOOTSTRAP_TOKEN" != "$FSK_TASK8_OPERATION_TOKEN"
 case "$FSK_TEMP_EGRESS_DEADLINE_EPOCH" in
   ''|*[!0-9]*) echo 'TEMP_EGRESS_DEADLINE_INVALID_STOP' >&2; exit 1 ;;
 esac
@@ -357,11 +517,21 @@ if [ "$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH" -le \
   echo 'TEMP_EGRESS_CLEANUP_DEADLINE_ORDER_INVALID_STOP' >&2
   exit 1
 fi
-case "$FSK_TASK8_SHELL_ROLE" in
-  control|worker) ;;
-  *) echo 'TASK8_SHELL_ROLE_INVALID_STOP' >&2; exit 1 ;;
-esac
+FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS=180
+FSK_TEMP_EGRESS_CLEANUP_POLL_SECONDS=15
+if [ "$((FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH - FSK_TEMP_EGRESS_DEADLINE_EPOCH))" \
+  -lt "$((FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS + FSK_TEMP_EGRESS_CLEANUP_POLL_SECONDS))" ]; then
+  echo 'TEMP_EGRESS_CLEANUP_WINDOW_TOO_SHORT_STOP' >&2
+  exit 1
+fi
+FSK_EFFECTIVE_AWS_ACCOUNT_ID="$(
+  timeout --signal=TERM --kill-after=5 20 aws sts get-caller-identity \
+    --query Account --output text
+)"
+test "$FSK_EFFECTIVE_AWS_ACCOUNT_ID" = "$FSK_AWS_ACCOUNT_ID"
 
+FSK_OPS_SECURITY_GROUP_ID="${FSK_OPS_SECURITY_GROUP_ID:-}"
+FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="${FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID:-}"
 FSK_TEMP_IGW_ID="${FSK_TEMP_IGW_ID:-}"
 FSK_TEMP_IGW_ATTACHED="${FSK_TEMP_IGW_ATTACHED:-0}"
 FSK_TEMP_PUBLIC_SUBNET_ID="${FSK_TEMP_PUBLIC_SUBNET_ID:-}"
@@ -376,9 +546,7 @@ FSK_TEMP_EGRESS_CLEANUP_RUNNING=0
 FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID="${FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID:-}"
 FSK_TEMP_EGRESS_CONTROL_PARENT_PID="${FSK_TEMP_EGRESS_CONTROL_PARENT_PID:-}"
 FSK_TEMP_EGRESS_PENDING_SIGNAL_STATUS=0
-FSK_TASK8_WORKER_STATUS_PARAMETER="/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}/worker-status"
-FSK_TASK8_CONTROL_STATUS_PARAMETER="/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}/control-status"
-FSK_TASK8_STATE_PARAMETER="/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}/state"
+FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH="${FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH:-0}"
 command -v timeout >/dev/null
 
 fsk_assert_temp_egress_deadline() {
@@ -407,72 +575,118 @@ fsk_run_before_temp_egress_deadline() {
 if [ "$FSK_TASK8_SHELL_ROLE" = control ]; then
 fsk_put_task8_control_status() {
   local value="${1:?control status value required}"
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
   timeout --signal=TERM --kill-after=5 20 \
     aws ssm put-parameter \
       --region ap-northeast-1 \
       --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
       --type String --value "$value" --overwrite \
       --query Version --output text >/dev/null
-}
-fi
-
-if [ "$FSK_TASK8_SHELL_ROLE" = worker ]; then
-fsk_put_task8_worker_status() {
-  local value="${1:?worker status value required}"
-  timeout --signal=TERM --kill-after=5 20 \
-    aws ssm put-parameter \
-      --region ap-northeast-1 \
-      --name "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
-      --type String --value "$value" --overwrite \
-      --query Version --output text >/dev/null
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 }
 fi
 
 if [ "$FSK_TASK8_SHELL_ROLE" = control ]; then
+fsk_render_task8_state() {
+  FSK_AWS_ACCOUNT_ID="$FSK_AWS_ACCOUNT_ID" \
+  FSK_CLOUDSHELL_TASK_ID="$FSK_CLOUDSHELL_TASK_ID" \
+  FSK_TASK8_BOOTSTRAP_TOKEN="$FSK_TASK8_BOOTSTRAP_TOKEN" \
+  FSK_TASK8_OPERATION_TOKEN="$FSK_TASK8_OPERATION_TOKEN" \
+  FSK_VPC_ID="$FSK_VPC_ID" \
+  FSK_DB_SECURITY_GROUP_ID="$FSK_DB_SECURITY_GROUP_ID" \
+  FSK_APP_ROUTE_TABLE_A_ID="$FSK_APP_ROUTE_TABLE_A_ID" \
+  FSK_APP_ROUTE_TABLE_B_ID="$FSK_APP_ROUTE_TABLE_B_ID" \
+  FSK_FOUNDATION_COMMIT="$FSK_FOUNDATION_COMMIT" \
+  FSK_TEMP_EGRESS_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_DEADLINE_EPOCH" \
+  FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH" \
+  FSK_TEMP_EGRESS_CLEANUP_OWNER="$FSK_TEMP_EGRESS_CLEANUP_OWNER" \
+  FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH="${FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH:-0}" \
+  FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS="$FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS" \
+  FSK_OPS_SECURITY_GROUP_ID="${FSK_OPS_SECURITY_GROUP_ID:-}" \
+  FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="${FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID:-}" \
+  FSK_TEMP_IGW_ID="${FSK_TEMP_IGW_ID:-}" \
+  FSK_TEMP_PUBLIC_SUBNET_ID="${FSK_TEMP_PUBLIC_SUBNET_ID:-}" \
+  FSK_TEMP_PUBLIC_ROUTE_TABLE_ID="${FSK_TEMP_PUBLIC_ROUTE_TABLE_ID:-}" \
+  FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID="${FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID:-}" \
+  FSK_TEMP_EIP_ALLOCATION_ID="${FSK_TEMP_EIP_ALLOCATION_ID:-}" \
+  FSK_TEMP_NAT_GATEWAY_ID="${FSK_TEMP_NAT_GATEWAY_ID:-}" \
+  FSK_TEMP_IGW_ATTACHED="${FSK_TEMP_IGW_ATTACHED:-0}" \
+  FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED="${FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED:-0}" \
+  FSK_TEMP_APP_ROUTE_A_CREATED="${FSK_TEMP_APP_ROUTE_A_CREATED:-0}" \
+  FSK_TEMP_APP_ROUTE_B_CREATED="${FSK_TEMP_APP_ROUTE_B_CREATED:-0}" \
+  FSK_CLEANUP_RESULT="${FSK_CLEANUP_RESULT:-PENDING}" \
+  FSK_CLEANUP_TRIGGER="${FSK_CLEANUP_TRIGGER:-PENDING}" \
+  FSK_CLEANUP_ATTEMPTS="${FSK_TEMP_EGRESS_CLEANUP_ATTEMPTS:-0}" \
+  FSK_STABLE_ZERO_OBSERVATIONS="${FSK_TEMP_EGRESS_STABLE_ZERO_OBSERVATIONS:-0}" \
+  FSK_STABLE_ZERO_STARTED_EPOCH="${FSK_TEMP_EGRESS_STABLE_ZERO_STARTED_EPOCH:-0}" \
+  FSK_STABLE_ZERO_DURATION_SECONDS="${FSK_TEMP_EGRESS_STABLE_ZERO_DURATION_SECONDS:-0}" \
+  FSK_APP_ROUTE_COUNT="${FSK_TEMP_EGRESS_APP_ROUTE_RESIDUAL_COUNT:-UNKNOWN}" \
+  FSK_NAT_COUNT="${FSK_TEMP_EGRESS_NAT_RESIDUAL_COUNT:-UNKNOWN}" \
+  FSK_EIP_COUNT="${FSK_TEMP_EGRESS_EIP_RESIDUAL_COUNT:-UNKNOWN}" \
+  FSK_ROUTE_TABLE_COUNT="${FSK_TEMP_EGRESS_ROUTE_TABLE_RESIDUAL_COUNT:-UNKNOWN}" \
+  FSK_SUBNET_COUNT="${FSK_TEMP_EGRESS_SUBNET_RESIDUAL_COUNT:-UNKNOWN}" \
+  FSK_IGW_COUNT="${FSK_TEMP_EGRESS_IGW_RESIDUAL_COUNT:-UNKNOWN}" \
+  FSK_OPS_SG_COUNT="${FSK_TEMP_OPS_SG_RESIDUAL_COUNT:-UNKNOWN}" \
+  FSK_DB_INGRESS_COUNT="${FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT:-UNKNOWN}" \
+  node -e '
+    const retainedKeys = [
+      "FSK_AWS_ACCOUNT_ID",
+      "FSK_CLOUDSHELL_TASK_ID",
+      "FSK_TASK8_BOOTSTRAP_TOKEN",
+      "FSK_TASK8_OPERATION_TOKEN",
+      "FSK_VPC_ID",
+      "FSK_DB_SECURITY_GROUP_ID",
+      "FSK_APP_ROUTE_TABLE_A_ID",
+      "FSK_APP_ROUTE_TABLE_B_ID",
+      "FSK_FOUNDATION_COMMIT",
+      "FSK_TEMP_EGRESS_DEADLINE_EPOCH",
+      "FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH",
+      "FSK_TEMP_EGRESS_CLEANUP_OWNER",
+      "FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH",
+      "FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS",
+      "FSK_OPS_SECURITY_GROUP_ID",
+      "FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID",
+      "FSK_TEMP_IGW_ID",
+      "FSK_TEMP_PUBLIC_SUBNET_ID",
+      "FSK_TEMP_PUBLIC_ROUTE_TABLE_ID",
+      "FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID",
+      "FSK_TEMP_EIP_ALLOCATION_ID",
+      "FSK_TEMP_NAT_GATEWAY_ID",
+      "FSK_TEMP_IGW_ATTACHED",
+      "FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED",
+      "FSK_TEMP_APP_ROUTE_A_CREATED",
+      "FSK_TEMP_APP_ROUTE_B_CREATED",
+    ];
+    const retained = Object.fromEntries(
+      retainedKeys.map((key) => [key, process.env[key] ?? ""]),
+    );
+    process.stdout.write(JSON.stringify({
+      version: 2,
+      ...retained,
+      cleanupResult: process.env.FSK_CLEANUP_RESULT,
+      cleanupTrigger: process.env.FSK_CLEANUP_TRIGGER,
+      cleanupAttempts: process.env.FSK_CLEANUP_ATTEMPTS,
+      stableZeroObservations: process.env.FSK_STABLE_ZERO_OBSERVATIONS,
+      stableZeroStartedEpoch: process.env.FSK_STABLE_ZERO_STARTED_EPOCH,
+      stableZeroDurationSeconds: process.env.FSK_STABLE_ZERO_DURATION_SECONDS,
+      counts: {
+        applicationRouteCount: process.env.FSK_APP_ROUTE_COUNT,
+        natGatewayCount: process.env.FSK_NAT_COUNT,
+        elasticIpCount: process.env.FSK_EIP_COUNT,
+        routeTableCount: process.env.FSK_ROUTE_TABLE_COUNT,
+        subnetCount: process.env.FSK_SUBNET_COUNT,
+        internetGatewayCount: process.env.FSK_IGW_COUNT,
+        operationsSecurityGroupCount: process.env.FSK_OPS_SG_COUNT,
+        databaseIngressRuleCount: process.env.FSK_DB_INGRESS_COUNT,
+      },
+    }));
+  '
+}
+
 fsk_persist_temp_egress_state() {
   local state
-  state="$(
-    FSK_TEMP_IGW_ID="${FSK_TEMP_IGW_ID:-}" \
-    FSK_TEMP_PUBLIC_SUBNET_ID="${FSK_TEMP_PUBLIC_SUBNET_ID:-}" \
-    FSK_TEMP_PUBLIC_ROUTE_TABLE_ID="${FSK_TEMP_PUBLIC_ROUTE_TABLE_ID:-}" \
-    FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID="${FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID:-}" \
-    FSK_TEMP_EIP_ALLOCATION_ID="${FSK_TEMP_EIP_ALLOCATION_ID:-}" \
-    FSK_TEMP_NAT_GATEWAY_ID="${FSK_TEMP_NAT_GATEWAY_ID:-}" \
-    FSK_TEMP_IGW_ATTACHED="${FSK_TEMP_IGW_ATTACHED:-0}" \
-    FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED="${FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED:-0}" \
-    FSK_TEMP_APP_ROUTE_A_CREATED="${FSK_TEMP_APP_ROUTE_A_CREATED:-0}" \
-    FSK_TEMP_APP_ROUTE_B_CREATED="${FSK_TEMP_APP_ROUTE_B_CREATED:-0}" \
-    FSK_CLOUDSHELL_TASK_ID="$FSK_CLOUDSHELL_TASK_ID" \
-    FSK_VPC_ID="$FSK_VPC_ID" \
-    FSK_APP_ROUTE_TABLE_A_ID="$FSK_APP_ROUTE_TABLE_A_ID" \
-    FSK_APP_ROUTE_TABLE_B_ID="$FSK_APP_ROUTE_TABLE_B_ID" \
-    FSK_TEMP_EGRESS_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_DEADLINE_EPOCH" \
-    FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH" \
-    FSK_FOUNDATION_COMMIT="$FSK_FOUNDATION_COMMIT" \
-    node -e '
-      const keys = [
-        "FSK_CLOUDSHELL_TASK_ID",
-        "FSK_VPC_ID",
-        "FSK_APP_ROUTE_TABLE_A_ID",
-        "FSK_APP_ROUTE_TABLE_B_ID",
-        "FSK_TEMP_EGRESS_DEADLINE_EPOCH",
-        "FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH",
-        "FSK_FOUNDATION_COMMIT",
-        "FSK_TEMP_IGW_ID",
-        "FSK_TEMP_PUBLIC_SUBNET_ID",
-        "FSK_TEMP_PUBLIC_ROUTE_TABLE_ID",
-        "FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID",
-        "FSK_TEMP_EIP_ALLOCATION_ID",
-        "FSK_TEMP_NAT_GATEWAY_ID",
-        "FSK_TEMP_IGW_ATTACHED",
-        "FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED",
-        "FSK_TEMP_APP_ROUTE_A_CREATED",
-        "FSK_TEMP_APP_ROUTE_B_CREATED",
-      ];
-      const state = Object.fromEntries(keys.map((key) => [key, process.env[key] ?? ""]));
-      process.stdout.write(JSON.stringify({ version: 1, ...state }));
-    '
-  )"
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
+  state="$(fsk_render_task8_state)"
   FSK_TASK8_STATE_PARAMETER_VERSION="$(
     fsk_run_before_temp_egress_deadline aws ssm put-parameter \
       --region ap-northeast-1 \
@@ -483,48 +697,22 @@ fsk_persist_temp_egress_state() {
   case "$FSK_TASK8_STATE_PARAMETER_VERSION" in
     ''|*[!0-9]*) echo 'TASK8_STATE_VERSION_INVALID_STOP' >&2; return 1 ;;
   esac
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
 }
 
 fsk_persist_cleanup_result() {
   local result="${1:?cleanup result required}"
   local state
-  state="$(
-    FSK_CLEANUP_RESULT="$result" \
-    FSK_APP_ROUTE_COUNT="${FSK_TEMP_EGRESS_APP_ROUTE_RESIDUAL_COUNT:-UNKNOWN}" \
-    FSK_NAT_COUNT="${FSK_TEMP_EGRESS_NAT_RESIDUAL_COUNT:-UNKNOWN}" \
-    FSK_EIP_COUNT="${FSK_TEMP_EGRESS_EIP_RESIDUAL_COUNT:-UNKNOWN}" \
-    FSK_ROUTE_TABLE_COUNT="${FSK_TEMP_EGRESS_ROUTE_TABLE_RESIDUAL_COUNT:-UNKNOWN}" \
-    FSK_SUBNET_COUNT="${FSK_TEMP_EGRESS_SUBNET_RESIDUAL_COUNT:-UNKNOWN}" \
-    FSK_IGW_COUNT="${FSK_TEMP_EGRESS_IGW_RESIDUAL_COUNT:-UNKNOWN}" \
-    FSK_CLEANUP_ATTEMPTS="${FSK_TEMP_EGRESS_CLEANUP_ATTEMPTS:-UNKNOWN}" \
-    FSK_STABLE_ZERO_OBSERVATIONS="${FSK_TEMP_EGRESS_STABLE_ZERO_OBSERVATIONS:-UNKNOWN}" \
-    node -e '
-      const names = {
-        applicationRouteCount: "FSK_APP_ROUTE_COUNT",
-        natGatewayCount: "FSK_NAT_COUNT",
-        elasticIpCount: "FSK_EIP_COUNT",
-        routeTableCount: "FSK_ROUTE_TABLE_COUNT",
-        subnetCount: "FSK_SUBNET_COUNT",
-        internetGatewayCount: "FSK_IGW_COUNT",
-      };
-      const counts = Object.fromEntries(
-        Object.entries(names).map(([key, env]) => [key, process.env[env] ?? "UNKNOWN"]),
-      );
-      process.stdout.write(JSON.stringify({
-        version: 1,
-        cleanupResult: process.env.FSK_CLEANUP_RESULT,
-        cleanupAttempts: process.env.FSK_CLEANUP_ATTEMPTS,
-        stableZeroObservations: process.env.FSK_STABLE_ZERO_OBSERVATIONS,
-        counts,
-      }));
-    '
-  )"
-  timeout --signal=TERM --kill-after=5 20 \
-    aws ssm put-parameter \
+  FSK_CLEANUP_RESULT="$result"
+  export FSK_CLEANUP_RESULT
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
+  state="$(fsk_render_task8_state)"
+  fsk_run_before_cleanup_deadline 20 aws ssm put-parameter \
       --region ap-northeast-1 \
       --name "$FSK_TASK8_STATE_PARAMETER" \
       --type String --value "$state" --overwrite \
       --query Version --output text >/dev/null
+  fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
 }
 
 fsk_run_before_cleanup_deadline() {
@@ -540,6 +728,104 @@ fsk_run_before_cleanup_deadline() {
   limit="$requested"
   if [ "$remaining" -lt "$limit" ]; then limit="$remaining"; fi
   timeout --signal=TERM --kill-after=10 "$limit" "$@"
+}
+
+fsk_discover_owned_operations_security_group() {
+  local ids=''
+  local count=0
+  ids="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-security-groups \
+    --region ap-northeast-1 \
+    --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+      "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+    --query 'SecurityGroups[].GroupId' --output text)" || return 1
+  for id in $ids; do
+    [ "$id" = None ] && continue
+    count=$((count + 1))
+    printf '%s\n' "$id"
+  done
+  if [ "$count" -gt 1 ]; then
+    echo 'OWNERSHIP_REVALIDATION_FAILED_BLOCKED:OPERATIONS_SG_COUNT' >&2
+    return 1
+  fi
+}
+
+fsk_cleanup_operations_access_once() {
+  local cleanup_failed=0
+  local sg_ids=''
+  local rule_ids=''
+  local sg_id=''
+  local rule_id=''
+  local value=''
+  sg_ids="$(fsk_discover_owned_operations_security_group)" || cleanup_failed=1
+  rule_ids="$(fsk_run_before_cleanup_deadline 30 \
+    aws ec2 describe-security-group-rules \
+      --region ap-northeast-1 \
+      --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
+        "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+      --query 'SecurityGroupRules[?IsEgress==`false` && IpProtocol==`tcp` && FromPort==`5432` && ToPort==`5432` && ReferencedGroupInfo.GroupId!=`null`].SecurityGroupRuleId' \
+      --output text)" || {
+        echo 'OWNERSHIP_REVALIDATION_FAILED_BLOCKED:DB_INGRESS' >&2
+        cleanup_failed=1
+        rule_ids=''
+      }
+  for rule_id in $rule_ids; do
+    [ "$rule_id" = None ] && continue
+    FSK_TEMP_EGRESS_RESOURCES_DISCOVERED_THIS_ATTEMPT=1
+    fsk_run_before_cleanup_deadline 30 \
+      aws ec2 revoke-security-group-ingress \
+        --region ap-northeast-1 \
+        --group-id "$FSK_DB_SECURITY_GROUP_ID" \
+        --security-group-rule-ids "$rule_id" >/dev/null || cleanup_failed=1
+  done
+  for sg_id in $sg_ids; do
+    [ "$sg_id" = None ] && continue
+    FSK_TEMP_EGRESS_RESOURCES_DISCOVERED_THIS_ATTEMPT=1
+    fsk_run_before_cleanup_deadline 30 aws ec2 delete-security-group \
+      --region ap-northeast-1 --group-id "$sg_id" \
+      >/dev/null || cleanup_failed=1
+  done
+
+  if value="$(fsk_run_before_cleanup_deadline 30 \
+    aws ec2 describe-security-group-rules \
+      --region ap-northeast-1 \
+      --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
+        "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+      --query 'length(SecurityGroupRules[?IsEgress==`false` && IpProtocol==`tcp` && FromPort==`5432` && ToPort==`5432` && ReferencedGroupInfo.GroupId!=`null`])' \
+      --output text)" && \
+      [[ "$value" =~ ^[0-9]+$ ]]; then
+    FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT="$value"
+  else
+    FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT=UNKNOWN
+    cleanup_failed=1
+  fi
+  if value="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-security-groups \
+    --region ap-northeast-1 \
+    --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+      "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+    --query 'length(SecurityGroups)' --output text)" && \
+      [[ "$value" =~ ^[0-9]+$ ]]; then
+    FSK_TEMP_OPS_SG_RESIDUAL_COUNT="$value"
+  else
+    FSK_TEMP_OPS_SG_RESIDUAL_COUNT=UNKNOWN
+    cleanup_failed=1
+  fi
+  if [ "$cleanup_failed" -ne 0 ] || \
+    [ "$FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT" -ne 0 ] || \
+    [ "$FSK_TEMP_OPS_SG_RESIDUAL_COUNT" -ne 0 ]; then
+    return 1
+  fi
 }
 
 fsk_cleanup_temp_egress_once() {
@@ -569,21 +855,24 @@ fsk_cleanup_temp_egress_once() {
   if nat_ids="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-nat-gateways \
     --region ap-northeast-1 \
     --filter "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'NatGateways[?State!=`deleted`].NatGatewayId' --output text)"; then
     :
   else
     cleanup_failed=1
     nat_ids=''
   fi
-  if [ -n "${FSK_TEMP_NAT_GATEWAY_ID:-}" ]; then
-    case " $nat_ids " in
-      *" ${FSK_TEMP_NAT_GATEWAY_ID} "*) ;;
-      *) nat_ids="$nat_ids ${FSK_TEMP_NAT_GATEWAY_ID}" ;;
-    esac
-  fi
-
   for id in "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID"; do
+    if [ "$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-route-tables \
+      --region ap-northeast-1 --route-table-ids "$id" \
+      --query 'RouteTables[0].VpcId' --output text)" != "$FSK_VPC_ID" ]; then
+      echo 'OWNERSHIP_REVALIDATION_FAILED_BLOCKED:APPLICATION_ROUTE_TABLE' >&2
+      cleanup_failed=1
+      continue
+    fi
     if route_target="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-route-tables \
       --region ap-northeast-1 --route-table-ids "$id" \
       --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId | [0]' \
@@ -613,18 +902,15 @@ fsk_cleanup_temp_egress_once() {
 
   if eip_ids="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-addresses \
     --region ap-northeast-1 \
-    --filters "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+    --filters "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+      "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'Addresses[].AllocationId' --output text)"; then
     :
   else
     cleanup_failed=1
     eip_ids=''
-  fi
-  if [ -n "${FSK_TEMP_EIP_ALLOCATION_ID:-}" ]; then
-    case " $eip_ids " in
-      *" ${FSK_TEMP_EIP_ALLOCATION_ID} "*) ;;
-      *) eip_ids="$eip_ids ${FSK_TEMP_EIP_ALLOCATION_ID}" ;;
-    esac
   fi
   for id in $eip_ids; do
     [ "$id" = None ] && continue
@@ -636,18 +922,15 @@ fsk_cleanup_temp_egress_once() {
   if route_table_ids="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-route-tables \
     --region ap-northeast-1 \
     --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'RouteTables[].RouteTableId' --output text)"; then
     :
   else
     cleanup_failed=1
     route_table_ids=''
-  fi
-  if [ -n "${FSK_TEMP_PUBLIC_ROUTE_TABLE_ID:-}" ]; then
-    case " $route_table_ids " in
-      *" ${FSK_TEMP_PUBLIC_ROUTE_TABLE_ID} "*) ;;
-      *) route_table_ids="$route_table_ids ${FSK_TEMP_PUBLIC_ROUTE_TABLE_ID}" ;;
-    esac
   fi
   for id in $route_table_ids; do
     [ "$id" = None ] && continue
@@ -671,18 +954,15 @@ fsk_cleanup_temp_egress_once() {
   if subnet_ids="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-subnets \
     --region ap-northeast-1 \
     --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'Subnets[].SubnetId' --output text)"; then
     :
   else
     cleanup_failed=1
     subnet_ids=''
-  fi
-  if [ -n "${FSK_TEMP_PUBLIC_SUBNET_ID:-}" ]; then
-    case " $subnet_ids " in
-      *" ${FSK_TEMP_PUBLIC_SUBNET_ID} "*) ;;
-      *) subnet_ids="$subnet_ids ${FSK_TEMP_PUBLIC_SUBNET_ID}" ;;
-    esac
   fi
   for id in $subnet_ids; do
     [ "$id" = None ] && continue
@@ -693,18 +973,15 @@ fsk_cleanup_temp_egress_once() {
 
   if igw_ids="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-internet-gateways \
     --region ap-northeast-1 \
-    --filters "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+    --filters "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+      "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'InternetGateways[].InternetGatewayId' --output text)"; then
     :
   else
     cleanup_failed=1
     igw_ids=''
-  fi
-  if [ -n "${FSK_TEMP_IGW_ID:-}" ]; then
-    case " $igw_ids " in
-      *" ${FSK_TEMP_IGW_ID} "*) ;;
-      *) igw_ids="$igw_ids ${FSK_TEMP_IGW_ID}" ;;
-    esac
   fi
   for id in $igw_ids; do
     [ "$id" = None ] && continue
@@ -713,14 +990,22 @@ fsk_cleanup_temp_egress_once() {
       --region ap-northeast-1 --internet-gateway-ids "$id" \
       --query 'InternetGateways[0].Attachments[].VpcId' --output text)" || \
       cleanup_failed=1
-    for candidate in $attachment_vpc_ids; do
-      [ "$candidate" = None ] && continue
+    case " ${attachment_vpc_ids:-} " in
+      '  '|' None ') ;;
+      " ${FSK_VPC_ID} ")
       fsk_run_before_cleanup_deadline 30 aws ec2 detach-internet-gateway --region ap-northeast-1 \
-        --internet-gateway-id "$id" --vpc-id "$candidate" \
+        --internet-gateway-id "$id" --vpc-id "$FSK_VPC_ID" \
         >/dev/null 2>&1 || true
-    done
-    fsk_run_before_cleanup_deadline 30 aws ec2 delete-internet-gateway --region ap-northeast-1 \
-      --internet-gateway-id "$id" >/dev/null 2>&1 || true
+        ;;
+      *)
+        echo 'OWNERSHIP_REVALIDATION_FAILED_BLOCKED:IGW_ATTACHMENT' >&2
+        cleanup_failed=1
+        continue
+        ;;
+    esac
+    fsk_run_before_cleanup_deadline 30 aws ec2 delete-internet-gateway \
+      --region ap-northeast-1 --internet-gateway-id "$id" \
+      >/dev/null 2>&1 || true
   done
 
   if value="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-route-tables --region ap-northeast-1 \
@@ -734,7 +1019,10 @@ fsk_cleanup_temp_egress_once() {
   fi
   if value="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-nat-gateways --region ap-northeast-1 \
     --filter "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'length(NatGateways[?State!=`deleted`])' --output text)" && \
     [[ "$value" =~ ^[0-9]+$ ]]; then
     FSK_TEMP_EGRESS_NAT_RESIDUAL_COUNT="$value"
@@ -743,7 +1031,10 @@ fsk_cleanup_temp_egress_once() {
     cleanup_failed=1
   fi
   if value="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-addresses --region ap-northeast-1 \
-    --filters "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+    --filters "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+      "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'length(Addresses)' --output text)" && [[ "$value" =~ ^[0-9]+$ ]]; then
     FSK_TEMP_EGRESS_EIP_RESIDUAL_COUNT="$value"
     residual_total=$((residual_total + value))
@@ -752,7 +1043,10 @@ fsk_cleanup_temp_egress_once() {
   fi
   if value="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-route-tables --region ap-northeast-1 \
     --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'length(RouteTables)' --output text)" && [[ "$value" =~ ^[0-9]+$ ]]; then
     FSK_TEMP_EGRESS_ROUTE_TABLE_RESIDUAL_COUNT="$value"
     residual_total=$((residual_total + value))
@@ -761,7 +1055,10 @@ fsk_cleanup_temp_egress_once() {
   fi
   if value="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-subnets --region ap-northeast-1 \
     --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'length(Subnets)' --output text)" && [[ "$value" =~ ^[0-9]+$ ]]; then
     FSK_TEMP_EGRESS_SUBNET_RESIDUAL_COUNT="$value"
     residual_total=$((residual_total + value))
@@ -769,12 +1066,30 @@ fsk_cleanup_temp_egress_once() {
     cleanup_failed=1
   fi
   if value="$(fsk_run_before_cleanup_deadline 30 aws ec2 describe-internet-gateways --region ap-northeast-1 \
-    --filters "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+    --filters "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+      "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
     --query 'length(InternetGateways)' --output text)" && [[ "$value" =~ ^[0-9]+$ ]]; then
     FSK_TEMP_EGRESS_IGW_RESIDUAL_COUNT="$value"
     residual_total=$((residual_total + value))
   else
     cleanup_failed=1
+  fi
+
+  if fsk_cleanup_operations_access_once; then
+    residual_total=$((residual_total + FSK_TEMP_OPS_SG_RESIDUAL_COUNT + \
+      FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT))
+  else
+    cleanup_failed=1
+    case "${FSK_TEMP_OPS_SG_RESIDUAL_COUNT:-UNKNOWN}" in
+      ''|*[!0-9]*) ;;
+      *) residual_total=$((residual_total + FSK_TEMP_OPS_SG_RESIDUAL_COUNT)) ;;
+    esac
+    case "${FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT:-UNKNOWN}" in
+      ''|*[!0-9]*) ;;
+      *) residual_total=$((residual_total + FSK_TEMP_DB_INGRESS_RESIDUAL_COUNT)) ;;
+    esac
   fi
 
   FSK_TEMP_EGRESS_RESIDUAL_TOTAL="$residual_total"
@@ -784,16 +1099,6 @@ fsk_cleanup_temp_egress_once() {
     echo 'TEMP_EGRESS_CLEANUP_BLOCKED_RESIDUAL_OR_QUERY_FAILURE' >&2
     return 1
   fi
-  FSK_TEMP_IGW_ID=''
-  FSK_TEMP_IGW_ATTACHED=0
-  FSK_TEMP_PUBLIC_SUBNET_ID=''
-  FSK_TEMP_PUBLIC_ROUTE_TABLE_ID=''
-  FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID=''
-  FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED=0
-  FSK_TEMP_EIP_ALLOCATION_ID=''
-  FSK_TEMP_NAT_GATEWAY_ID=''
-  FSK_TEMP_APP_ROUTE_A_CREATED=0
-  FSK_TEMP_APP_ROUTE_B_CREATED=0
   FSK_TEMP_EGRESS_CLEANUP_RUNNING=0
   if [ "$had_errexit" -eq 1 ]; then set -e; fi
   echo 'TEMP_EGRESS_CLEANUP_PASS'
@@ -803,24 +1108,40 @@ fsk_cleanup_temp_egress_once() {
 fsk_cleanup_temp_egress() {
   local stable_zero_count=0
   local attempt=0
-  local sleep_seconds=15
+  local sleep_seconds="$FSK_TEMP_EGRESS_CLEANUP_POLL_SECONDS"
+  local now=0
+  FSK_TEMP_EGRESS_STABLE_ZERO_STARTED_EPOCH=0
+  FSK_TEMP_EGRESS_STABLE_ZERO_DURATION_SECONDS=0
   while [ "$(date +%s)" -lt "$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH" ]; do
     attempt=$((attempt + 1))
     if fsk_cleanup_temp_egress_once && \
       [ "${FSK_TEMP_EGRESS_RESIDUAL_TOTAL:-UNKNOWN}" = 0 ]; then
       if [ "${FSK_TEMP_EGRESS_RESOURCES_DISCOVERED_THIS_ATTEMPT:-1}" -eq 0 ]; then
+        now="$(date +%s)"
+        if [ "$stable_zero_count" -eq 0 ]; then
+          FSK_TEMP_EGRESS_STABLE_ZERO_STARTED_EPOCH="$now"
+        fi
         stable_zero_count=$((stable_zero_count + 1))
+        FSK_TEMP_EGRESS_STABLE_ZERO_DURATION_SECONDS=$((
+          now - FSK_TEMP_EGRESS_STABLE_ZERO_STARTED_EPOCH
+        ))
       else
         stable_zero_count=0
+        FSK_TEMP_EGRESS_STABLE_ZERO_STARTED_EPOCH=0
+        FSK_TEMP_EGRESS_STABLE_ZERO_DURATION_SECONDS=0
       fi
-      if [ "$stable_zero_count" -ge 3 ]; then
+      if [ "$stable_zero_count" -ge 3 ] && \
+        [ "$FSK_TEMP_EGRESS_STABLE_ZERO_DURATION_SECONDS" -ge \
+          "$FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS" ]; then
         FSK_TEMP_EGRESS_CLEANUP_ATTEMPTS="$attempt"
         FSK_TEMP_EGRESS_STABLE_ZERO_OBSERVATIONS="$stable_zero_count"
-        echo 'TEMP_EGRESS_CLEANUP_STABLE_ZERO_PASS'
+        echo 'TEMP_EGRESS_CLEANUP_MIN_WINDOW_STABLE_ZERO_PASS'
         return 0
       fi
     else
       stable_zero_count=0
+      FSK_TEMP_EGRESS_STABLE_ZERO_STARTED_EPOCH=0
+      FSK_TEMP_EGRESS_STABLE_ZERO_DURATION_SECONDS=0
     fi
     if [ "$(( $(date +%s) + sleep_seconds ))" -ge \
       "$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH" ]; then
@@ -830,6 +1151,7 @@ fsk_cleanup_temp_egress() {
   done
   FSK_TEMP_EGRESS_CLEANUP_ATTEMPTS="$attempt"
   FSK_TEMP_EGRESS_STABLE_ZERO_OBSERVATIONS="$stable_zero_count"
+  FSK_CLEANUP_RESULT=BLOCKED
   echo 'TEMP_EGRESS_CLEANUP_RETRY_DEADLINE_BLOCKED_OWNER_REQUIRED' >&2
   return 1
 }
@@ -850,7 +1172,8 @@ fsk_control_exit() {
     wait "$FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID" >/dev/null 2>&1 || true
     FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID=''
   fi
-  if control_status_before_cleanup="$(
+  if fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER" && \
+    control_status_before_cleanup="$(
     timeout --signal=TERM --kill-after=5 20 \
       aws ssm get-parameter \
         --region ap-northeast-1 \
@@ -866,6 +1189,7 @@ fsk_control_exit() {
       echo 'CONTROL_TERMINAL_STATUS_PRESERVED_DURING_EXIT_RECHECK'
       ;;
     CONTROL_ARMED)
+      FSK_CLEANUP_TRIGGER="CONTROL_EXIT_${original_status}"
       if [ "$cleanup_status" -eq 0 ]; then
         if fsk_persist_cleanup_result PASS; then
           fsk_put_task8_control_status \
@@ -914,6 +1238,9 @@ fsk_control_watchdog() {
     trigger=''
     if [ "$(date +%s)" -ge "$FSK_TEMP_EGRESS_DEADLINE_EPOCH" ]; then
       trigger=DEADLINE
+    elif ! fsk_assert_task8_parameter_owned \
+      "$FSK_TASK8_WORKER_STATUS_PARAMETER"; then
+      trigger=STATUS_OWNERSHIP_DRIFT
     elif status="$(timeout --signal=TERM --kill-after=5 20 \
       aws ssm get-parameter \
       --region ap-northeast-1 --name "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
@@ -921,6 +1248,12 @@ fsk_control_watchdog() {
       read_failures=0
       case "$status" in
         FAILED:*|READY_FOR_CLEANUP) trigger="$status" ;;
+        NOT_STARTED)
+          if [ "${FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH:-0}" -gt 0 ] && \
+            [ "$(date +%s)" -ge "$FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH" ]; then
+            trigger=WORKER_INIT_TIMEOUT
+          fi
+          ;;
       esac
     else
       read_failures=$((read_failures + 1))
@@ -930,6 +1263,7 @@ fsk_control_watchdog() {
     fi
 
     if [ -n "$trigger" ]; then
+      FSK_CLEANUP_TRIGGER="$trigger"
       fsk_cleanup_temp_egress
       cleanup_status=$?
       if [ "$cleanup_status" -eq 0 ]; then
@@ -979,7 +1313,7 @@ fsk_worker_exit() {
 fi
 ```
 
-先只读确认 worker-status/control-status/state 三个 parameters 都不存在；发现任何同名参数必须零写入、零删除地 `STOP`。空值确认通过后生成非敏感 bootstrap ownership token，并在第一次 parameter 写入前安装 bootstrap trap。trap 只删除同时带本次 `BootstrapToken` 的参数，所以既能回收 response-loss 后实际已创建的参数，也绝不会删除竞态中由其他执行者创建的同名参数。三个参数都带四个项目标签、TaskId 和 ownership token；worker-status 只由 worker 更新，control-status/state 只由 control 更新，避免 read-then-overwrite 覆盖 terminal cleanup。全部创建成功后才切换为 control EXIT/INT/TERM trap 并启动 poller：
+先只读确认本次高熵 namespace 下的 worker-status/control-status/state 都不存在；任一同名参数已存在时必须零写入、零删除地 `STOP`。空值确认后在第一次 parameter write 前安装 bootstrap trap。该 trap 对每个可能 response-loss 的参数重新读取 metadata 与完整 tags 两次，只在两份快照一致且 `BootstrapToken`、`OperationToken` 都属于本操作时删除；被删重建、tag/版本漂移或查询失败一律拒删并记 `BLOCKED`。三个参数都建立并复验 ownership 后，才切换为 control EC2/SSM cleanup trap；watchdog 在资源创建完成且短 worker-init deadline 写入 state 后启动：
 
 ```bash
 set -euo pipefail
@@ -1012,40 +1346,34 @@ test "$FSK_TASK8_WORKER_STATUS_PARAMETER_COUNT" -eq 0
 test "$FSK_TASK8_CONTROL_STATUS_PARAMETER_COUNT" -eq 0
 test "$FSK_TASK8_STATE_PARAMETER_COUNT" -eq 0
 
-FSK_TASK8_BOOTSTRAP_TOKEN="$(
-  fsk_run_before_temp_egress_deadline \
-    node -e 'process.stdout.write(require("node:crypto").randomUUID())'
-)"
-case "$FSK_TASK8_BOOTSTRAP_TOKEN" in
-  ????????-????-????-????-????????????) ;;
-  *) echo 'TASK8_BOOTSTRAP_TOKEN_INVALID_STOP' >&2; exit 1 ;;
-esac
 fsk_delete_bootstrap_parameter_if_owned() {
   local parameter_name="${1:?parameter name required}"
-  local owned_count
-  owned_count="$(
-    timeout --signal=TERM --kill-after=5 20 \
-      aws ssm list-tags-for-resource \
-        --region ap-northeast-1 \
-        --resource-type Parameter \
-        --resource-id "$parameter_name" \
-        --query "length(TagList[?Key=='BootstrapToken' && Value=='${FSK_TASK8_BOOTSTRAP_TOKEN}'])" \
-        --output text 2>/dev/null
-  )" || return 0
-  if [ "$owned_count" = 1 ]; then
-    timeout --signal=TERM --kill-after=5 20 \
-      aws ssm delete-parameter --region ap-northeast-1 \
-        --name "$parameter_name" >/dev/null 2>&1 || true
+  local count=''
+  count="$(timeout --signal=TERM --kill-after=5 20 \
+    aws ssm describe-parameters --region ap-northeast-1 \
+      --parameter-filters "Key=Name,Option=Equals,Values=${parameter_name}" \
+      --query 'length(Parameters)' --output text)" || return 1
+  if [ "$count" -eq 0 ]; then
+    return 0
   fi
+  test "$count" -eq 1 || return 1
+  fsk_delete_task8_parameter_if_owned "$parameter_name"
 }
 fsk_control_parameter_bootstrap_exit() {
   local original_status="${1:-1}"
+  local blocked=0
   trap - EXIT
   trap '' HUP INT TERM
   set +e
-  fsk_delete_bootstrap_parameter_if_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
-  fsk_delete_bootstrap_parameter_if_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
-  fsk_delete_bootstrap_parameter_if_owned "$FSK_TASK8_STATE_PARAMETER"
+  fsk_delete_bootstrap_parameter_if_owned \
+    "$FSK_TASK8_WORKER_STATUS_PARAMETER" || blocked=1
+  fsk_delete_bootstrap_parameter_if_owned \
+    "$FSK_TASK8_CONTROL_STATUS_PARAMETER" || blocked=1
+  fsk_delete_bootstrap_parameter_if_owned \
+    "$FSK_TASK8_STATE_PARAMETER" || blocked=1
+  if [ "$blocked" -ne 0 ]; then
+    echo 'TASK8_PARAMETER_BOOTSTRAP_CLEANUP_BLOCKED_OWNER_REQUIRED' >&2
+  fi
   if [ "$original_status" -eq 0 ]; then original_status=1; fi
   exit "$original_status"
 }
@@ -1064,8 +1392,11 @@ if ! FSK_TASK8_WORKER_STATUS_PARAMETER_VERSION="$(
     Key=Environment,Value=staging \
     Key=ManagedBy,Value=AmplifyGen2 \
     Key=CostCenter,Value=FSK \
+    "Key=AccountId,Value=${FSK_AWS_ACCOUNT_ID}" \
+    "Key=VpcId,Value=${FSK_VPC_ID}" \
     "Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}" \
     "Key=BootstrapToken,Value=${FSK_TASK8_BOOTSTRAP_TOKEN}" \
+    "Key=OperationToken,Value=${FSK_TASK8_OPERATION_TOKEN}" \
   --query Version --output text
 )"; then
   exit 1
@@ -1083,8 +1414,11 @@ if ! FSK_TASK8_CONTROL_STATUS_PARAMETER_VERSION="$(
     Key=Environment,Value=staging \
     Key=ManagedBy,Value=AmplifyGen2 \
     Key=CostCenter,Value=FSK \
+    "Key=AccountId,Value=${FSK_AWS_ACCOUNT_ID}" \
+    "Key=VpcId,Value=${FSK_VPC_ID}" \
     "Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}" \
     "Key=BootstrapToken,Value=${FSK_TASK8_BOOTSTRAP_TOKEN}" \
+    "Key=OperationToken,Value=${FSK_TASK8_OPERATION_TOKEN}" \
   --query Version --output text
 )"; then
   exit 1
@@ -1092,18 +1426,22 @@ fi
 case "$FSK_TASK8_CONTROL_STATUS_PARAMETER_VERSION" in
   ''|*[!0-9]*) exit 1 ;;
 esac
+FSK_TASK8_INITIAL_STATE_JSON="$(fsk_render_task8_state)"
 if ! FSK_TASK8_INITIAL_STATE_PARAMETER_VERSION="$(
   fsk_run_before_temp_egress_deadline aws ssm put-parameter \
   --region ap-northeast-1 \
   --name "$FSK_TASK8_STATE_PARAMETER" \
-  --type String --value '{"version":1}' \
+  --type String --value "$FSK_TASK8_INITIAL_STATE_JSON" \
   --tags \
     Key=Project,Value=FSK \
     Key=Environment,Value=staging \
     Key=ManagedBy,Value=AmplifyGen2 \
     Key=CostCenter,Value=FSK \
+    "Key=AccountId,Value=${FSK_AWS_ACCOUNT_ID}" \
+    "Key=VpcId,Value=${FSK_VPC_ID}" \
     "Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}" \
     "Key=BootstrapToken,Value=${FSK_TASK8_BOOTSTRAP_TOKEN}" \
+    "Key=OperationToken,Value=${FSK_TASK8_OPERATION_TOKEN}" \
   --query Version --output text
 )"; then
   exit 1
@@ -1111,6 +1449,10 @@ fi
 case "$FSK_TASK8_INITIAL_STATE_PARAMETER_VERSION" in
   ''|*[!0-9]*) exit 1 ;;
 esac
+unset FSK_TASK8_INITIAL_STATE_JSON
+fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
 
 trap - EXIT HUP INT TERM
 trap 'fsk_control_exit "$?"' EXIT
@@ -1119,13 +1461,10 @@ trap 'exit 130' INT TERM
 fsk_persist_temp_egress_state
 FSK_TEMP_EGRESS_CONTROL_PARENT_PID="$$"
 export FSK_TEMP_EGRESS_CONTROL_PARENT_PID
-fsk_control_watchdog &
-FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID="$!"
-test -n "$FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID"
 test -n "$(trap -p EXIT)"
 ```
 
-确认 control trap、SSM poller 和独立 CleanupOwner timer 都已安装后，在**同一 control session**创建资源。每个 ID/marker 一产生就立即覆盖非敏感 state parameter 和 Task 8 证据；任一命令非零会触发 control EXIT cleanup：
+确认 control trap 和独立 CleanupOwner timer 已安装后，在**同一 control session**创建运维 SG/ingress 与出口。每个 create 都在请求中一次性带完整 ownership tags；返回 ID 丢失或命令非零时，立即用完整 tuple 反查并要求唯一结果。state 保存返回/反查 ID 只是审计证据，cleanup 仍会重新发现和复验，绝不把 state ID 直接加入 delete 集合。所有资源就绪后才设置 10 分钟 worker-init deadline 并启动 watchdog：
 
 ```bash
 set -euo pipefail
@@ -1139,6 +1478,41 @@ fsk_assert_temp_egress_deadline
 : "${FSK_TEMP_AZ:?set the approved AZ}"
 : "${FSK_APP_ROUTE_TABLE_A_ID:?set application route table A}"
 : "${FSK_APP_ROUTE_TABLE_B_ID:?set application route table B}"
+FSK_TASK8_WORKER_INIT_TIMEOUT_SECONDS=600
+FSK_TEMP_EC2_TAGS="[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=AccountId,Value=${FSK_AWS_ACCOUNT_ID}},{Key=VpcId,Value=${FSK_VPC_ID}},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}},{Key=OperationToken,Value=${FSK_TASK8_OPERATION_TOKEN}]"
+fsk_require_single_owned_id() {
+  local ids="${1:-}"
+  local prefix="${2:?id prefix required}"
+  local count=0
+  local result=''
+  local id=''
+  for id in $ids; do
+    [ "$id" = None ] && continue
+    case "$id" in
+      "${prefix}"*) count=$((count + 1)); result="$id" ;;
+      *) echo 'OWNERSHIP_REVALIDATION_FAILED_BLOCKED:ID_FORMAT' >&2; return 1 ;;
+    esac
+  done
+  if [ "$count" -ne 1 ]; then
+    echo 'OWNERSHIP_REVALIDATION_FAILED_BLOCKED:ID_COUNT' >&2
+    return 1
+  fi
+  printf '%s\n' "$result"
+}
+FSK_VERIFIED_DB_SECURITY_GROUP_VPC_ID="$(
+  fsk_run_before_temp_egress_deadline aws ec2 describe-security-groups \
+    --region ap-northeast-1 --group-ids "$FSK_DB_SECURITY_GROUP_ID" \
+    --query 'SecurityGroups[0].VpcId' --output text
+)"
+test "$FSK_VERIFIED_DB_SECURITY_GROUP_VPC_ID" = "$FSK_VPC_ID"
+FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS="$(
+  fsk_run_before_temp_egress_deadline aws ec2 describe-route-tables \
+    --region ap-northeast-1 \
+    --route-table-ids "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID" \
+    --query 'sort(RouteTables[].VpcId)' --output text
+)"
+test "$FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS" = \
+  "$FSK_VPC_ID\t$FSK_VPC_ID"
 FSK_PREEXISTING_APP_DEFAULT_ROUTE_COUNT="$(
   fsk_run_before_temp_egress_deadline aws ec2 describe-route-tables \
     --region ap-northeast-1 \
@@ -1147,116 +1521,307 @@ FSK_PREEXISTING_APP_DEFAULT_ROUTE_COUNT="$(
     --output text
 )"
 test "$FSK_PREEXISTING_APP_DEFAULT_ROUTE_COUNT" -eq 0
-FSK_TEMP_IGW_ID="$(fsk_run_before_temp_egress_deadline \
-  aws ec2 create-internet-gateway \
-  --region ap-northeast-1 \
-  --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}}]" \
-  --query InternetGateway.InternetGatewayId --output text)"
-case "$FSK_TEMP_IGW_ID" in igw-*) ;; *) exit 1 ;; esac
+
+if ! FSK_OPS_SECURITY_GROUP_ID="$(fsk_run_before_temp_egress_deadline \
+  aws ec2 create-security-group \
+    --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
+    --group-name "fsk-staging-cloudshell-${FSK_CLOUDSHELL_TASK_ID}-${FSK_TASK8_OPERATION_TOKEN}" \
+    --description "Temporary CloudShell access for ${FSK_CLOUDSHELL_TASK_ID}" \
+    --tag-specifications "ResourceType=security-group,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --query GroupId --output text)"; then
+  FSK_OPS_SECURITY_GROUP_ID=''
+fi
+case "$FSK_OPS_SECURITY_GROUP_ID" in
+  sg-*) ;;
+  *) FSK_OPS_SECURITY_GROUP_ID="$(fsk_discover_owned_operations_security_group)" ;;
+esac
+FSK_OPS_SECURITY_GROUP_ID="$(fsk_require_single_owned_id \
+  "$FSK_OPS_SECURITY_GROUP_ID" sg-)"
 fsk_persist_temp_egress_state
-fsk_run_before_temp_egress_deadline aws ec2 attach-internet-gateway \
+if ! FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(
+  fsk_run_before_temp_egress_deadline \
+    aws ec2 authorize-security-group-ingress \
+      --region ap-northeast-1 \
+      --group-id "$FSK_DB_SECURITY_GROUP_ID" \
+      --protocol tcp --port 5432 \
+      --source-group "$FSK_OPS_SECURITY_GROUP_ID" \
+      --tag-specifications "ResourceType=security-group-rule,Tags=${FSK_TEMP_EC2_TAGS}" \
+      --query 'SecurityGroupRules[0].SecurityGroupRuleId' --output text
+)"; then
+  FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID=''
+fi
+case "$FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID" in
+  sgr-*) ;;
+  *)
+    FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(
+      fsk_run_before_temp_egress_deadline \
+        aws ec2 describe-security-group-rules \
+          --region ap-northeast-1 \
+          --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
+            "Name=referenced-group-id,Values=${FSK_OPS_SECURITY_GROUP_ID}" \
+            "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+            "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+            "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+            "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+          --query 'SecurityGroupRules[].SecurityGroupRuleId' --output text
+    )"
+    ;;
+esac
+FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(fsk_require_single_owned_id \
+  "$FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID" sgr-)"
+fsk_persist_temp_egress_state
+
+if ! FSK_TEMP_IGW_ID="$(fsk_run_before_temp_egress_deadline \
+  aws ec2 create-internet-gateway \
+    --region ap-northeast-1 \
+    --tag-specifications "ResourceType=internet-gateway,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --query InternetGateway.InternetGatewayId --output text)"; then
+  FSK_TEMP_IGW_ID=''
+fi
+case "$FSK_TEMP_IGW_ID" in
+  igw-*) ;;
+  *) FSK_TEMP_IGW_ID="$(fsk_run_before_temp_egress_deadline \
+    aws ec2 describe-internet-gateways --region ap-northeast-1 \
+      --filters "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+      --query 'InternetGateways[].InternetGatewayId' --output text)" ;;
+esac
+FSK_TEMP_IGW_ID="$(fsk_require_single_owned_id "$FSK_TEMP_IGW_ID" igw-)"
+fsk_persist_temp_egress_state
+if ! fsk_run_before_temp_egress_deadline aws ec2 attach-internet-gateway \
   --region ap-northeast-1 \
-  --internet-gateway-id "$FSK_TEMP_IGW_ID" --vpc-id "$FSK_VPC_ID"
+  --internet-gateway-id "$FSK_TEMP_IGW_ID" --vpc-id "$FSK_VPC_ID"; then
+  test "$(fsk_run_before_temp_egress_deadline \
+    aws ec2 describe-internet-gateways --region ap-northeast-1 \
+      --internet-gateway-ids "$FSK_TEMP_IGW_ID" \
+      --query 'InternetGateways[0].Attachments[0].VpcId' --output text)" = \
+    "$FSK_VPC_ID"
+fi
 FSK_TEMP_IGW_ATTACHED=1
 fsk_persist_temp_egress_state
-FSK_TEMP_PUBLIC_SUBNET_ID="$(fsk_run_before_temp_egress_deadline \
+if ! FSK_TEMP_PUBLIC_SUBNET_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 create-subnet \
-  --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
-  --cidr-block "$FSK_TEMP_PUBLIC_CIDR" --availability-zone "$FSK_TEMP_AZ" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}}]" \
-  --query Subnet.SubnetId --output text)"
-case "$FSK_TEMP_PUBLIC_SUBNET_ID" in subnet-*) ;; *) exit 1 ;; esac
+    --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
+    --cidr-block "$FSK_TEMP_PUBLIC_CIDR" --availability-zone "$FSK_TEMP_AZ" \
+    --tag-specifications "ResourceType=subnet,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --query Subnet.SubnetId --output text)"; then
+  FSK_TEMP_PUBLIC_SUBNET_ID=''
+fi
+case "$FSK_TEMP_PUBLIC_SUBNET_ID" in
+  subnet-*) ;;
+  *) FSK_TEMP_PUBLIC_SUBNET_ID="$(fsk_run_before_temp_egress_deadline \
+    aws ec2 describe-subnets --region ap-northeast-1 \
+      --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+        "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+      --query 'Subnets[].SubnetId' --output text)" ;;
+esac
+FSK_TEMP_PUBLIC_SUBNET_ID="$(fsk_require_single_owned_id \
+  "$FSK_TEMP_PUBLIC_SUBNET_ID" subnet-)"
 fsk_persist_temp_egress_state
-FSK_TEMP_PUBLIC_ROUTE_TABLE_ID="$(fsk_run_before_temp_egress_deadline \
+if ! FSK_TEMP_PUBLIC_ROUTE_TABLE_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 create-route-table \
-  --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
-  --tag-specifications "ResourceType=route-table,Tags=[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}}]" \
-  --query RouteTable.RouteTableId --output text)"
-case "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" in rtb-*) ;; *) exit 1 ;; esac
+    --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
+    --tag-specifications "ResourceType=route-table,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --query RouteTable.RouteTableId --output text)"; then
+  FSK_TEMP_PUBLIC_ROUTE_TABLE_ID=''
+fi
+case "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" in
+  rtb-*) ;;
+  *) FSK_TEMP_PUBLIC_ROUTE_TABLE_ID="$(fsk_run_before_temp_egress_deadline \
+    aws ec2 describe-route-tables --region ap-northeast-1 \
+      --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+        "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+      --query 'RouteTables[].RouteTableId' --output text)" ;;
+esac
+FSK_TEMP_PUBLIC_ROUTE_TABLE_ID="$(fsk_require_single_owned_id \
+  "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" rtb-)"
 fsk_persist_temp_egress_state
-FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID="$(fsk_run_before_temp_egress_deadline \
+if ! FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 associate-route-table \
-  --region ap-northeast-1 --route-table-id "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" \
-  --subnet-id "$FSK_TEMP_PUBLIC_SUBNET_ID" \
-  --query AssociationId --output text)"
-case "$FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID" in rtbassoc-*) ;; *) exit 1 ;; esac
+    --region ap-northeast-1 --route-table-id "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" \
+    --subnet-id "$FSK_TEMP_PUBLIC_SUBNET_ID" \
+    --query AssociationId --output text)"; then
+  FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID="$(
+    fsk_run_before_temp_egress_deadline aws ec2 describe-route-tables \
+      --region ap-northeast-1 --route-table-ids "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" \
+      --query "RouteTables[0].Associations[?SubnetId=='${FSK_TEMP_PUBLIC_SUBNET_ID}'].RouteTableAssociationId" \
+      --output text
+  )"
+fi
+FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID="$(fsk_require_single_owned_id \
+  "$FSK_TEMP_PUBLIC_ROUTE_ASSOCIATION_ID" rtbassoc-)"
 fsk_persist_temp_egress_state
-fsk_run_before_temp_egress_deadline aws ec2 create-route \
+if ! fsk_run_before_temp_egress_deadline aws ec2 create-route \
   --region ap-northeast-1 \
   --route-table-id "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" \
-  --destination-cidr-block 0.0.0.0/0 --gateway-id "$FSK_TEMP_IGW_ID"
+  --destination-cidr-block 0.0.0.0/0 --gateway-id "$FSK_TEMP_IGW_ID"; then
+  test "$(fsk_run_before_temp_egress_deadline aws ec2 describe-route-tables \
+    --region ap-northeast-1 --route-table-ids "$FSK_TEMP_PUBLIC_ROUTE_TABLE_ID" \
+    --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].GatewayId | [0]' \
+    --output text)" = "$FSK_TEMP_IGW_ID"
+fi
 FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED=1
 fsk_persist_temp_egress_state
-FSK_TEMP_EIP_ALLOCATION_ID="$(fsk_run_before_temp_egress_deadline \
+if ! FSK_TEMP_EIP_ALLOCATION_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 allocate-address \
-  --region ap-northeast-1 --domain vpc \
-  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}}]" \
-  --query AllocationId --output text)"
-case "$FSK_TEMP_EIP_ALLOCATION_ID" in eipalloc-*) ;; *) exit 1 ;; esac
+    --region ap-northeast-1 --domain vpc \
+    --tag-specifications "ResourceType=elastic-ip,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --query AllocationId --output text)"; then
+  FSK_TEMP_EIP_ALLOCATION_ID=''
+fi
+case "$FSK_TEMP_EIP_ALLOCATION_ID" in
+  eipalloc-*) ;;
+  *) FSK_TEMP_EIP_ALLOCATION_ID="$(fsk_run_before_temp_egress_deadline \
+    aws ec2 describe-addresses --region ap-northeast-1 \
+      --filters "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+      --query 'Addresses[].AllocationId' --output text)" ;;
+esac
+FSK_TEMP_EIP_ALLOCATION_ID="$(fsk_require_single_owned_id \
+  "$FSK_TEMP_EIP_ALLOCATION_ID" eipalloc-)"
 fsk_persist_temp_egress_state
-FSK_TEMP_NAT_GATEWAY_ID="$(fsk_run_before_temp_egress_deadline \
+if ! FSK_TEMP_NAT_GATEWAY_ID="$(fsk_run_before_temp_egress_deadline \
   aws ec2 create-nat-gateway \
-  --region ap-northeast-1 --connectivity-type public \
-  --subnet-id "$FSK_TEMP_PUBLIC_SUBNET_ID" \
-  --allocation-id "$FSK_TEMP_EIP_ALLOCATION_ID" \
-  --tag-specifications "ResourceType=natgateway,Tags=[{Key=Project,Value=FSK},{Key=Environment,Value=staging},{Key=ManagedBy,Value=AmplifyGen2},{Key=CostCenter,Value=FSK},{Key=TaskId,Value=${FSK_CLOUDSHELL_TASK_ID}}]" \
-  --query NatGateway.NatGatewayId --output text)"
-case "$FSK_TEMP_NAT_GATEWAY_ID" in nat-*) ;; *) exit 1 ;; esac
+    --region ap-northeast-1 --connectivity-type public \
+    --subnet-id "$FSK_TEMP_PUBLIC_SUBNET_ID" \
+    --allocation-id "$FSK_TEMP_EIP_ALLOCATION_ID" \
+    --tag-specifications "ResourceType=natgateway,Tags=${FSK_TEMP_EC2_TAGS}" \
+    --query NatGateway.NatGatewayId --output text)"; then
+  FSK_TEMP_NAT_GATEWAY_ID=''
+fi
+case "$FSK_TEMP_NAT_GATEWAY_ID" in
+  nat-*) ;;
+  *) FSK_TEMP_NAT_GATEWAY_ID="$(fsk_run_before_temp_egress_deadline \
+    aws ec2 describe-nat-gateways --region ap-northeast-1 \
+      --filter "Name=vpc-id,Values=${FSK_VPC_ID}" \
+        "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+        "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+        "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
+        "Name=tag:OperationToken,Values=${FSK_TASK8_OPERATION_TOKEN}" \
+      --query 'NatGateways[?State!=`deleted`].NatGatewayId' --output text)" ;;
+esac
+FSK_TEMP_NAT_GATEWAY_ID="$(fsk_require_single_owned_id \
+  "$FSK_TEMP_NAT_GATEWAY_ID" nat-)"
 fsk_persist_temp_egress_state
 fsk_run_before_temp_egress_deadline aws ec2 wait nat-gateway-available \
   --region ap-northeast-1 \
   --nat-gateway-ids "$FSK_TEMP_NAT_GATEWAY_ID"
-fsk_run_before_temp_egress_deadline aws ec2 create-route \
+if ! fsk_run_before_temp_egress_deadline aws ec2 create-route \
   --region ap-northeast-1 \
   --route-table-id "$FSK_APP_ROUTE_TABLE_A_ID" \
-  --destination-cidr-block 0.0.0.0/0 --nat-gateway-id "$FSK_TEMP_NAT_GATEWAY_ID"
+  --destination-cidr-block 0.0.0.0/0 \
+  --nat-gateway-id "$FSK_TEMP_NAT_GATEWAY_ID"; then
+  test "$(fsk_run_before_temp_egress_deadline aws ec2 describe-route-tables \
+    --region ap-northeast-1 --route-table-ids "$FSK_APP_ROUTE_TABLE_A_ID" \
+    --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId | [0]' \
+    --output text)" = "$FSK_TEMP_NAT_GATEWAY_ID"
+fi
 FSK_TEMP_APP_ROUTE_A_CREATED=1
 fsk_persist_temp_egress_state
-fsk_run_before_temp_egress_deadline aws ec2 create-route \
+if ! fsk_run_before_temp_egress_deadline aws ec2 create-route \
   --region ap-northeast-1 \
   --route-table-id "$FSK_APP_ROUTE_TABLE_B_ID" \
-  --destination-cidr-block 0.0.0.0/0 --nat-gateway-id "$FSK_TEMP_NAT_GATEWAY_ID"
+  --destination-cidr-block 0.0.0.0/0 \
+  --nat-gateway-id "$FSK_TEMP_NAT_GATEWAY_ID"; then
+  test "$(fsk_run_before_temp_egress_deadline aws ec2 describe-route-tables \
+    --region ap-northeast-1 --route-table-ids "$FSK_APP_ROUTE_TABLE_B_ID" \
+    --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId | [0]' \
+    --output text)" = "$FSK_TEMP_NAT_GATEWAY_ID"
+fi
 FSK_TEMP_APP_ROUTE_B_CREATED=1
 fsk_persist_temp_egress_state
 fsk_assert_temp_egress_deadline
+FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH=$((
+  $(date +%s) + FSK_TASK8_WORKER_INIT_TIMEOUT_SECONDS
+))
+if [ "$FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH" -ge \
+  "$FSK_TEMP_EGRESS_DEADLINE_EPOCH" ]; then
+  echo 'WORKER_INIT_WINDOW_EXCEEDS_OPERATION_DEADLINE_STOP' >&2
+  exit 1
+fi
+fsk_persist_temp_egress_state
+fsk_control_watchdog &
+FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID="$!"
+test -n "$FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID"
+unset FSK_TEMP_EC2_TAGS
 ```
 
 创建后记录 state parameter version、所有资源 ID/marker、application route table IDs、deadline、创建时间、批准编号、control session actor 和 `CleanupOwner`；只读确认两个 application route table 的默认路由都精确指向该临时 NAT。control session 和 poller 保持打开。
 
-随后打开 VPC worker session，从批准证据恢复 VPC、application route table IDs、deadline、TaskId 和 CleanupOwner，执行 `export FSK_TASK8_SHELL_ROLE=worker`，再重跑 common guard/function 初始化 fence。worker 通过 SSM Interface Endpoint 读取 state（不得打印），保存 checksum 后安装失败通知 trap；trap 不调用 EC2 cleanup，只写 `FAILED:*`，control poller 才是唯一清理执行者：
+随后打开 VPC worker session，从批准证据恢复 account/VPC/DB SG、application route table IDs、foundation commit、两个 token、operation/cleanup/worker-init deadlines、TaskId 和 CleanupOwner，执行 `export FSK_TASK8_SHELL_ROLE=worker`，再重跑 common guard/function 初始化 fence。common fence 已在任何 deadline/state/status 读取或解析前安装 init 失败通知 trap；下面只分阶段收紧失败码，完成全部初始化后才切换到 runtime trap。worker 通过 SSM Interface Endpoint 读取 state（不得打印）并保存 checksum；两种 trap 都不调用 EC2 cleanup，control poller 才是唯一清理执行者：
 
 ```bash
 set -euo pipefail
 test "$FSK_TASK8_SHELL_ROLE" = worker
+case "$(trap -p EXIT)" in
+  *fsk_worker_init_exit*) ;;
+  *) echo 'WORKER_INIT_NOTIFICATION_BOUNDARY_MISSING_STOP' >&2; exit 1 ;;
+esac
 declare -F fsk_worker_exit >/dev/null
+FSK_WORKER_INIT_PHASE=DEADLINE_CHECK
 fsk_assert_temp_egress_deadline
+FSK_WORKER_INIT_PHASE=STATE_READ
+fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
 FSK_TASK8_STATE_JSON="$(
-  fsk_run_before_temp_egress_deadline aws ssm get-parameter \
+  timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_STATE_PARAMETER" \
     --query Parameter.Value --output text
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
+FSK_WORKER_INIT_PHASE=STATE_CHECKSUM
 FSK_TASK8_STATE_SHA256="$(
   printf '%s' "$FSK_TASK8_STATE_JSON" | sha256sum | awk '{ print $1 }'
 )"
+FSK_WORKER_INIT_PHASE=STATE_PARSE
 FSK_TASK8_STATE_JSON="$FSK_TASK8_STATE_JSON" \
+FSK_AWS_ACCOUNT_ID="$FSK_AWS_ACCOUNT_ID" \
 FSK_CLOUDSHELL_TASK_ID="$FSK_CLOUDSHELL_TASK_ID" \
+FSK_TASK8_BOOTSTRAP_TOKEN="$FSK_TASK8_BOOTSTRAP_TOKEN" \
+FSK_TASK8_OPERATION_TOKEN="$FSK_TASK8_OPERATION_TOKEN" \
 FSK_VPC_ID="$FSK_VPC_ID" \
+FSK_DB_SECURITY_GROUP_ID="$FSK_DB_SECURITY_GROUP_ID" \
 FSK_APP_ROUTE_TABLE_A_ID="$FSK_APP_ROUTE_TABLE_A_ID" \
 FSK_APP_ROUTE_TABLE_B_ID="$FSK_APP_ROUTE_TABLE_B_ID" \
 FSK_TEMP_EGRESS_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_DEADLINE_EPOCH" \
 FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH" \
+FSK_TEMP_EGRESS_CLEANUP_OWNER="$FSK_TEMP_EGRESS_CLEANUP_OWNER" \
+FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH="$FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH" \
+FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS="$FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS" \
 FSK_FOUNDATION_COMMIT="$FSK_FOUNDATION_COMMIT" \
 node -e '
   const state = JSON.parse(process.env.FSK_TASK8_STATE_JSON ?? "");
-  const allowed = new Set([
-    "version",
-    "FSK_CLOUDSHELL_TASK_ID",
-    "FSK_VPC_ID",
-    "FSK_APP_ROUTE_TABLE_A_ID",
-    "FSK_APP_ROUTE_TABLE_B_ID",
-    "FSK_TEMP_EGRESS_DEADLINE_EPOCH",
-    "FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH",
-    "FSK_FOUNDATION_COMMIT",
+  const expected = {
+    FSK_AWS_ACCOUNT_ID: process.env.FSK_AWS_ACCOUNT_ID,
+    FSK_CLOUDSHELL_TASK_ID: process.env.FSK_CLOUDSHELL_TASK_ID,
+    FSK_TASK8_BOOTSTRAP_TOKEN: process.env.FSK_TASK8_BOOTSTRAP_TOKEN,
+    FSK_TASK8_OPERATION_TOKEN: process.env.FSK_TASK8_OPERATION_TOKEN,
+    FSK_VPC_ID: process.env.FSK_VPC_ID,
+    FSK_DB_SECURITY_GROUP_ID: process.env.FSK_DB_SECURITY_GROUP_ID,
+    FSK_APP_ROUTE_TABLE_A_ID: process.env.FSK_APP_ROUTE_TABLE_A_ID,
+    FSK_APP_ROUTE_TABLE_B_ID: process.env.FSK_APP_ROUTE_TABLE_B_ID,
+    FSK_FOUNDATION_COMMIT: process.env.FSK_FOUNDATION_COMMIT,
+    FSK_TEMP_EGRESS_DEADLINE_EPOCH: process.env.FSK_TEMP_EGRESS_DEADLINE_EPOCH,
+    FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH:
+      process.env.FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH,
+    FSK_TEMP_EGRESS_CLEANUP_OWNER: process.env.FSK_TEMP_EGRESS_CLEANUP_OWNER,
+    FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH:
+      process.env.FSK_TASK8_WORKER_INIT_DEADLINE_EPOCH,
+    FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS:
+      process.env.FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS,
+  };
+  const resourceKeys = [
+    "FSK_OPS_SECURITY_GROUP_ID",
+    "FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID",
     "FSK_TEMP_IGW_ID",
     "FSK_TEMP_PUBLIC_SUBNET_ID",
     "FSK_TEMP_PUBLIC_ROUTE_TABLE_ID",
@@ -1267,46 +1832,55 @@ node -e '
     "FSK_TEMP_PUBLIC_DEFAULT_ROUTE_CREATED",
     "FSK_TEMP_APP_ROUTE_A_CREATED",
     "FSK_TEMP_APP_ROUTE_B_CREATED",
+  ];
+  const allowed = new Set([
+    "version", ...Object.keys(expected), ...resourceKeys,
+    "cleanupResult", "cleanupTrigger", "cleanupAttempts",
+    "stableZeroObservations", "stableZeroStartedEpoch",
+    "stableZeroDurationSeconds", "counts",
   ]);
-  const expected = {
-    FSK_CLOUDSHELL_TASK_ID: process.env.FSK_CLOUDSHELL_TASK_ID,
-    FSK_VPC_ID: process.env.FSK_VPC_ID,
-    FSK_APP_ROUTE_TABLE_A_ID: process.env.FSK_APP_ROUTE_TABLE_A_ID,
-    FSK_APP_ROUTE_TABLE_B_ID: process.env.FSK_APP_ROUTE_TABLE_B_ID,
-    FSK_TEMP_EGRESS_DEADLINE_EPOCH: process.env.FSK_TEMP_EGRESS_DEADLINE_EPOCH,
-    FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH:
-      process.env.FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH,
-    FSK_FOUNDATION_COMMIT: process.env.FSK_FOUNDATION_COMMIT,
-  };
-  if (state.version !== 1 ||
+  if (state.version !== 2 || state.cleanupResult !== "PENDING" ||
       Object.keys(state).some((key) => !allowed.has(key)) ||
-      Object.entries(expected).some(([key, value]) => state[key] !== value)) {
+      Object.entries(expected).some(([key, value]) => state[key] !== value) ||
+      resourceKeys.some((key) => typeof state[key] !== "string")) {
     process.exit(2);
   }
 '
 unset FSK_TASK8_STATE_JSON
+FSK_WORKER_INIT_PHASE=CONTROL_STATUS_READ
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 FSK_TASK8_CONTROL_STATUS="$(
-  fsk_run_before_temp_egress_deadline aws ssm get-parameter \
+  timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
     --query Parameter.Value --output text
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 test "$FSK_TASK8_CONTROL_STATUS" = CONTROL_ARMED
+FSK_WORKER_INIT_PHASE=WORKER_STATUS_READ
+fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
 FSK_TASK8_WORKER_STATUS="$(
-  fsk_run_before_temp_egress_deadline aws ssm get-parameter \
+  timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
     --query Parameter.Value --output text
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
 test "$FSK_TASK8_WORKER_STATUS" = NOT_STARTED
-trap 'fsk_worker_exit "$?"' EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT TERM
+FSK_WORKER_INIT_PHASE=WORKER_STATUS_RUNNING_WRITE
 fsk_put_task8_worker_status WORKER_RUNNING
+FSK_WORKER_INIT_PHASE=CONTROL_STATUS_RECHECK
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 FSK_TASK8_CONTROL_STATUS="$(
-  fsk_run_before_temp_egress_deadline aws ssm get-parameter \
+  timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
     --query Parameter.Value --output text
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 test "$FSK_TASK8_CONTROL_STATUS" = CONTROL_ARMED
+FSK_WORKER_INIT_PHASE=COMPLETE
+trap - EXIT HUP INT TERM
+trap 'fsk_worker_exit "$?"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT TERM
 test -n "$(trap -p EXIT)"
 ```
 
@@ -1769,24 +2343,31 @@ fsk_assert_temp_egress_deadline
 
 ### 4.3 立即删除临时出口，再删除 CloudShell/SG
 
-安全带回完成后，worker 不调用 EC2 cleanup，而是只把自己的 worker-status 从 `WORKER_RUNNING` 更新为 `READY_FOR_CLEANUP`；它永远不写 control-status。control poller 看到该值后在 cleanup deadline 内重复 discovery→delete→residual，只有连续三次全零才把 control-status 写成 `CLEANUP_PASS:READY_FOR_CLEANUP`，否则写 `CLEANUP_BLOCKED:*`。worker 通过 SSM Interface Endpoint 等待 control-status，即使 NAT 已移除仍可读取；两个单写者参数消除了 worker 覆盖 terminal cleanup 的 TOCTOU：
+安全带回完成后，worker 不调用 EC2 cleanup，而是只把自己的 worker-status 从 `WORKER_RUNNING` 更新为 `READY_FOR_CLEANUP`；它永远不写 control-status。写入前后都复验 parameter ownership。随后 worker 清除 shell 中的敏感变量、解除 runtime trap 并关闭 tab，不等待自己的 SG 被删除。操作者必须立即从 CloudShell Console 删除精确名称/ID 的 VPC environment，使 control-owned cleanup 能在同一 cleanup deadline 内重试删除 ENI 释放后的 SG。
+
+control poller 看到 `READY_FOR_CLEANUP`、任意 `FAILED:*`、worker-init timeout/status 读取失败或 operation deadline 后，在明确 cleanup deadline 内重复 discovery→delete→residual。它只在至少 180 秒的稳定全零观察窗口内且至少三次连续全零后写 `CLEANUP_PASS:<trigger>`；任何超时、查询失败或残留都写 `CLEANUP_BLOCKED:*`并保留 CleanupOwner/费用责任：
 
 ```bash
 set -euo pipefail
 test "${FSK_SAFE_BRINGBACK_CONFIRMED:-0}" -eq 1
 test "$FSK_TASK8_SHELL_ROLE" = worker
 declare -F fsk_worker_exit >/dev/null
+test -n "$(trap -p EXIT)"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
 FSK_TASK8_WORKER_STATUS="$(
   timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
     --query Parameter.Value --output text
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
 test "$FSK_TASK8_WORKER_STATUS" = WORKER_RUNNING
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 FSK_TASK8_CONTROL_STATUS="$(
   timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
     --query Parameter.Value --output text
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 case "$FSK_TASK8_CONTROL_STATUS" in
   CONTROL_ARMED) ;;
   CLEANUP_PASS:*|CLEANUP_BLOCKED:*)
@@ -1797,60 +2378,12 @@ case "$FSK_TASK8_CONTROL_STATUS" in
   *) echo 'TASK8_CONTROL_STATUS_UNEXPECTED_STOP' >&2; exit 1 ;;
 esac
 fsk_put_task8_worker_status READY_FOR_CLEANUP
-FSK_CONTROL_CLEANUP_CONFIRM_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH"
-while :; do
-  FSK_TASK8_CONTROL_STATUS="$(
-    timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
-      --region ap-northeast-1 --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
-      --query Parameter.Value --output text
-  )"
-  case "$FSK_TASK8_CONTROL_STATUS" in
-    CLEANUP_PASS:READY_FOR_CLEANUP) break ;;
-    CLEANUP_BLOCKED:*)
-      trap - EXIT HUP INT TERM
-      echo 'CONTROL_CLEANUP_BLOCKED_OWNER_ACTION_REQUIRED' >&2
-      exit 1
-      ;;
-    CONTROL_ARMED) ;;
-    *) echo 'TASK8_CONTROL_STATUS_UNEXPECTED_STOP' >&2; exit 1 ;;
-  esac
-  if [ "$(date +%s)" -ge "$FSK_CONTROL_CLEANUP_CONFIRM_DEADLINE_EPOCH" ]; then
-    echo 'CONTROL_CLEANUP_CONFIRM_TIMEOUT' >&2
-    exit 1
-  fi
-  sleep 15
-done
-FSK_CONTROL_CLEANUP_STATE_JSON="$(
-  timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
-    --region ap-northeast-1 --name "$FSK_TASK8_STATE_PARAMETER" \
-    --query Parameter.Value --output text
-)"
-FSK_CONTROL_CLEANUP_STATE_JSON="$FSK_CONTROL_CLEANUP_STATE_JSON" node -e '
-  const state = JSON.parse(process.env.FSK_CONTROL_CLEANUP_STATE_JSON ?? "");
-  const expected = [
-    "applicationRouteCount",
-    "natGatewayCount",
-    "elasticIpCount",
-    "routeTableCount",
-    "subnetCount",
-    "internetGatewayCount",
-  ];
-  if (state.version !== 1 || state.cleanupResult !== "PASS" ||
-      !/^\d+$/.test(state.cleanupAttempts ?? "") ||
-      Number(state.stableZeroObservations) < 3 ||
-      expected.some((key) => state.counts?.[key] !== "0")) {
-    process.exit(2);
-  }
-'
-FSK_CONTROL_CLEANUP_STATE_SHA256="$(
-  printf '%s' "$FSK_CONTROL_CLEANUP_STATE_JSON" | sha256sum | awk '{ print $1 }'
-)"
-unset FSK_CONTROL_CLEANUP_STATE_JSON
-FSK_TEMP_EGRESS_DELETED_AT_JST="$(TZ=Asia/Tokyo date '+%Y-%m-%dT%H:%M:%S%z')"
+FSK_TASK8_WORKER_READY_AT_JST="$(TZ=Asia/Tokyo date '+%Y-%m-%dT%H:%M:%S%z')"
+unset DATABASE_URL FSK_TASK8_STATE_JSON FSK_TASK8_CONTROL_STATUS
 trap - EXIT HUP INT TERM
 ```
 
-worker 只在 control-status 精确 PASS 且 state 中六类 count 全为字符串 `"0"` 后解除失败通知 trap。随后回到仍打开的 control session，等待 poller 子进程并再次读取 control-status/state checksum；两项一致且 worker/control 两份单写者 history 都通过白名单验证后，解除 control trap并删除三个临时 SSM parameters：
+worker fence 成功后立即关闭 worker tab并删除 VPC environment；删除前/后截图只记录 environment name/ID、VPC、subnets、SG 和时间，不记录 secret。随后回到仍打开的 control session，等待 poller 子进程。poller 非零、control-status `BLOCKED`或 cleanup state 不满足八类资源在最小时长窗口内稳定全零时，必须保留 trap、parameters、CleanupOwner 和持续费用责任，不得进入 full backend。
 
 ```bash
 set -euo pipefail
@@ -1858,7 +2391,7 @@ test "$FSK_TASK8_SHELL_ROLE" = control
 declare -F fsk_control_exit >/dev/null
 test -n "$(trap -p EXIT)"
 : "${FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID:?control poller pid missing}"
-: "${FSK_EXPECTED_CONTROL_CLEANUP_STATE_SHA256:?copy the worker cleanup state checksum evidence}"
+: "${FSK_CLOUDSHELL_ENVIRONMENT_DELETION_EVIDENCE_SHA256:?save nonsecret before/after deletion evidence}"
 if wait "$FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID"; then
   FSK_TEMP_EGRESS_CONTROL_WATCHDOG_EXIT=0
 else
@@ -1866,22 +2399,79 @@ else
 fi
 test "$FSK_TEMP_EGRESS_CONTROL_WATCHDOG_EXIT" -eq 0
 FSK_TEMP_EGRESS_CONTROL_WATCHDOG_PID=''
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 FSK_CONTROL_STATUS_EVIDENCE="$(
   timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
     --query Parameter.Value --output text
 )"
-test "$FSK_CONTROL_STATUS_EVIDENCE" = CLEANUP_PASS:READY_FOR_CLEANUP
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
+case "$FSK_CONTROL_STATUS_EVIDENCE" in
+  CLEANUP_PASS:*) ;;
+  CLEANUP_BLOCKED:*)
+    echo 'CONTROL_CLEANUP_BLOCKED_OWNER_ACTION_REQUIRED' >&2
+    exit 1
+    ;;
+  *) echo 'TASK8_CONTROL_STATUS_UNEXPECTED_STOP' >&2; exit 1 ;;
+esac
+fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
 FSK_CONTROL_STATE_EVIDENCE="$(
   timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter \
     --region ap-northeast-1 --name "$FSK_TASK8_STATE_PARAMETER" \
     --query Parameter.Value --output text
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_STATE_PARAMETER"
 FSK_CONTROL_STATE_EVIDENCE_SHA256="$(
   printf '%s' "$FSK_CONTROL_STATE_EVIDENCE" | sha256sum | awk '{ print $1 }'
 )"
-test "$FSK_CONTROL_STATE_EVIDENCE_SHA256" = \
-  "$FSK_EXPECTED_CONTROL_CLEANUP_STATE_SHA256"
+FSK_CONTROL_STATE_EVIDENCE="$FSK_CONTROL_STATE_EVIDENCE" \
+FSK_CONTROL_STATUS_EVIDENCE="$FSK_CONTROL_STATUS_EVIDENCE" \
+FSK_AWS_ACCOUNT_ID="$FSK_AWS_ACCOUNT_ID" \
+FSK_CLOUDSHELL_TASK_ID="$FSK_CLOUDSHELL_TASK_ID" \
+FSK_TASK8_BOOTSTRAP_TOKEN="$FSK_TASK8_BOOTSTRAP_TOKEN" \
+FSK_TASK8_OPERATION_TOKEN="$FSK_TASK8_OPERATION_TOKEN" \
+FSK_VPC_ID="$FSK_VPC_ID" \
+FSK_DB_SECURITY_GROUP_ID="$FSK_DB_SECURITY_GROUP_ID" \
+FSK_FOUNDATION_COMMIT="$FSK_FOUNDATION_COMMIT" \
+FSK_TEMP_EGRESS_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_DEADLINE_EPOCH" \
+FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH="$FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH" \
+FSK_TEMP_EGRESS_CLEANUP_OWNER="$FSK_TEMP_EGRESS_CLEANUP_OWNER" \
+FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS="$FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS" \
+node -e '
+  const state = JSON.parse(process.env.FSK_CONTROL_STATE_EVIDENCE ?? "");
+  const expectedOwnership = {
+    FSK_AWS_ACCOUNT_ID: process.env.FSK_AWS_ACCOUNT_ID,
+    FSK_CLOUDSHELL_TASK_ID: process.env.FSK_CLOUDSHELL_TASK_ID,
+    FSK_TASK8_BOOTSTRAP_TOKEN: process.env.FSK_TASK8_BOOTSTRAP_TOKEN,
+    FSK_TASK8_OPERATION_TOKEN: process.env.FSK_TASK8_OPERATION_TOKEN,
+    FSK_VPC_ID: process.env.FSK_VPC_ID,
+    FSK_DB_SECURITY_GROUP_ID: process.env.FSK_DB_SECURITY_GROUP_ID,
+    FSK_FOUNDATION_COMMIT: process.env.FSK_FOUNDATION_COMMIT,
+    FSK_TEMP_EGRESS_DEADLINE_EPOCH: process.env.FSK_TEMP_EGRESS_DEADLINE_EPOCH,
+    FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH:
+      process.env.FSK_TEMP_EGRESS_CLEANUP_DEADLINE_EPOCH,
+    FSK_TEMP_EGRESS_CLEANUP_OWNER: process.env.FSK_TEMP_EGRESS_CLEANUP_OWNER,
+  };
+  const countKeys = [
+    "applicationRouteCount", "natGatewayCount", "elasticIpCount",
+    "routeTableCount", "subnetCount", "internetGatewayCount",
+    "operationsSecurityGroupCount", "databaseIngressRuleCount",
+  ];
+  const trigger = (process.env.FSK_CONTROL_STATUS_EVIDENCE ?? "")
+    .replace(/^CLEANUP_PASS:/, "");
+  if (state.version !== 2 || state.cleanupResult !== "PASS" ||
+      state.cleanupTrigger !== trigger ||
+      Object.entries(expectedOwnership).some(([key, value]) => state[key] !== value) ||
+      !/^\d+$/.test(state.cleanupAttempts ?? "") ||
+      Number(state.cleanupAttempts) < 1 ||
+      Number(state.stableZeroObservations) < 3 ||
+      Number(state.stableZeroDurationSeconds) <
+        Number(process.env.FSK_TEMP_EGRESS_MIN_ZERO_OBSERVATION_SECONDS) ||
+      countKeys.some((key) => state.counts?.[key] !== "0")) {
+    process.exit(2);
+  }
+'
+fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
 FSK_TASK8_WORKER_STATUS_HISTORY_JSON="$(
   timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter-history \
     --region ap-northeast-1 --name "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
@@ -1889,10 +2479,12 @@ FSK_TASK8_WORKER_STATUS_HISTORY_JSON="$(
     --query 'Parameters[].{Version:Version,LastModifiedDate:LastModifiedDate,Value:Value}' \
     --output json
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_WORKER_STATUS_PARAMETER"
 FSK_TASK8_WORKER_STATUS_HISTORY_JSON="$FSK_TASK8_WORKER_STATUS_HISTORY_JSON" node -e '
   const history = JSON.parse(process.env.FSK_TASK8_WORKER_STATUS_HISTORY_JSON ?? "");
   const allowed = /^(NOT_STARTED|WORKER_RUNNING|READY_FOR_CLEANUP|FAILED:[A-Z0-9_]+)$/;
-  if (!Array.isArray(history) || history.length < 2 ||
+  if (!Array.isArray(history) || history.length < 1 ||
+      !history.some((entry) => entry.Version === 1 && entry.Value === "NOT_STARTED") ||
       history.some((entry) => !Number.isInteger(entry.Version) ||
         typeof entry.Value !== "string" || !allowed.test(entry.Value))) {
     process.exit(2);
@@ -1902,7 +2494,7 @@ FSK_TASK8_WORKER_STATUS_HISTORY_SHA256="$(
   printf '%s' "$FSK_TASK8_WORKER_STATUS_HISTORY_JSON" |
     sha256sum | awk '{ print $1 }'
 )"
-unset FSK_TASK8_WORKER_STATUS_HISTORY_JSON
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 FSK_TASK8_CONTROL_STATUS_HISTORY_JSON="$(
   timeout --signal=TERM --kill-after=5 20 aws ssm get-parameter-history \
     --region ap-northeast-1 --name "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
@@ -1910,6 +2502,7 @@ FSK_TASK8_CONTROL_STATUS_HISTORY_JSON="$(
     --query 'Parameters[].{Version:Version,LastModifiedDate:LastModifiedDate,Value:Value}' \
     --output json
 )"
+fsk_assert_task8_parameter_owned "$FSK_TASK8_CONTROL_STATUS_PARAMETER"
 FSK_TASK8_CONTROL_STATUS_HISTORY_JSON="$FSK_TASK8_CONTROL_STATUS_HISTORY_JSON" node -e '
   const history = JSON.parse(process.env.FSK_TASK8_CONTROL_STATUS_HISTORY_JSON ?? "");
   const allowed = /^(CONTROL_ARMED|CLEANUP_(?:PASS|BLOCKED):[A-Z0-9_:]+)$/;
@@ -1923,55 +2516,89 @@ FSK_TASK8_CONTROL_STATUS_HISTORY_SHA256="$(
   printf '%s' "$FSK_TASK8_CONTROL_STATUS_HISTORY_JSON" |
     sha256sum | awk '{ print $1 }'
 )"
-unset FSK_TASK8_CONTROL_STATUS_HISTORY_JSON
-trap - EXIT HUP INT TERM
-timeout --signal=TERM --kill-after=5 20 \
-  aws ssm delete-parameters --region ap-northeast-1 \
-  --names "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
-    "$FSK_TASK8_CONTROL_STATUS_PARAMETER" "$FSK_TASK8_STATE_PARAMETER"
-FSK_TASK8_PARAMETERS_DELETED_AT_JST="$(
+FSK_TASK8_FINAL_EVIDENCE_CAPTURED_AT_JST="$(
   TZ=Asia/Tokyo date '+%Y-%m-%dT%H:%M:%S%z'
 )"
+FSK_TASK8_FINAL_EVIDENCE_JSON="$(
+  FSK_CONTROL_STATE_EVIDENCE="$FSK_CONTROL_STATE_EVIDENCE" \
+  FSK_CONTROL_STATUS_EVIDENCE="$FSK_CONTROL_STATUS_EVIDENCE" \
+  FSK_CONTROL_STATE_EVIDENCE_SHA256="$FSK_CONTROL_STATE_EVIDENCE_SHA256" \
+  FSK_TASK8_WORKER_STATUS_HISTORY_JSON="$FSK_TASK8_WORKER_STATUS_HISTORY_JSON" \
+  FSK_TASK8_WORKER_STATUS_HISTORY_SHA256="$FSK_TASK8_WORKER_STATUS_HISTORY_SHA256" \
+  FSK_TASK8_CONTROL_STATUS_HISTORY_JSON="$FSK_TASK8_CONTROL_STATUS_HISTORY_JSON" \
+  FSK_TASK8_CONTROL_STATUS_HISTORY_SHA256="$FSK_TASK8_CONTROL_STATUS_HISTORY_SHA256" \
+  FSK_CLOUDSHELL_ENVIRONMENT_DELETION_EVIDENCE_SHA256="$FSK_CLOUDSHELL_ENVIRONMENT_DELETION_EVIDENCE_SHA256" \
+  FSK_TASK8_FINAL_EVIDENCE_CAPTURED_AT_JST="$FSK_TASK8_FINAL_EVIDENCE_CAPTURED_AT_JST" \
+  node -e '
+    process.stdout.write(JSON.stringify({
+      version: 1,
+      task8State: JSON.parse(process.env.FSK_CONTROL_STATE_EVIDENCE ?? ""),
+      controlStatus: process.env.FSK_CONTROL_STATUS_EVIDENCE,
+      stateSha256: process.env.FSK_CONTROL_STATE_EVIDENCE_SHA256,
+      workerStatusHistory:
+        JSON.parse(process.env.FSK_TASK8_WORKER_STATUS_HISTORY_JSON ?? ""),
+      workerStatusHistorySha256:
+        process.env.FSK_TASK8_WORKER_STATUS_HISTORY_SHA256,
+      controlStatusHistory:
+        JSON.parse(process.env.FSK_TASK8_CONTROL_STATUS_HISTORY_JSON ?? ""),
+      controlStatusHistorySha256:
+        process.env.FSK_TASK8_CONTROL_STATUS_HISTORY_SHA256,
+      cloudShellEnvironmentDeletionEvidenceSha256:
+        process.env.FSK_CLOUDSHELL_ENVIRONMENT_DELETION_EVIDENCE_SHA256,
+      capturedAtJst: process.env.FSK_TASK8_FINAL_EVIDENCE_CAPTURED_AT_JST,
+    }));
+  '
+)"
+FSK_TASK8_FINAL_EVIDENCE_SHA256="$(
+  printf '%s' "$FSK_TASK8_FINAL_EVIDENCE_JSON" | sha256sum | awk '{ print $1 }'
+)"
+printf 'Task8FinalEvidence=%s\n' "$FSK_TASK8_FINAL_EVIDENCE_JSON"
+printf 'Task8FinalEvidenceSha256=%s\n' "$FSK_TASK8_FINAL_EVIDENCE_SHA256"
+FSK_TASK8_FINAL_EVIDENCE_READY=1
+export FSK_TASK8_FINAL_EVIDENCE_READY
+```
+
+上述 JSON 是独立于临时 SSM 的最终非敏感证据，完整保留 account/VPC/TaskId/tokens、resource IDs、foundation commit、deadlines、稳定全零窗口和 cleanup 结果；不得只保存 cleanup-only 片段。将 JSON 和 checksum 写入已批准的审计记录后，设置 `FSK_TASK8_FINAL_EVIDENCE_SAVED=1`。三个 parameter 逐个删除，每个都在 delete 前立即取两份 metadata/tags/version 快照并比对两个 token；任一个被删重建、版本/tag 漂移、查询失败或删除后重现，立即 `BLOCKED`，不得继续删除：
+
+```bash
+set -euo pipefail
+test "$FSK_TASK8_SHELL_ROLE" = control
+declare -F fsk_control_exit >/dev/null
+declare -F fsk_delete_task8_parameter_if_owned >/dev/null
+test -n "$(trap -p EXIT)"
+test "${FSK_TASK8_FINAL_EVIDENCE_READY:-0}" -eq 1
+test "${FSK_TASK8_FINAL_EVIDENCE_SAVED:-0}" -eq 1
+FSK_TASK8_PARAMETER_DELETION_RESULT=BLOCKED
+for parameter_name in \
+  "$FSK_TASK8_WORKER_STATUS_PARAMETER" \
+  "$FSK_TASK8_CONTROL_STATUS_PARAMETER" \
+  "$FSK_TASK8_STATE_PARAMETER"; do
+  if ! fsk_delete_task8_parameter_if_owned "$parameter_name"; then
+    echo "TASK8_PARAMETER_FINAL_DELETE_BLOCKED:${parameter_name}" >&2
+    exit 1
+  fi
+done
 FSK_TASK8_PARAMETER_RESIDUAL_COUNT="$(
   timeout --signal=TERM --kill-after=5 20 aws ssm describe-parameters \
     --region ap-northeast-1 \
     --parameter-filters \
-      "Key=Path,Option=Recursive,Values=/fsk/staging/task8/${FSK_CLOUDSHELL_TASK_ID}" \
+      "Key=Path,Option=Recursive,Values=${FSK_TASK8_PARAMETER_PREFIX}" \
     --query 'length(Parameters)' --output text
 )"
-test "$FSK_TASK8_PARAMETER_RESIDUAL_COUNT" -eq 0
+if [ "$FSK_TASK8_PARAMETER_RESIDUAL_COUNT" -ne 0 ]; then
+  echo 'TASK8_PARAMETER_FINAL_RESIDUAL_BLOCKED' >&2
+  exit 1
+fi
+FSK_TASK8_PARAMETER_DELETION_RESULT=PASS
+FSK_TASK8_PARAMETERS_DELETED_AT_JST="$(
+  TZ=Asia/Tokyo date '+%Y-%m-%dT%H:%M:%S%z'
+)"
+trap - EXIT HUP INT TERM
 ```
 
-worker 的任何失败/timeout/INT/TERM 都只写 `FAILED:*`；control poller 随即独占执行 cleanup，并把 PASS/BLOCKED 与 counts 留在 SSM 供 CleanupOwner 取证。失败路径不得删除 parameters，直到 owner 保存证据并完成 residual check。若 worker 完全丢失，control 的 deadline 分支仍会清理。不得先关 control tab。
+worker 的任何失败/timeout/INT/TERM 都只写 `FAILED:*`；control poller 随即独占执行 cleanup，并把全量 state、PASS/BLOCKED 与 counts 留在 SSM 供 CleanupOwner 取证。失败触发但 cleanup PASS 时，owner 保存完整最终证据后仍只能使用上述 owned-delete fence；cleanup BLOCKED 时不删 parameters，直到 owner 保存证据并在新批准的 deadline 中完成 residual remediation。若 worker 完全丢失，control 的 worker-init/operation deadline 分支仍会清理。不得先关 control tab。
 
-出口复查 PASS 后，清除 CloudShell 临时文件和 shell 变量；Amplify branch secret 作为后续 full backend 所需受管 secret 暂时保留，但销毁时必须单独删除。随后在 CloudShell Console 进入 `VPC environments` → 选择 `fsk-staging-${FSK_CLOUDSHELL_TASK_ID}` → `Actions` → `Delete` 并等待从列表消失，再撤销 DB ingress、删除临时运维 SG：
-
-```bash
-set -euo pipefail
-: "${FSK_DB_SECURITY_GROUP_ID:?restore the exact Foundation DB SG id}"
-: "${FSK_OPS_SECURITY_GROUP_ID:?restore the exact Task 8 operations SG id}"
-: "${FSK_VPC_ID:?restore the exact Foundation VPC id}"
-: "${FSK_CLOUDSHELL_TASK_ID:?restore the exact Task 8 id}"
-aws ec2 revoke-security-group-ingress \
-  --region ap-northeast-1 \
-  --group-id "$FSK_DB_SECURITY_GROUP_ID" \
-  --protocol tcp --port 5432 \
-  --source-group "$FSK_OPS_SECURITY_GROUP_ID"
-aws ec2 delete-security-group --region ap-northeast-1 \
-  --group-id "$FSK_OPS_SECURITY_GROUP_ID"
-aws ec2 describe-security-groups --region ap-northeast-1 \
-  --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
-    "Name=tag:TaskId,Values=${FSK_CLOUDSHELL_TASK_ID}" \
-  --query 'SecurityGroups[].GroupId'
-aws ec2 describe-security-group-rules --region ap-northeast-1 \
-  --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
-  --query "SecurityGroupRules[?ReferencedGroupInfo.GroupId=='${FSK_OPS_SECURITY_GROUP_ID}'].SecurityGroupRuleId"
-aws ec2 describe-nat-gateways --region ap-northeast-1 \
-  --filter "Name=vpc-id,Values=${FSK_VPC_ID}" \
-  --query 'NatGateways[?State!=`deleted`].NatGatewayId'
-```
-
-三个查询必须返回空数组，且 CloudShell environment 已从列表消失。证据缺一不可；未确认清理不得进入 full backend deploy。
+CloudShell VPC environment 删除、DB ingress revoke 和运维 SG delete 已全部包含在上述 worker handoff + control cleanup 边界，不再运行独立、TaskId-only 的 SG cleanup 命令。Amplify branch secret 作为后续 full backend 所需受管 secret 暂时保留，但销毁时必须单独删除。CloudShell environment 已从列表消失、八类 residual count 稳定全零、最小观察时长达标、最终证据已保存且 parameters 安全删除缺一不可；未确认不得进入 full backend deploy。
 
 | 清理证据字段 | 值 |
 | --- | --- |
@@ -1985,11 +2612,19 @@ aws ec2 describe-nat-gateways --region ap-northeast-1 \
 | ControlStatusHistorySha256 | `PENDING_SCHEMA_GENERATION_NONSECRET` |
 | TemporaryEgressControlCleanupExit | `PENDING_SCHEMA_GENERATION` |
 | TemporaryEgressControlPollerExit | `PENDING_SCHEMA_GENERATION` |
-| WorkerTrapDisarmedAfterControlPass | `PENDING_SCHEMA_GENERATION` |
+| WorkerTrapDisarmedAfterReadyHandoff | `PENDING_SCHEMA_GENERATION` |
 | TemporaryEgressResidualCounts | `PENDING_SCHEMA_GENERATION` |
 | TemporaryEgressCleanupAttempts | `PENDING_SCHEMA_GENERATION` |
 | TemporaryEgressStableZeroObservations | `PENDING_SCHEMA_GENERATION` |
+| TemporaryEgressStableZeroDurationSeconds | `PENDING_SCHEMA_GENERATION` |
+| TemporaryEgressMinimumObservationSeconds | `180` |
 | TemporaryEgressCleanupStateChecksum | `PENDING_SCHEMA_GENERATION_NONSECRET` |
+| Task8OperationToken | `PENDING_TASK8_APPROVAL_NONSECRET` |
+| Task8WorkerInitDeadlineEpoch | `PENDING_TASK8_APPROVAL` |
+| OperationsSecurityGroupResidualCount | `PENDING_SCHEMA_GENERATION` |
+| DatabaseIngressRuleResidualCount | `PENDING_SCHEMA_GENERATION` |
+| Task8FinalEvidenceSha256 | `PENDING_SCHEMA_GENERATION_NONSECRET` |
+| Task8ParameterDeletionResult | `PENDING_SCHEMA_GENERATION` |
 | TemporaryEgressParametersDeletedAtJst | `PENDING_SCHEMA_GENERATION` |
 | TemporaryEgressParameterResidualQuery | `PENDING_SCHEMA_GENERATION` |
 | TemporaryEgressDeadlineOwnerAction | `PENDING_SCHEMA_GENERATION` |
@@ -2005,12 +2640,22 @@ aws ec2 describe-nat-gateways --region ap-northeast-1 \
 
 ## 5. Stage 3 — full backend deploy（独立审批门）
 
-先展示最终 backend diff、AppSync/SQL Lambda/业务 Functions/日志资源和更新后的成本表。只有用户明确批准第二次全栈 AWS 写入后才执行：
+先展示最终 backend diff、AppSync/SQL Lambda/业务 Functions/日志资源和更新后的成本表，并把已审查 full-backend commit 固化为 `$FSK_APPROVED_FULL_BACKEND_COMMIT`。只有用户明确批准第二次全栈 AWS 写入后才从该 exact clean commit 执行：
 
 ```bash
 set -euo pipefail
 : "${AMPLIFY_APP_ID:?use the exact approved staging App ID}"
-AWS_REGION=ap-northeast-1 AWS_DEFAULT_REGION=ap-northeast-1 CI=1 pnpm exec ampx pipeline-deploy --branch staging --app-id "$AMPLIFY_APP_ID" --outputs-out-dir apps/web/public
+: "${FSK_APPROVED_FULL_BACKEND_COMMIT:?use the reviewed full-backend commit}"
+case "$FSK_APPROVED_FULL_BACKEND_COMMIT" in
+  *[!0-9a-f]*|'') echo 'FULL_BACKEND_COMMIT_INVALID_STOP' >&2; exit 1 ;;
+esac
+test "${#FSK_APPROVED_FULL_BACKEND_COMMIT}" -eq 40
+test "$(git rev-parse HEAD)" = "$FSK_APPROVED_FULL_BACKEND_COMMIT"
+test -z "$(git status --short)"
+AWS_REGION=ap-northeast-1 AWS_DEFAULT_REGION=ap-northeast-1 CI=1 \
+  pnpm exec ampx pipeline-deploy \
+    --branch staging --app-id "$AMPLIFY_APP_ID" \
+    --outputs-out-dir apps/web/public
 ```
 
 | 证据字段 | 值 |
@@ -2024,11 +2669,132 @@ AWS_REGION=ap-northeast-1 AWS_DEFAULT_REGION=ap-northeast-1 CI=1 pnpm exec ampx 
 | FunctionStackIds | `PENDING_FULL_BACKEND` |
 | CleanupOwner | `PENDING_USER_APPROVAL` |
 
+全栈 AWS deploy 成功后，先核对 stack outputs、实际 diff 和 `$FSK_APPROVED_FULL_BACKEND_COMMIT`，再取得一个与 full backend AWS 写入分离的共享 Git ref 更新批准 `FullBackendRemoteCasApprovalId`。expected 只能是已验证 foundation commit，new 只能是已审查 full-backend commit；remote 已漂移、lease 竞态失败或更新后复验不等时都 `STOP`，不得改用普通 force：
+
+```bash
+set -euo pipefail
+: "${FSK_GIT_REMOTE:=origin}"
+: "${FSK_FOUNDATION_COMMIT:?use the verified foundation commit evidence}"
+: "${FSK_APPROVED_FULL_BACKEND_COMMIT:?use the reviewed full-backend commit}"
+: "${FSK_FULL_BACKEND_REMOTE_CAS_APPROVAL_ID:?independent shared Git approval required}"
+FSK_EXPECTED_REMOTE_STAGING_COMMIT="$FSK_FOUNDATION_COMMIT"
+test "$FSK_APPROVED_FULL_BACKEND_COMMIT" != "$FSK_EXPECTED_REMOTE_STAGING_COMMIT"
+git cat-file -e "${FSK_APPROVED_FULL_BACKEND_COMMIT}^{commit}"
+git merge-base --is-ancestor \
+  "$FSK_EXPECTED_REMOTE_STAGING_COMMIT" "$FSK_APPROVED_FULL_BACKEND_COMMIT"
+FSK_REMOTE_STAGING_BEFORE_FULL_CAS_LINE="$(
+  git ls-remote --heads "$FSK_GIT_REMOTE" refs/heads/staging
+)"
+FSK_REMOTE_STAGING_BEFORE_FULL_CAS_COUNT="$(
+  printf '%s\n' "$FSK_REMOTE_STAGING_BEFORE_FULL_CAS_LINE" |
+    awk 'NF { count += 1 } END { print count + 0 }'
+)"
+test "$FSK_REMOTE_STAGING_BEFORE_FULL_CAS_COUNT" -eq 1
+FSK_REMOTE_STAGING_BEFORE_FULL_CAS="$(
+  printf '%s\n' "$FSK_REMOTE_STAGING_BEFORE_FULL_CAS_LINE" |
+    awk 'NR == 1 { print $1 }'
+)"
+if [ "$FSK_REMOTE_STAGING_BEFORE_FULL_CAS" != \
+  "$FSK_EXPECTED_REMOTE_STAGING_COMMIT" ]; then
+  echo 'REMOTE_STAGING_FULL_BACKEND_EXPECTED_MISMATCH_STOP' >&2
+  exit 1
+fi
+if ! git push \
+  "--force-with-lease=refs/heads/staging:${FSK_EXPECTED_REMOTE_STAGING_COMMIT}" \
+  "$FSK_GIT_REMOTE" \
+  "${FSK_APPROVED_FULL_BACKEND_COMMIT}:refs/heads/staging"; then
+  echo 'REMOTE_STAGING_FULL_BACKEND_CAS_REJECTED_STOP' >&2
+  exit 1
+fi
+FSK_REMOTE_STAGING_AFTER_FULL_CAS_LINE="$(
+  git ls-remote --heads "$FSK_GIT_REMOTE" refs/heads/staging
+)"
+FSK_REMOTE_STAGING_AFTER_FULL_CAS_COUNT="$(
+  printf '%s\n' "$FSK_REMOTE_STAGING_AFTER_FULL_CAS_LINE" |
+    awk 'NF { count += 1 } END { print count + 0 }'
+)"
+test "$FSK_REMOTE_STAGING_AFTER_FULL_CAS_COUNT" -eq 1
+FSK_REMOTE_STAGING_AFTER_FULL_CAS="$(
+  printf '%s\n' "$FSK_REMOTE_STAGING_AFTER_FULL_CAS_LINE" |
+    awk 'NR == 1 { print $1 }'
+)"
+test "$FSK_REMOTE_STAGING_AFTER_FULL_CAS" = "$FSK_APPROVED_FULL_BACKEND_COMMIT"
+FSK_FULL_BACKEND_REMOTE_CAS_ACTOR="$(git config user.name)"
+FSK_FULL_BACKEND_REMOTE_CAS_AT_JST="$(
+  TZ=Asia/Tokyo date '+%Y-%m-%dT%H:%M:%S%z'
+)"
+```
+
+| Full backend remote CAS 证据字段 | 值 |
+| --- | --- |
+| FullBackendRemoteCasApprovalId | `PENDING_USER_APPROVAL` |
+| RemoteStagingExpectedCommit | `PENDING_FOUNDATION_COMMIT` |
+| RemoteStagingNewCommit | `PENDING_FULL_BACKEND` |
+| RemoteStagingBeforeCas | `PENDING_FULL_BACKEND` |
+| RemoteStagingCasPushResult | `PENDING_FULL_BACKEND` |
+| RemoteStagingAfterCas | `PENDING_FULL_BACKEND` |
+| RemoteStagingCasActor | `PENDING_FULL_BACKEND` |
+| RemoteStagingCasAtJst | `PENDING_FULL_BACKEND` |
+
 只创建 `stage-admin`、`stage-kitchen`、固定四班和合成数据。不得导入 production 或任何本地真实数据。Budget、Cost Anomaly Detection 和新 alarms 仍等待 Task 17 独立批准。
 
 ## 6. Stage 4 — Hosting build
 
-保持 branch Auto build 关闭，在 full backend 和输出核对成功后由 Console 手动 Start build。构建环境固定 `VITE_RUNTIME_MODE=amplify-staging`。Hosting build 只生成 outputs 并构建 Vue，不得运行 backend deploy。
+保持 branch Auto build 关闭。只有 full backend 与 outputs 核对成功、独立 remote CAS 完成且只读 `ls-remote` 精确指向 `$FSK_APPROVED_FULL_BACKEND_COMMIT` 后，才可由 Console 手动 Start build。Console 中记录 job ID 后立即用下列只读检查核对 job commit；不匹配时对 `CREATED/PENDING/PROVISIONING/RUNNING` 一律请求 stop，然后无条件非零退出并审计。这个门防止 Hosting 继续构建 foundation 旧源码：
+
+```bash
+set -euo pipefail
+: "${FSK_GIT_REMOTE:=origin}"
+: "${FSK_APPROVED_FULL_BACKEND_COMMIT:?use the reviewed full-backend commit}"
+: "${AMPLIFY_APP_ID:?use the exact approved staging App ID}"
+: "${AMPLIFY_HOSTING_JOB_ID:?record the manual Hosting job ID}"
+FSK_HOSTING_REMOTE_STAGING_LINE="$(
+  git ls-remote --heads "$FSK_GIT_REMOTE" refs/heads/staging
+)"
+FSK_HOSTING_REMOTE_STAGING_COUNT="$(
+  printf '%s\n' "$FSK_HOSTING_REMOTE_STAGING_LINE" |
+    awk 'NF { count += 1 } END { print count + 0 }'
+)"
+test "$FSK_HOSTING_REMOTE_STAGING_COUNT" -eq 1
+FSK_HOSTING_REMOTE_STAGING_COMMIT="$(
+  printf '%s\n' "$FSK_HOSTING_REMOTE_STAGING_LINE" |
+    awk 'NR == 1 { print $1 }'
+)"
+test "$FSK_HOSTING_REMOTE_STAGING_COMMIT" = "$FSK_APPROVED_FULL_BACKEND_COMMIT"
+FSK_HOSTING_JOB_STATUS="$(aws amplify get-job \
+  --region ap-northeast-1 \
+  --app-id "$AMPLIFY_APP_ID" \
+  --branch-name staging \
+  --job-id "$AMPLIFY_HOSTING_JOB_ID" \
+  --query 'job.summary.status' --output text)"
+FSK_HOSTING_JOB_COMMIT="$(aws amplify get-job \
+  --region ap-northeast-1 \
+  --app-id "$AMPLIFY_APP_ID" \
+  --branch-name staging \
+  --job-id "$AMPLIFY_HOSTING_JOB_ID" \
+  --query 'job.summary.commitId' --output text)"
+if [ "$FSK_HOSTING_JOB_COMMIT" != "$FSK_APPROVED_FULL_BACKEND_COMMIT" ]; then
+  case "$FSK_HOSTING_JOB_STATUS" in
+    CREATED|PENDING|PROVISIONING|RUNNING)
+      if ! aws amplify stop-job \
+        --region ap-northeast-1 \
+        --app-id "$AMPLIFY_APP_ID" \
+        --branch-name staging \
+        --job-id "$AMPLIFY_HOSTING_JOB_ID"; then
+        echo 'HOSTING_STOP_JOB_FAILED_AUDIT_REQUIRED' >&2
+      fi
+      ;;
+  esac
+  echo 'HOSTING_COMMIT_MISMATCH_STOP_AND_AUDIT' >&2
+  exit 1
+fi
+case "$FSK_HOSTING_JOB_STATUS" in
+  CREATED|PENDING|PROVISIONING|RUNNING|SUCCEED) ;;
+  *) echo 'HOSTING_JOB_NOT_BUILDABLE_STOP_AND_AUDIT' >&2; exit 1 ;;
+esac
+```
+
+构建环境固定 `VITE_RUNTIME_MODE=amplify-staging`。Hosting build 只生成 outputs 并构建 Vue，不得运行 backend deploy。继续只读轮询直到该精确 job ID terminal，只有 status `SUCCEED` 且 commit 仍精确相等才是 PASS。
 
 | 证据字段 | 值 |
 | --- | --- |
@@ -2037,6 +2803,8 @@ AWS_REGION=ap-northeast-1 AWS_DEFAULT_REGION=ap-northeast-1 CI=1 pnpm exec ampx 
 | AmplifyAppId | `PENDING_DEPLOYMENT` |
 | HostingBranch | `staging` |
 | HostingBuildId | `PENDING_HOSTING` |
+| HostingCommit | `PENDING_FULL_BACKEND` |
+| HostingCommitCheck | `PENDING_HOSTING` |
 | HostingUrl | `PENDING_HOSTING` |
 | ViteRuntimeMode | `amplify-staging` |
 | PublicBundleSecretScan | `PENDING_HOSTING` |
@@ -2060,12 +2828,13 @@ Task 7 创建的 Amplify App/branch、Task 8 的 `SQL_CONNECTION_STRING` branch 
 1. 停止/关闭新 build，记录最后一个 job ID/status/commit；从 App home → `Hosting` → `Secrets` → `Manage secrets` 对 `staging` scope 的 `SQL_CONNECTION_STRING` 选择 `Remove`，只保存 masked 删除证据。
 2. 用精确 App ID/branch ARN 在 Amplify Console 删除 `staging` branch/backend；记录删除操作前最后一个 job ID/status/commit、删除结果、操作者和 JST 时间。然后在 `All apps` 以精确 App ID 选择 `Delete app`，输入 Console 要求的确认文本，记录 request/result/time 截图；从批准证据设置 `$AMPLIFY_APP_ID` 后，用 `aws amplify list-apps --region ap-northeast-1 --query "length(apps[?appId=='${AMPLIFY_APP_ID}'])" --output text` 的只读结果 `0` 证明 App 消失。查询非零或失败都 `STOP`；不能把 branch 删除当成 App 已删除。
 3. 只使用本次独立销毁批准中逐项列出的 Root/Auth/Storage/Foundation stack IDs 检查 CloudFormation terminal delete 结果；批准未列出的 stack 不删除。对每个 stack 记录 delete request/result、最终 `DELETE_COMPLETE`/不存在、操作者和时间。删除前后分别列出 Storage bucket 的 retained version/delete-marker 数量与 bytes，以及 Aurora final snapshot identifier/status/bytes；实际仍保留的 S3 versions 和 snapshot 必须记录保留原因、预计持续成本、CostOwner 和后续批准编号。`keepOnDelete` 资源不能假定随 stack 消失，也不能引用尚不存在的外部“销毁计划”代替这些结果。
-4. App、stacks、S3 retained versions 和 snapshot 的实际结果及成本责任全部留证后，才处理共享 Git ref。先从最近一次批准的部署证据取得 `FSK_EXPECTED_REMOTE_STAGING_COMMIT`；只读结果不精确匹配时 `STOP`，不得删除他人更新。匹配时使用 compare-and-swap deletion；lease 的 expected value 是该批准 commit，若 ref 在核对后发生竞态更新，push 必须拒绝删除，不能重试为普通 force：
+4. App、stacks、S3 retained versions 和 snapshot 的实际结果及成本责任全部留证后，才处理共享 Git ref。先从最近一次批准的部署证据取得 `FSK_CURRENT_APPROVED_REMOTE_STAGING_COMMIT`；对本次 runbook，它必须是 §5 remote CAS 复验后的 full-backend commit，不能回退为 foundation expected。若后续又有经批准部署，必须使用最新的 current expected。只读结果不精确匹配时 `STOP`，不得删除他人更新。匹配时使用 compare-and-swap deletion；lease 的 expected value 是该批准 commit，若 ref 在核对后发生竞态更新，push 必须拒绝删除，不能重试为普通 force：
 
 ```bash
 set -euo pipefail
 : "${FSK_GIT_REMOTE:=origin}"
-: "${FSK_EXPECTED_REMOTE_STAGING_COMMIT:?use the latest approved remote commit evidence}"
+: "${FSK_CURRENT_APPROVED_REMOTE_STAGING_COMMIT:?use the current approved remote commit evidence}"
+FSK_EXPECTED_REMOTE_STAGING_COMMIT="$FSK_CURRENT_APPROVED_REMOTE_STAGING_COMMIT"
 FSK_REMOTE_STAGING_BEFORE_DELETE_LINE="$(
   git ls-remote --heads "$FSK_GIT_REMOTE" refs/heads/staging
 )"
