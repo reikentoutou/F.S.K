@@ -96,15 +96,22 @@ export function grandTotalPairs(t: GrandTotalsAgg): ExportPair[] {
 export function byShiftSummaryPairs(b: ByShiftExportSummary): ExportPair[] {
   return [
     ['件数', b.count],
-    ['Imos売上合計', `${b.imosSalesYen} 円`],
-    ['実際売上', `${b.totalSalesYen} 円`],
-    ['現金入金金額', `${b.cashDepositYen} 円`],
-    ['支出', `${b.expenseYen} 円`],
-    ['网管餐費（現金）', `${b.staffMealCashYen} 円`],
-    ['网管餐費（支付宝）', `${b.staffMealAlipayYen} 円`],
-    ['网管餐費合計', `${b.staffMealTotalYen} 円`],
-    ['偏差', `${b.deviationYen} 円`],
+    ['Imos売上合計', b.imosSalesYen],
+    ['実際売上', b.totalSalesYen],
+    ['現金入金金額', b.cashDepositYen],
+    ['支出', b.expenseYen],
+    ['网管餐費（現金）', b.staffMealCashYen],
+    ['网管餐費（支付宝）', b.staffMealAlipayYen],
+    ['网管餐費合計', b.staffMealTotalYen],
+    ['偏差', b.deviationYen],
   ];
+}
+
+export function formatByShiftSummaryValue(
+  label: string,
+  value: string | number,
+): string {
+  return label === '件数' ? String(value) : `${value} 円`;
 }
 
 export function shiftDetailPairs(

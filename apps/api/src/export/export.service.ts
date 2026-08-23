@@ -8,6 +8,7 @@ import type { Period } from '../analytics/period-range';
 import {
   aggregateGrandTotalsFromRows,
   byShiftSummaryPairs,
+  formatByShiftSummaryValue,
   grandTotalPairs,
   shiftDetailPairs,
   type GrandTotalsAgg,
@@ -278,7 +279,9 @@ ${this.verticalByShiftSummaryHtml(data.byShift)}
         const rows = byShiftSummaryPairs(b)
           .map(
             ([k, v]) =>
-              `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(String(v))}</td></tr>`,
+              `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(
+                formatByShiftSummaryValue(k, v),
+              )}</td></tr>`,
           )
           .join('');
         return `<h3>${escapeHtml(b.shiftName)}</h3><table class="vtot">${rows}</table>`;
