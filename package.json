@@ -19,6 +19,9 @@
     "test:web": "pnpm --filter @finance/web run test",
     "db:push": "pnpm --filter @finance/api exec prisma db push",
     "db:generate": "pnpm --filter @finance/api exec prisma generate",
+    "db:staging:migrate": "tsx amplify/database/scripts/migrate.ts",
+    "db:staging:verify": "tsx amplify/database/scripts/verify-schema.ts",
+    "db:staging:seed": "tsx amplify/database/scripts/seed-staging.ts",
     "docs:skills": "node scripts/update-skills-usage-doc.cjs"
   },
   "devDependencies": {
