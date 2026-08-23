@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
 const ignore = readFileSync('.gitignore', 'utf8').split(/\r?\n/);
@@ -12,8 +13,12 @@ function migrationFiles(directory: string): string[] {
 
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
-    return entry.isDirectory() ? migrationFiles(path) : [path];
+    return entry.isDirectory() ? [path, ...migrationFiles(path)] : [path];
   });
+}
+
+function hasProhibitedMigrationArtifact(paths: string[]): boolean {
+  return paths.some((path) => /(?:\.db$|\.zip$|(?:^|[\\/])uploads(?:[\\/]|$))/.test(path));
 }
 
 describe('Amplify repository guard', () => {
@@ -26,10 +31,18 @@ describe('Amplify repository guard', () => {
   ])('ignores %s', (entry) => expect(ignore).toContain(entry));
 
   it('keeps migration artifacts free of databases, archives, and uploads', () => {
-    expect(migrationFiles(migrationsDirectory)).not.toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/(?:\.db$|\.zip$|(?:^|[\\/])uploads(?:[\\/]|$))/),
-      ]),
-    );
+    expect(hasProhibitedMigrationArtifact(migrationFiles(migrationsDirectory))).toBe(false);
+  });
+
+  it('rejects an empty uploads directory in migrations', () => {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'amplify-migrations-'));
+    const prohibitedDirectory = join(fixtureDirectory, 'uploads');
+    mkdirSync(prohibitedDirectory);
+
+    try {
+      expect(hasProhibitedMigrationArtifact(migrationFiles(fixtureDirectory))).toBe(true);
+    } finally {
+      rmSync(fixtureDirectory, { recursive: true, force: true });
+    }
   });
 });
