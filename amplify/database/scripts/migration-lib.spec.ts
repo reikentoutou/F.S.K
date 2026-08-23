@@ -74,6 +74,45 @@ describe('migration planning', () => {
       ),
     ).toThrow('MIGRATION_CHECKSUM_MISMATCH');
   });
+
+  it('rejects an applied migration whose committed file was deleted', () => {
+    expect(() =>
+      planMigrations(
+        [
+          { version: '001', checksum: 'abc' },
+          { version: '002', checksum: 'def' },
+        ],
+        [{ version: '001', checksum: 'abc' }],
+      ),
+    ).toThrow('MIGRATION_APPLIED_VERSION_MISSING');
+  });
+
+  it('rejects renumbering an already-applied migration', () => {
+    expect(() =>
+      planMigrations(
+        [{ version: '001', checksum: 'abc' }],
+        [{ version: '002', checksum: 'abc' }],
+      ),
+    ).toThrow('MIGRATION_APPLIED_VERSION_MISSING');
+  });
+
+  it.each(['01', '1000', 'abc'])(
+    'rejects non-three-digit migration version %s',
+    (version) => {
+      expect(() => planMigrations([], [{ version, checksum: 'abc' }])).toThrow(
+        'MIGRATION_VERSION_INVALID',
+      );
+    },
+  );
+
+  it('rejects a gap in committed migration versions', () => {
+    expect(() =>
+      planMigrations([], [
+        { version: '001', checksum: 'abc' },
+        { version: '003', checksum: 'ghi' },
+      ]),
+    ).toThrow('MIGRATION_VERSION_GAP');
+  });
 });
 
 describe('migration file loading', () => {
@@ -128,6 +167,35 @@ describe('migration file loading', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('rejects a four-digit migration filename', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fsk-migrations-'));
+
+    try {
+      await writeFile(join(directory, '1000_future.sql'), 'SELECT 1;');
+
+      await expect(loadMigrationFiles(directory)).rejects.toThrow(
+        'MIGRATION_FILENAME_INVALID',
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a gap in migration filenames', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fsk-migrations-'));
+
+    try {
+      await writeFile(join(directory, '001_first.sql'), 'SELECT 1;');
+      await writeFile(join(directory, '003_third.sql'), 'SELECT 3;');
+
+      await expect(loadMigrationFiles(directory)).rejects.toThrow(
+        'MIGRATION_VERSION_GAP',
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 const BUSINESS_TABLES = [
@@ -145,14 +213,16 @@ const BUSINESS_TABLES = [
 
 const tableBlock = (sql: string, tableName: string): string => {
   const startPattern = new RegExp(
-    `CREATE TABLE(?: IF NOT EXISTS)?\\s+${tableName}\\s*\\(`,
+    `CREATE TABLE(?: IF NOT EXISTS)?\\s+public\\.${tableName}\\s*\\(`,
     'i',
   );
   const start = sql.search(startPattern);
   if (start === -1) return '';
 
   const remainder = sql.slice(start + 1);
-  const nextOffset = remainder.search(/\nCREATE TABLE(?: IF NOT EXISTS)?\s+/i);
+  const nextOffset = remainder.search(
+    /\nCREATE TABLE(?: IF NOT EXISTS)?\s+public\./i,
+  );
   return nextOffset === -1 ? sql.slice(start) : sql.slice(start, start + 1 + nextOffset);
 };
 
@@ -162,7 +232,7 @@ describe('authoritative bootstrap DDL', () => {
       'amplify/database/migrations/001_bootstrap.sql',
       'utf8',
     );
-    const tables = [...sql.matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+([a-z_]+)\s*\(/gi)]
+    const tables = [...sql.matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+public\.([a-z_]+)\s*\(/gi)]
       .map((match) => match[1])
       .sort();
 
@@ -196,7 +266,7 @@ describe('authoritative bootstrap DDL', () => {
     );
   });
 
-  it('stores all raw yen as checked integers and only the four Phase A totals', async () => {
+  it('stores raw yen as checked integers and all four persisted totals as bigint', async () => {
     const sql = await readFile(
       'amplify/database/migrations/001_bootstrap.sql',
       'utf8',
@@ -238,9 +308,33 @@ describe('authoritative bootstrap DDL', () => {
       );
     }
     for (const column of derivedReportAmounts) {
-      expect(report).toMatch(new RegExp(`\\b${column}\\s+integer\\b`, 'i'));
+      expect(report).toMatch(new RegExp(`\\b${column}\\s+bigint\\b`, 'i'));
     }
     expect(report).not.toMatch(/\bstaff_meal_total_yen\b/i);
+  });
+
+  it('covers the combined min/max capacity of every persisted derived amount', () => {
+    const maximumRawYen = 2_000_000_000;
+
+    expect({
+      imosSalesYen: [0 - maximumRawYen, maximumRawYen - 0],
+      cashDepositYen: [0 - maximumRawYen, maximumRawYen - 0],
+      totalSalesYen: [
+        0 + 0 - maximumRawYen - maximumRawYen,
+        maximumRawYen + maximumRawYen - 0 - 0,
+      ],
+      deviationYen: [
+        -4_000_000_000 + 0 - maximumRawYen,
+        4_000_000_000 + maximumRawYen - -maximumRawYen,
+      ],
+    }).toEqual({
+      imosSalesYen: [-2_000_000_000, 2_000_000_000],
+      cashDepositYen: [-2_000_000_000, 2_000_000_000],
+      totalSalesYen: [-4_000_000_000, 4_000_000_000],
+      deviationYen: [-6_000_000_000, 8_000_000_000],
+    });
+    expect(8_000_000_000).toBeGreaterThan(2_147_483_647);
+    expect(Number.isSafeInteger(8_000_000_000)).toBe(true);
   });
 
   it('provides the foreign keys, snapshots, and audit fields used by trusted writes', async () => {
@@ -252,9 +346,9 @@ describe('authoritative bootstrap DDL', () => {
     const revision = tableBlock(sql, 'daily_report_revision');
 
     for (const requiredFragment of [
-      'shift_id text NOT NULL REFERENCES shift(id)',
-      'responsible_person_id text NOT NULL REFERENCES responsible_person(id)',
-      'created_by_user_id text NOT NULL REFERENCES app_user(id)',
+      'shift_id text NOT NULL REFERENCES public.shift(id)',
+      'responsible_person_id text NOT NULL REFERENCES public.responsible_person(id)',
+      'created_by_user_id text NOT NULL REFERENCES public.app_user(id)',
       'shift_name_snapshot text NOT NULL',
       'responsible_person_snapshot text NOT NULL',
       'created_by_cognito_subject_snapshot text NOT NULL',
@@ -286,11 +380,19 @@ describe('transactional migration application', () => {
 
     const texts = client.calls.map(({ text }) => text);
     const inserts = client.calls.filter(({ text }) =>
-      text.includes('INSERT INTO schema_migrations'),
+      text.includes('INSERT INTO public.schema_migrations'),
     );
 
     expect(texts[0]).toBe('BEGIN');
-    expect(texts).toContain('LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE');
+    expect(texts[1]).toBe(
+      'SELECT pg_catalog.pg_advisory_xact_lock(1179863883, 5)',
+    );
+    expect(texts[2]).toMatch(
+      /^CREATE TABLE IF NOT EXISTS public\.schema_migrations/,
+    );
+    expect(texts[3]).toBe(
+      'LOCK TABLE public.schema_migrations IN ACCESS EXCLUSIVE MODE',
+    );
     expect(texts.indexOf(sql001)).toBeLessThan(texts.indexOf(sql002));
     expect(inserts.map(({ values }) => values)).toEqual([
       [
@@ -320,6 +422,20 @@ describe('transactional migration application', () => {
       client.calls.some(({ text }) => text.includes('INSERT INTO schema_migrations')),
     ).toBe(false);
   });
+
+  it.each([
+    'BEGIN; SELECT 1;',
+    'SELECT 1; COMMIT;',
+    '-- misleading comment\nROLLBACK;',
+    'START TRANSACTION; SELECT 1;',
+  ])('rejects migration-owned transaction control before BEGIN: %s', async (sql) => {
+    const client = new FakeMigrationClient();
+
+    await expect(
+      applyMigrations(client, [{ version: '001', sql }]),
+    ).rejects.toThrow('MIGRATION_TRANSACTION_CONTROL_FORBIDDEN');
+    expect(client.calls).toEqual([]);
+  });
 });
 
 describe('migration runner wiring', () => {
@@ -344,14 +460,23 @@ describe('migration runner wiring', () => {
 });
 
 describe('staging PostgreSQL DATABASE_URL guard', () => {
-  it('accepts only the explicit remote fsk_staging database', () => {
+  it.each(['require', 'verify-full'])(
+    'accepts the explicit remote fsk_staging database with sslmode=%s',
+    (sslmode) => {
+      const databaseUrl =
+        `postgresql://stage_user:secret@fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com:5432/fsk_staging?sslmode=${sslmode}`;
+
+      expect(assertStagingDatabaseUrl(databaseUrl)).toBe(databaseUrl);
+    },
+  );
+
+  it('rejects a remote URL without an approved TLS parameter', () => {
     expect(
-      assertStagingDatabaseUrl(
-        'postgresql://stage_user:secret@fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com:5432/fsk_staging?sslmode=require',
-      ),
-    ).toBe(
-      'postgresql://stage_user:secret@fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com:5432/fsk_staging?sslmode=require',
-    );
+      () =>
+        assertStagingDatabaseUrl(
+          'postgresql://stage_user:secret@fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com:5432/fsk_staging',
+        ),
+    ).toThrow('DATABASE_URL_TLS_PARAMETER_REQUIRED');
   });
 
   it.each([
@@ -363,6 +488,9 @@ describe('staging PostgreSQL DATABASE_URL guard', () => {
     'postgresql://user:secret@fsk.example:5432/fsk_staging?host=%2Ftmp',
     'postgresql://user:secret@fsk.example:5432/fsk_staging?password=override',
     'postgresql://user:secret@fsk.example:5432/fsk_staging?sslkey=%2Ftmp%2Fclient.key',
+    'postgresql://user:secret@fsk.example:5432/fsk_staging?options=-csearch_path%3Devil%2Cpublic',
+    'postgresql://user:secret@fsk.example:5432/fsk_staging?application_name=fsk',
+    'postgresql://user:secret@fsk.example:5432/fsk_staging?sslmode=disable',
     'postgresql://user:secret@fsk.example:5432/postgres',
     'postgresql://user:secret@fsk.example:5432/dev.db',
     'file:./apps/api/prisma/dev.db',
@@ -428,7 +556,7 @@ const expectedAmountColumns = [
   ].map((columnName) => ({
     table_name: 'daily_report',
     column_name: columnName,
-    data_type: 'integer',
+    data_type: 'bigint',
     check_expressions: [],
   })),
 ];
@@ -476,7 +604,7 @@ class FakeVerificationClient implements MigrationClient {
     if (text.includes('FROM information_schema.columns c')) {
       return { rows: this.fixture.amountColumns };
     }
-    if (text.includes('FROM schema_migrations')) {
+    if (text.includes('schema_migrations')) {
       return { rows: this.fixture.migrations };
     }
     throw new Error('unexpected verification query');
@@ -498,6 +626,9 @@ describe('read-only schema verification', () => {
       expect(query.trim()).toMatch(/^(SELECT|WITH)\b/i);
       expect(query).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|LOCK)\b/i);
     }
+    expect(client.calls.some((query) => query.includes('FROM public.schema_migrations'))).toBe(
+      true,
+    );
   });
 
   it('rejects a missing business table', async () => {
@@ -537,6 +668,17 @@ describe('read-only schema verification', () => {
     ).rejects.toThrow('SCHEMA_DAILY_REPORT_UNIQUE_MISMATCH');
   });
 
+  it('rejects an extra dangerous daily report unique constraint', async () => {
+    const fixture = validVerificationFixture();
+    fixture.uniqueConstraints.push({ columns: ['report_date'] });
+
+    await expect(
+      verifySchema(new FakeVerificationClient(fixture), [
+        { version: '001', checksum: 'expected-checksum' },
+      ]),
+    ).rejects.toThrow('SCHEMA_DAILY_REPORT_UNIQUE_MISMATCH');
+  });
+
   it('rejects a raw amount without the full integer range check', async () => {
     const fixture = validVerificationFixture();
     fixture.amountColumns = fixture.amountColumns.map((row) =>
@@ -546,6 +688,44 @@ describe('read-only schema verification', () => {
             check_expressions: [
               '((staff_meal_cash_yen < 0) OR (staff_meal_cash_yen > 2000000000))',
             ],
+          }
+        : row,
+    );
+
+    await expect(
+      verifySchema(new FakeVerificationClient(fixture), [
+        { version: '001', checksum: 'expected-checksum' },
+      ]),
+    ).rejects.toThrow('SCHEMA_AMOUNT_CONTRACT_MISMATCH');
+  });
+
+  it('rejects OR-based raw bounds that do not enforce the range', async () => {
+    const fixture = validVerificationFixture();
+    fixture.amountColumns = fixture.amountColumns.map((row) =>
+      row.column_name === 'staff_meal_cash_yen'
+        ? {
+            ...row,
+            check_expressions: [
+              '((staff_meal_cash_yen >= 0) OR (staff_meal_cash_yen <= 2000000000))',
+            ],
+          }
+        : row,
+    );
+
+    await expect(
+      verifySchema(new FakeVerificationClient(fixture), [
+        { version: '001', checksum: 'expected-checksum' },
+      ]),
+    ).rejects.toThrow('SCHEMA_AMOUNT_CONTRACT_MISMATCH');
+  });
+
+  it('rejects any CHECK constraint on a persisted derived amount', async () => {
+    const fixture = validVerificationFixture();
+    fixture.amountColumns = fixture.amountColumns.map((row) =>
+      row.column_name === 'imos_sales_yen'
+        ? {
+            ...row,
+            check_expressions: ['(imos_sales_yen >= 0)'],
           }
         : row,
     );
@@ -583,6 +763,10 @@ class FakeSeedRepository implements StagingSeedRepository {
   ): Promise<T> {
     this.transactionCount += 1;
     return work(this);
+  }
+
+  async findUserCognitoSubjectForUpdate(id: string): Promise<string | null> {
+    return this.users.get(id)?.cognitoSubject ?? null;
   }
 
   async upsertUser(user: SeedUser): Promise<void> {
@@ -675,5 +859,63 @@ describe('deterministic staging seed', () => {
         updatedByUserId: 'stage-admin',
       },
     ]);
+  });
+
+  it('preserves a reconciled Cognito subject on later seed runs', async () => {
+    const repository = new FakeSeedRepository();
+
+    await seedStaging(repository);
+    repository.users.set('stage-admin', {
+      ...repository.users.get('stage-admin')!,
+      cognitoSubject: 'cognito-real-admin-subject',
+    });
+
+    await seedStaging(repository);
+
+    expect(repository.users.get('stage-admin')?.cognitoSubject).toBe(
+      'cognito-real-admin-subject',
+    );
+    expect(repository.users.get('stage-kitchen')?.cognitoSubject).toBe(
+      'stage-kitchen',
+    );
+  });
+
+  it('locks user subjects and schema-qualifies all PostgreSQL seed statements', async () => {
+    const seedModule = (await import('./seed-staging.js')) as unknown as {
+      createPgStagingSeedRepository?: (
+        client: {
+          query(
+            text: string,
+            values?: unknown[],
+          ): Promise<{ rows: Array<Record<string, unknown>> }>;
+        },
+      ) => StagingSeedRepository;
+    };
+    expect(seedModule.createPgStagingSeedRepository).toBeTypeOf('function');
+
+    const statements: string[] = [];
+    const repository = seedModule.createPgStagingSeedRepository!({
+      async query(text: string) {
+        statements.push(text);
+        return { rows: [] };
+      },
+    });
+
+    await seedStaging(repository);
+
+    const tableStatements = statements.filter((text) =>
+      /\b(?:FROM|INTO)\s+(?:app_user|shift|responsible_person|app_settings)\b/i.test(
+        text,
+      ),
+    );
+    expect(tableStatements).toEqual([]);
+    expect(
+      statements.filter((text) => /\b(?:FROM|INTO)\s+public\./i.test(text)),
+    ).toHaveLength(10);
+    expect(statements.filter((text) => /SELECT cognito_subject/i.test(text))).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/FROM public\.app_user[\s\S]*FOR UPDATE/i),
+      ]),
+    );
   });
 });

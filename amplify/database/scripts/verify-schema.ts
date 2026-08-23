@@ -93,14 +93,17 @@ SELECT c.table_name,
        c.column_name,
        c.data_type,
        ARRAY(
-         SELECT pg_get_expr(pc.conbin, pc.conrelid)
-         FROM pg_constraint pc
-         JOIN pg_class rel ON rel.oid = pc.conrelid
-         JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+         SELECT pg_catalog.pg_get_expr(pc.conbin, pc.conrelid)
+         FROM pg_catalog.pg_constraint pc
+         JOIN pg_catalog.pg_class rel ON rel.oid = pc.conrelid
+         JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+         JOIN pg_catalog.pg_attribute attr
+           ON attr.attrelid = rel.oid
+          AND attr.attname = c.column_name
+          AND attr.attnum = ANY(pc.conkey)
          WHERE ns.nspname = 'public'
            AND rel.relname = c.table_name
            AND pc.contype = 'c'
-           AND position(c.column_name in pg_get_constraintdef(pc.oid)) > 0
        ) AS check_expressions
 FROM information_schema.columns c
 JOIN expected_amount e
@@ -110,7 +113,7 @@ WHERE c.table_schema = 'public'
 ORDER BY c.table_name, c.column_name`;
 
 const MIGRATIONS_SQL = `SELECT version, checksum, status
-FROM schema_migrations
+FROM public.schema_migrations
 ORDER BY version`;
 
 const sortedStrings = (values: string[]): string[] => [...values].sort();
@@ -125,19 +128,16 @@ const hasRawAmountRangeCheck = (
   expressions: unknown,
   columnName: string,
 ): boolean => {
-  const lowerBound = `${columnName}>=0`;
-  const upperBound = `${columnName}<=2000000000`;
-  const between = `${columnName}between0and2000000000`;
+  const normalized = normalizedColumns(expressions).map((expression) =>
+    expression.toLowerCase().replace(/[\s()"]/g, ''),
+  );
+  const acceptedExpressions = new Set([
+    `${columnName}>=0and${columnName}<=2000000000`,
+    `${columnName}<=2000000000and${columnName}>=0`,
+    `${columnName}between0and2000000000`,
+  ]);
 
-  return normalizedColumns(expressions).some((expression) => {
-    const normalized = expression
-      .toLowerCase()
-      .replace(/[\s()"]/g, '');
-    return (
-      normalized.includes(between) ||
-      (normalized.includes(lowerBound) && normalized.includes(upperBound))
-    );
-  });
+  return normalized.length === 1 && acceptedExpressions.has(normalized[0]);
 };
 
 export async function verifySchema(
@@ -170,8 +170,10 @@ export async function verifySchema(
     normalizedColumns(row.columns).join(','),
   );
   if (
-    !uniqueColumns.includes('idempotency_key') ||
-    !uniqueColumns.includes('report_date,shift_id')
+    !sameStringSet(uniqueColumns, [
+      'idempotency_key',
+      'report_date,shift_id',
+    ])
   ) {
     throw new Error('SCHEMA_DAILY_REPORT_UNIQUE_MISMATCH');
   }
@@ -198,7 +200,10 @@ export async function verifySchema(
   }
   for (const [tableName, columnName] of DERIVED_AMOUNT_COLUMNS) {
     const row = amountRows.get(`${tableName}:${columnName}`);
-    if (row?.data_type !== 'integer') {
+    if (
+      row?.data_type !== 'bigint' ||
+      normalizedColumns(row.check_expressions).length !== 0
+    ) {
       throw new Error('SCHEMA_AMOUNT_CONTRACT_MISMATCH');
     }
   }

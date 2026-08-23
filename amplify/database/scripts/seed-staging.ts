@@ -28,6 +28,7 @@ export interface StagingSeedRepository {
   withTransaction<T>(
     work: (repository: StagingSeedRepository) => Promise<T>,
   ): Promise<T>;
+  findUserCognitoSubjectForUpdate(id: string): Promise<string | null>;
   upsertUser(user: SeedUser): Promise<void>;
   upsertShift(shift: SeedShift): Promise<void>;
   upsertResponsiblePerson(person: {
@@ -84,12 +85,26 @@ const STAGING_SETTINGS: SeedSettings = {
   updatedByUserId: 'stage-admin',
 };
 
+const STAGING_PLACEHOLDER_SUBJECTS = new Set(
+  STAGING_USERS.map(({ cognitoSubject }) => cognitoSubject),
+);
+
 export async function seedStaging(
   repository: StagingSeedRepository,
 ): Promise<{ users: 2; shifts: 4; responsiblePeople: 1; settings: 1 }> {
   return repository.withTransaction(async (transaction) => {
     for (const user of STAGING_USERS) {
-      await transaction.upsertUser(user);
+      const existingSubject = await transaction.findUserCognitoSubjectForUpdate(
+        user.id,
+      );
+      await transaction.upsertUser({
+        ...user,
+        cognitoSubject:
+          existingSubject === null ||
+          STAGING_PLACEHOLDER_SUBJECTS.has(existingSubject)
+            ? user.cognitoSubject
+            : existingSubject,
+      });
     }
     for (const shift of STAGING_FIXED_SHIFTS) {
       await transaction.upsertShift(shift);
@@ -101,8 +116,11 @@ export async function seedStaging(
   });
 }
 
-interface QueryExecutor {
-  query(text: string, values?: unknown[]): Promise<unknown>;
+export interface QueryExecutor {
+  query(
+    text: string,
+    values?: unknown[],
+  ): Promise<{ rows: Array<Record<string, unknown>> }>;
 }
 
 class PgStagingSeedRepository implements StagingSeedRepository {
@@ -122,9 +140,21 @@ class PgStagingSeedRepository implements StagingSeedRepository {
     }
   }
 
+  async findUserCognitoSubjectForUpdate(id: string): Promise<string | null> {
+    const result = await this.client.query(
+      `SELECT cognito_subject
+       FROM public.app_user
+       WHERE id = $1
+       FOR UPDATE`,
+      [id],
+    );
+    const subject = result.rows[0]?.cognito_subject;
+    return typeof subject === 'string' ? subject : null;
+  }
+
   async upsertUser(user: SeedUser): Promise<void> {
     await this.client.query(
-      `INSERT INTO app_user (
+      `INSERT INTO public.app_user AS target (
          id, cognito_subject, username_snapshot, role, active
        ) VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE SET
@@ -133,7 +163,7 @@ class PgStagingSeedRepository implements StagingSeedRepository {
          role = EXCLUDED.role,
          active = EXCLUDED.active,
          updated_at = CURRENT_TIMESTAMP
-       WHERE (app_user.cognito_subject, app_user.username_snapshot, app_user.role, app_user.active)
+       WHERE (target.cognito_subject, target.username_snapshot, target.role, target.active)
          IS DISTINCT FROM
          (EXCLUDED.cognito_subject, EXCLUDED.username_snapshot, EXCLUDED.role, EXCLUDED.active)`,
       [
@@ -148,14 +178,14 @@ class PgStagingSeedRepository implements StagingSeedRepository {
 
   async upsertShift(shift: SeedShift): Promise<void> {
     await this.client.query(
-      `INSERT INTO shift (id, name, sort_order, active)
+      `INSERT INTO public.shift AS target (id, name, sort_order, active)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          sort_order = EXCLUDED.sort_order,
          active = EXCLUDED.active,
          updated_at = CURRENT_TIMESTAMP
-       WHERE (shift.name, shift.sort_order, shift.active)
+       WHERE (target.name, target.sort_order, target.active)
          IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.sort_order, EXCLUDED.active)`,
       [shift.id, shift.name, shift.sortOrder, shift.active],
     );
@@ -166,13 +196,13 @@ class PgStagingSeedRepository implements StagingSeedRepository {
     name: string;
   }): Promise<void> {
     await this.client.query(
-      `INSERT INTO responsible_person (id, name, active)
+      `INSERT INTO public.responsible_person AS target (id, name, active)
        VALUES ($1, $2, true)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          active = EXCLUDED.active,
          updated_at = CURRENT_TIMESTAMP
-       WHERE (responsible_person.name, responsible_person.active)
+       WHERE (target.name, target.active)
          IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.active)`,
       [person.id, person.name],
     );
@@ -180,7 +210,7 @@ class PgStagingSeedRepository implements StagingSeedRepository {
 
   async upsertSettings(settings: SeedSettings): Promise<void> {
     await this.client.query(
-      `INSERT INTO app_settings (
+      `INSERT INTO public.app_settings AS target (
          id, register_float_amount, setup_completed, updated_by_user_id
        ) VALUES ($1, $2, $3, $4)
        ON CONFLICT (id) DO UPDATE SET
@@ -189,9 +219,9 @@ class PgStagingSeedRepository implements StagingSeedRepository {
          updated_by_user_id = EXCLUDED.updated_by_user_id,
          updated_at = CURRENT_TIMESTAMP
        WHERE (
-         app_settings.register_float_amount,
-         app_settings.setup_completed,
-         app_settings.updated_by_user_id
+         target.register_float_amount,
+         target.setup_completed,
+         target.updated_by_user_id
        ) IS DISTINCT FROM (
          EXCLUDED.register_float_amount,
          EXCLUDED.setup_completed,
@@ -207,6 +237,10 @@ class PgStagingSeedRepository implements StagingSeedRepository {
   }
 }
 
+export const createPgStagingSeedRepository = (
+  client: QueryExecutor,
+): StagingSeedRepository => new PgStagingSeedRepository(client);
+
 const safeErrorCode = (error: unknown): string => {
   const message = error instanceof Error ? error.message : '';
   return /^[A-Z][A-Z0-9_]*$/.test(message) ? message : 'STAGING_SEED_FAILED';
@@ -218,7 +252,7 @@ async function main(): Promise<void> {
 
   await client.connect();
   try {
-    const result = await seedStaging(new PgStagingSeedRepository(client));
+    const result = await seedStaging(createPgStagingSeedRepository(client));
     console.log(
       `STAGING_SEED_APPLIED users=${result.users} shifts=${result.shifts} responsible_people=${result.responsiblePeople} settings=${result.settings}`,
     );
