@@ -102,25 +102,40 @@ const parseJpyAmount = (value: string): number => {
   return amount;
 };
 
-const PENDING_PRE_BINDING_APPROVAL_EVIDENCE = {
-  ApprovalId: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
-  Approver: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
-  ApprovedAtJst: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
-  ExpiresAtJst: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
-  ApprovalScope: ['PENDING_USER_APPROVAL'],
-  UserApprovalStatement: ['PENDING_USER_APPROVAL'],
-  ApprovalMessageOrTaskId: ['PENDING_USER_APPROVAL'],
-  ApprovedStage: ['PENDING_USER_APPROVAL'],
-  ApprovedCommit: ['PENDING_USER_APPROVAL'],
-  CostOwner: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
-  CleanupOwner: ['PENDING_USER_APPROVAL', 'PENDING_USER_APPROVAL'],
+const FOUNDATION_APPROVAL_EVIDENCE = {
+  ApprovalId: [
+    'FSK-FOUNDATION-20260823-221547-JST',
+    'FSK-FOUNDATION-20260823-221547-JST',
+  ],
+  Approver: ['reiken', 'reiken'],
+  ApprovedAtJst: [
+    '2026-08-23 22:15:47 JST',
+    '2026-08-23 22:15:47 JST',
+  ],
+  ExpiresAtJst: [
+    '2026-08-24 22:15:47 JST',
+    '2026-08-24 22:15:47 JST',
+  ],
+  ApprovalScope: [
+    'Foundation only: remote tag/staging branch + Auth/Storage/VPC/Aurora/Data API',
+  ],
+  UserApprovalStatement: [
+    '批准将 fsk-staging-data-api-foundation-v1 推送到远程，并在 AWS 账号 444083008754、ap-northeast-1 创建独立 FSK staging Foundation；月治理上限 ¥5,000，不包含完整 backend、Hosting、Budget/alarms、销毁或真实数据迁移。',
+  ],
+  ApprovalMessageOrTaskId: [
+    'Codex task user message at 2026-08-23 22:15:47 JST',
+  ],
+  ApprovedStage: ['Foundation'],
+  ApprovedCommit: ['dcff57ebc9bc6d77fbb51072b996834f5a5ca715'],
+  CostOwner: ['reiken', 'reiken'],
+  CleanupOwner: ['reiken', 'reiken'],
 };
 
 const preBindingApprovalEvidence = (
   document: string,
 ): Record<string, string[]> =>
   Object.fromEntries(
-    Object.keys(PENDING_PRE_BINDING_APPROVAL_EVIDENCE).map((field) => [
+    Object.keys(FOUNDATION_APPROVAL_EVIDENCE).map((field) => [
       field,
       documentFieldValues(document, field),
     ]),
@@ -467,9 +482,9 @@ describe('foundation backend composition', () => {
 });
 
 describe('staging deployment documentation contracts', () => {
-  it('keeps the cost gate unapproved with the six separately approved write stages', () => {
+  it('approves only Foundation while keeping the other five write stages pending', () => {
     expect(documentFieldValues(COST_APPROVAL, 'GateStatus')).toEqual([
-      'NOT_APPROVED',
+      'APPROVED_FOUNDATION',
     ]);
     expect(documentFieldValues(COST_APPROVAL, 'LowUseMonthlyJpy')).toContain(
       '约 ¥1,000',
@@ -478,30 +493,37 @@ describe('staging deployment documentation contracts', () => {
       documentFieldValues(COST_APPROVAL, 'OneAcuWorstMonthJpy'),
     ).toContain('约 ¥19,600');
 
-    const stages = markdownRows(COST_APPROVAL)
-      .filter(([, , approval]) => approval === 'PENDING_USER_APPROVAL')
-      .map(([stage]) => stage);
+    const stages = markdownRows(COST_APPROVAL).filter(([stage]) =>
+      [
+        'Foundation',
+        'Migration',
+        'Full backend',
+        'Hosting',
+        'Budget/alarms',
+        'Destroy',
+      ].includes(stage),
+    );
     expect(stages).toEqual([
-      'Foundation',
-      'Migration',
-      'Full backend',
-      'Hosting',
-      'Budget/alarms',
-      'Destroy',
+      ['Foundation', 'Auth + Storage + VPC + Aurora/Data API', 'FSK-FOUNDATION-20260823-221547-JST'],
+      ['Migration', 'CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG', 'PENDING_USER_APPROVAL'],
+      ['Full backend', 'HTTP API + Kitchen/Admin/Export Functions', 'PENDING_USER_APPROVAL'],
+      ['Hosting', 'Vue/PWA', 'PENDING_USER_APPROVAL'],
+      ['Budget/alarms', 'Budget、费用异常检测、指标和告警', 'PENDING_USER_APPROVAL'],
+      ['Destroy', 'App/branch/stacks/保留资源/远程 ref 的逐项销毁', 'PENDING_USER_APPROVAL'],
     ]);
   });
 
-  it('keeps every required pre-binding approval evidence field pending', () => {
+  it('binds every required Foundation approval evidence field exactly', () => {
     const fabricatedApproval = COST_APPROVAL.replace(
-      '| ApprovedCommit | `PENDING_USER_APPROVAL` |',
+      '| ApprovedCommit | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715` |',
       '| ApprovedCommit | `FABRICATED_APPROVAL` |',
     );
 
     expect(preBindingApprovalEvidence(COST_APPROVAL)).toEqual(
-      PENDING_PRE_BINDING_APPROVAL_EVIDENCE,
+      FOUNDATION_APPROVAL_EVIDENCE,
     );
     expect(preBindingApprovalEvidence(fabricatedApproval)).not.toEqual(
-      PENDING_PRE_BINDING_APPROVAL_EVIDENCE,
+      FOUNDATION_APPROVAL_EVIDENCE,
     );
   });
 

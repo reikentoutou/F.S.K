@@ -5,18 +5,18 @@
 | 字段 | 值 |
 | --- | --- |
 | Gate | 首次 staging AWS 写入 |
-| GateStatus | `NOT_APPROVED` |
-| ApprovalId | `PENDING_USER_APPROVAL` |
-| Approver | `PENDING_USER_APPROVAL` |
-| ApprovedAtJst | `PENDING_USER_APPROVAL` |
-| ExpiresAtJst | `PENDING_USER_APPROVAL` |
-| ApprovalScope | `PENDING_USER_APPROVAL` |
+| GateStatus | `APPROVED_FOUNDATION` |
+| ApprovalId | `FSK-FOUNDATION-20260823-221547-JST` |
+| Approver | `reiken` |
+| ApprovedAtJst | `2026-08-23 22:15:47 JST` |
+| ExpiresAtJst | `2026-08-24 22:15:47 JST` |
+| ApprovalScope | `Foundation only: remote tag/staging branch + Auth/Storage/VPC/Aurora/Data API` |
 | AWS Account | `444083008754` |
 | Region | `ap-northeast-1` |
 | Git deployment point | `fsk-staging-data-api-foundation-v1` |
 | MonthlyCeilingJpy | `5000` |
 
-`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止，也不代表当前 commit/tag 的审批证据已经完成。只要 `GateStatus` 仍为 `NOT_APPROVED`，或任一审批字段仍为 `PENDING_USER_APPROVAL`，就不得创建 Amplify App、branch、CloudFormation stack、Budget、告警或其他 AWS 资源。本文不是可执行批准记录，也不表示已经发生 AWS 写入。
+`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。本记录只批准 Foundation：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。完整 backend、Hosting、Budget/alarms、Destroy、Migration 和真实数据迁移均未批准；本文也不表示已经发生 AWS 写入。
 
 ## 成本模型
 
@@ -29,19 +29,21 @@
 | OneAcuWorstMonthJpy | `约 ¥19,600` |
 | OneAcuWorstMonthGateAction | `AUTO_INVALIDATE_STOP_REVIEW` |
 | MonthlyCeilingJpy | `5000` |
-| PricingCapturedAtJst | `PENDING_DEPLOYMENT_DAY_RECALCULATION` |
-| USDJPYRateAndSource | `PENDING_DEPLOYMENT_DAY_RECALCULATION` |
-| CostOwner | `PENDING_USER_APPROVAL` |
-| CleanupOwner | `PENDING_USER_APPROVAL` |
+| DeploymentDayLowUseMonthlyJpy | `约 ¥1,065` |
+| DeploymentDayOneAcuWorstMonthJpy | `约 ¥19,552` |
+| PricingCapturedAtJst | `2026-08-23 23:24:20 JST` |
+| USDJPYRateAndSource | `158.697325; ECB reference rates dated 2026-08-21 (EUR/JPY 185.66 divided by EUR/USD 1.1699)` |
+| CostOwner | `reiken` |
+| CleanupOwner | `reiken` |
 
-低使用估算假设 Aurora 大部分时间自动暂停；指定最坏月假设 `1 ACU × 730h`，再加其他低使用项目。约 `¥19,600` 不是容量承诺，而且明确高于 `¥5,000` 治理上限；该情景不在缓冲范围内，必须自动使审批失效、停止新增写入并进入成本/清理复查。部署日重算若超过上限，同样保持 `NOT_APPROVED`。
+部署日重算使用 AWS 东京公开价格 `US$0.15/ACU-hour`、ECB 最近营业日参考汇率和日本消费税 10%。低使用模型按每月 24 ACU-hour 加 `US$2.50` 的其他服务保守额度，得到约 `¥1,065`；指定最坏月按 `1 ACU × 730h` 加同一额度，得到约 `¥19,552`。后者不是容量承诺，而且明确高于 `¥5,000` 治理上限；若出现该情景，必须自动使审批失效、停止新增写入并进入成本/清理复查。
 
 ## 月成本清单
 
 | 成本项 | 阶段 | 计费驱动与边界 | 部署日价格证据 | 部署后实际复查 |
 | --- | --- | --- | --- | --- |
-| Aurora Serverless v2 活跃 ACU | Foundation | `0–1 ACU`；按活跃 ACU 秒计费；空闲必须实测回到 0 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
-| Aurora 数据库存储/I/O/自动备份 | Foundation | `fsk_staging` 合成数据；备份保留 14 天 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
+| Aurora Serverless v2 活跃 ACU | Foundation | `0–1 ACU`；按活跃 ACU 秒计费；空闲必须实测回到 0 | `AWS Price List APN1 Aurora PostgreSQL ServerlessV2Usage: US$0.15/ACU-hour` | `PENDING_DEPLOYMENT` |
+| Aurora 数据库存储/I/O/自动备份 | Foundation | `fsk_staging` 合成数据；备份保留 14 天 | `AWS Price List APN1: US$0.12/GB-month; US$0.24/million I/O; US$0.023/backup GB-month over allocation` | `PENDING_DEPLOYMENT` |
 | Aurora final snapshot | Destroy | 仅在单独批准的销毁流程创建；按 GB-month 持续计费 | `PENDING_RATE_LOOKUP` | `PENDING_DESTROY_GATE` |
 | S3 Gateway VPC Endpoint | Foundation | 无固定小时费；仍计算 S3 请求和传输 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
 | Cognito | Foundation | 仅合成 staging 用户；按当期 MAU 规则复核 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
@@ -64,7 +66,7 @@
 
 | 写入阶段 | 资源范围 | ApprovalId |
 | --- | --- | --- |
-| Foundation | Auth + Storage + VPC + Aurora/Data API | `PENDING_USER_APPROVAL` |
+| Foundation | Auth + Storage + VPC + Aurora/Data API | `FSK-FOUNDATION-20260823-221547-JST` |
 | Migration | CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG | `PENDING_USER_APPROVAL` |
 | Full backend | HTTP API + Kitchen/Admin/Export Functions | `PENDING_USER_APPROVAL` |
 | Hosting | Vue/PWA | `PENDING_USER_APPROVAL` |
@@ -95,17 +97,17 @@
 
 | 字段 | 值 |
 | --- | --- |
-| UserApprovalStatement | `PENDING_USER_APPROVAL` |
-| ApprovalMessageOrTaskId | `PENDING_USER_APPROVAL` |
-| ApprovalId | `PENDING_USER_APPROVAL` |
-| ApprovedStage | `PENDING_USER_APPROVAL` |
+| UserApprovalStatement | `批准将 fsk-staging-data-api-foundation-v1 推送到远程，并在 AWS 账号 444083008754、ap-northeast-1 创建独立 FSK staging Foundation；月治理上限 ¥5,000，不包含完整 backend、Hosting、Budget/alarms、销毁或真实数据迁移。` |
+| ApprovalMessageOrTaskId | `Codex task user message at 2026-08-23 22:15:47 JST` |
+| ApprovalId | `FSK-FOUNDATION-20260823-221547-JST` |
+| ApprovedStage | `Foundation` |
 | MonthlyCeilingJpy | `5000` |
-| Approver | `PENDING_USER_APPROVAL` |
-| ApprovedAtJst | `PENDING_USER_APPROVAL` |
-| ExpiresAtJst | `PENDING_USER_APPROVAL` |
-| ApprovedCommit | `PENDING_USER_APPROVAL` |
+| Approver | `reiken` |
+| ApprovedAtJst | `2026-08-23 22:15:47 JST` |
+| ExpiresAtJst | `2026-08-24 22:15:47 JST` |
+| ApprovedCommit | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715` |
 | ApprovedTag | `fsk-staging-data-api-foundation-v1` |
-| CostOwner | `PENDING_USER_APPROVAL` |
-| CleanupOwner | `PENDING_USER_APPROVAL` |
+| CostOwner | `reiken` |
+| CleanupOwner | `reiken` |
 
-只有用户明确写出所批准的单一写入阶段、`MonthlyCeilingJpy=5000`、exact commit/tag 和有效期，并补齐上述字段后，才可进入对应 runbook。当前 exact commit/tag 的批准证据尚未补齐，`GateStatus=NOT_APPROVED`；没有任何 AWS、远程 Git、Hosting、预算或销毁写入可在此前执行。
+本轮仅可在有效期内从 exact commit/tag 执行 Foundation runbook。任何与上述账号、区域、提交、标签、资源集合或价格边界不一致的情况都必须停止；其余五个写入阶段继续保持 `PENDING_USER_APPROVAL`。
