@@ -30,6 +30,8 @@
 
 每次只批准一行。批准证据至少包含 ApprovalId、exact 40 位 commit、需要时的 immutable tag、`MonthlyCeilingJpy=25000`、Approver、ApprovedAtJst、ExpiresAtJst、CostOwner 和 CleanupOwner。
 
+本 Data API 流程的默认 deployment point 是 `fsk-staging-data-api-foundation-v1`。旧 `fsk-staging-foundation-v1` 继续标识旧设计的最后恢复点，不得移动、覆盖或删除。
+
 ## 2. 公共只读预检
 
 以下块不写 AWS，但访问远程 Git；在任何写入批准前可执行。它确保本地、远端 tag 和 branch 的证据没有歧义：
@@ -38,7 +40,7 @@
 set -euo pipefail
 : "${FSK_GIT_REMOTE:=origin}"
 : "${FSK_APPROVED_COMMIT:?use the reviewed 40-character commit}"
-: "${FSK_APPROVED_TAG:=fsk-staging-foundation-v1}"
+: "${FSK_APPROVED_TAG:=fsk-staging-data-api-foundation-v1}"
 case "$FSK_APPROVED_COMMIT" in
   *[!0-9a-f]*|'') echo 'APPROVED_COMMIT_INVALID_STOP' >&2; exit 1 ;;
 esac
@@ -70,7 +72,7 @@ set -euo pipefail
 : "${FSK_FOUNDATION_APPROVAL_ID:?separate Foundation approval required}"
 : "${FSK_GIT_REMOTE:=origin}"
 : "${FSK_FOUNDATION_COMMIT:?use the approved 40-character commit}"
-: "${FSK_FOUNDATION_TAG:=fsk-staging-foundation-v1}"
+: "${FSK_FOUNDATION_TAG:=fsk-staging-data-api-foundation-v1}"
 test "$(git rev-parse HEAD)" = "$FSK_FOUNDATION_COMMIT"
 test "$(git rev-parse "${FSK_FOUNDATION_TAG}^{commit}")" = \
   "$FSK_FOUNDATION_COMMIT"

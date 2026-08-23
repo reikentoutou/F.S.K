@@ -62,6 +62,20 @@ const extractBashFunction = (document: string, name: string): string => {
   return match[0];
 };
 
+const extractBashDefaultAssignment = (
+  document: string,
+  variable: string,
+): string => {
+  const prefix = `: "\${${variable}:=`;
+  const match = extractBashSteps(document)
+    .split('\n')
+    .find((line) => line.startsWith(prefix) && line.endsWith('}"'));
+  if (!match) {
+    throw new Error(`RUNBOOK_DEFAULT_NOT_FOUND:${variable}`);
+  }
+  return match;
+};
+
 const markdownRows = (document: string): string[][] =>
   document
     .split('\n')
@@ -479,6 +493,29 @@ describe('staging deployment documentation contracts', () => {
       expect(executableSteps).not.toMatch(removedOperation);
     }
   });
+
+  it.each([
+    ['deployment approval', DEPLOYMENT_RUNBOOK, 'FSK_APPROVED_TAG'],
+    ['deployment foundation', DEPLOYMENT_RUNBOOK, 'FSK_FOUNDATION_TAG'],
+    ['migration foundation', MIGRATION_RUNBOOK, 'FSK_FOUNDATION_TAG'],
+  ])('defaults %s execution to the Data API recovery tag', (_name, runbook, variable) => {
+    const assignment = extractBashDefaultAssignment(runbook, variable);
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+unset ${variable}
+${assignment}
+printf '%s' "$${variable}"
+`,
+      ],
+      { encoding: 'utf8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('fsk-staging-data-api-foundation-v1');
+  });
 });
 
 describe('staging migration runbook executable contracts', () => {
@@ -567,6 +604,59 @@ test -z "\${DATABASE_URL+x}"
       ]);
       expect(result.stdout).toContain('STATUS=READY_FOR_CLEANUP');
       expect(`${result.stdout}${result.stderr}`).not.toContain('super-secret');
+    } finally {
+      rmSync(fixtureDirectory, { force: true, recursive: true });
+    }
+  });
+
+  it('publishes FAILED when READY_FOR_CLEANUP publication fails', () => {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-worker-ready-'));
+    const migrateCountPath = join(fixtureDirectory, 'migrate-count');
+    const script = `set -euo pipefail
+fsk_assert_migration_deadline() { :; }
+fsk_build_database_url() { export DATABASE_URL='postgresql://private'; }
+fsk_run_before_migration_deadline() { "$@"; }
+fsk_publish_worker_status() {
+  printf 'STATUS=%s\\n' "$1"
+  if [ "$1" = READY_FOR_CLEANUP ]; then return 47; fi
+}
+pnpm() {
+  case "$*" in
+    'run db:staging:migrate')
+      count=0
+      if [ -f "$FSK_MOCK_MIGRATE_COUNT" ]; then count="$(cat "$FSK_MOCK_MIGRATE_COUNT")"; fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$FSK_MOCK_MIGRATE_COUNT"
+      if [ "$count" -eq 1 ]; then
+        printf 'MIGRATIONS_APPLIED count=1\\n'
+      else
+        printf 'MIGRATIONS_APPLIED count=0\\n'
+      fi
+      ;;
+    'run db:staging:verify') printf 'SCHEMA_VERIFIED business_tables=10\\n' ;;
+    *) return 91 ;;
+  esac
+}
+FSK_MIGRATION_SHELL_ROLE=worker
+FSK_WORKER_READY_FOR_CLEANUP=0
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_exit')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_run_database_migration')}
+trap 'fsk_worker_exit "$?"' EXIT
+fsk_worker_run_database_migration
+`;
+
+    try {
+      const result = spawnSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FSK_MOCK_MIGRATE_COUNT: migrateCountPath,
+        },
+      });
+
+      expect(result.status).toBe(47);
+      expect(result.stdout).toContain('STATUS=READY_FOR_CLEANUP');
+      expect(result.stdout).toContain('STATUS=FAILED:WORKER_EXIT_47');
     } finally {
       rmSync(fixtureDirectory, { force: true, recursive: true });
     }
@@ -718,6 +808,93 @@ esac`,
     expect(result.stdout.trim()).toBe('sgr-owned');
   });
 
+  it.each(
+    ['ec2 resources', 'ingress rules', 'resource tag mappings', 'ssm parameters']
+      .flatMap((parser) => [
+        [parser, 'missing collection', {}],
+        [parser, 'null collection', null],
+        [parser, 'wrong collection type', {}],
+        [parser, 'malformed item', [{}]],
+      ]) as [string, string, unknown][],
+  )('fails closed for %s with a %s response', (parser, shape, collection) => {
+    const collectionName =
+      parser === 'ec2 resources'
+        ? 'SecurityGroups'
+        : parser === 'ingress rules'
+          ? 'SecurityGroupRules'
+          : parser === 'resource tag mappings'
+            ? 'ResourceTagMappingList'
+            : 'Parameters';
+    const response =
+      shape === 'missing collection'
+        ? {}
+        : {
+            [collectionName]:
+              shape === 'wrong collection type' ? { invalid: true } : collection,
+          };
+    const commonFunctions = `
+fsk_run_current_deadline() { "$@"; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
+`;
+    let script: string;
+    let mockAwsBody: string;
+    if (parser === 'ec2 resources') {
+      script = `set -euo pipefail
+${commonFunctions}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_select_exact_owned_resource_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_operations_sg_ids')}
+fsk_discover_owned_operations_sg_ids
+`;
+      mockAwsBody = `case "$*" in
+  *'ec2 describe-security-groups'*) printf '%s' "$FSK_MOCK_RESPONSE" ;;
+  *) exit 64 ;;
+esac`;
+    } else if (parser === 'ingress rules') {
+      script = `set -euo pipefail
+${commonFunctions}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_select_exact_owned_db_ingress_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_db_ingress_ids')}
+fsk_discover_owned_db_ingress_ids
+`;
+      mockAwsBody = `case "$*" in
+  *'ec2 describe-security-group-rules'*) printf '%s' "$FSK_MOCK_RESPONSE" ;;
+  *) exit 64 ;;
+esac`;
+    } else {
+      script = `set -euo pipefail
+${commonFunctions}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_no_task_id_collision')}
+fsk_assert_no_task_id_collision
+`;
+      mockAwsBody = `case "$*" in
+  *'resourcegroupstaggingapi get-resources'*)
+    if [ "$FSK_MOCK_PARSER" = 'resource tag mappings' ]; then
+      printf '%s' "$FSK_MOCK_RESPONSE"
+    else
+      printf '{"ResourceTagMappingList":[]}'
+    fi
+    ;;
+  *'ssm describe-parameters'*)
+    if [ "$FSK_MOCK_PARSER" = 'ssm parameters' ]; then
+      printf '%s' "$FSK_MOCK_RESPONSE"
+    else
+      printf '{"Parameters":[]}'
+    fi
+    ;;
+  *) exit 64 ;;
+esac`;
+    }
+    const result = runWithMockAws(script, mockAwsBody, {
+      ...OWNERSHIP_ENVIRONMENT,
+      FSK_DB_SECURITY_GROUP_ID: 'sg-database',
+      FSK_OPS_SG_ID: 'sg-operations',
+      FSK_MOCK_PARSER: parser,
+      FSK_MOCK_RESPONSE: JSON.stringify(response),
+    });
+
+    expect(result.status).not.toBe(0);
+  });
+
   it('blocks a TaskId-wide collision owned by another operation token', () => {
     const collisionTags = OWNERSHIP_TAGS.map((tag) =>
       tag.Key === 'OperationToken'
@@ -839,6 +1016,109 @@ esac`,
     ).toBe(true);
   });
 
+  it.each([
+    [
+      'accepts exactly both Foundation VPC route tables without default routes',
+      {
+        RouteTables: [
+          {
+            RouteTableId: 'rtb-a',
+            VpcId: OWNERSHIP_ENVIRONMENT.FSK_VPC_ID,
+            Routes: [],
+          },
+          {
+            RouteTableId: 'rtb-b',
+            VpcId: OWNERSHIP_ENVIRONMENT.FSK_VPC_ID,
+            Routes: [],
+          },
+        ],
+      },
+      0,
+    ],
+    [
+      'rejects a missing requested route table',
+      {
+        RouteTables: [
+          {
+            RouteTableId: 'rtb-a',
+            VpcId: OWNERSHIP_ENVIRONMENT.FSK_VPC_ID,
+            Routes: [],
+          },
+        ],
+      },
+      1,
+    ],
+    [
+      'rejects a requested route table from a foreign VPC',
+      {
+        RouteTables: [
+          {
+            RouteTableId: 'rtb-a',
+            VpcId: OWNERSHIP_ENVIRONMENT.FSK_VPC_ID,
+            Routes: [],
+          },
+          {
+            RouteTableId: 'rtb-b',
+            VpcId: 'vpc-foreign',
+            Routes: [],
+          },
+        ],
+      },
+      1,
+    ],
+    [
+      'rejects an existing default route',
+      {
+        RouteTables: [
+          {
+            RouteTableId: 'rtb-a',
+            VpcId: OWNERSHIP_ENVIRONMENT.FSK_VPC_ID,
+            Routes: [],
+          },
+          {
+            RouteTableId: 'rtb-b',
+            VpcId: OWNERSHIP_ENVIRONMENT.FSK_VPC_ID,
+            Routes: [
+              {
+                DestinationCidrBlock: '0.0.0.0/0',
+                NatGatewayId: 'nat-existing',
+              },
+            ],
+          },
+        ],
+      },
+      1,
+    ],
+  ])('%s', (_name, response, shouldFail) => {
+    const script = `set -euo pipefail
+fsk_assert_migration_deadline() { :; }
+fsk_run_before_migration_deadline() { "$@"; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_application_route_tables_ready')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_control_guard')}
+fsk_assert_control_guard
+`;
+    const result = runWithMockAws(
+      script,
+      `case "$*" in
+  *'ec2 describe-route-tables'*) printf '%s' "$FSK_MOCK_RESPONSE" ;;
+  *) exit 64 ;;
+esac`,
+      {
+        FSK_APP_ROUTE_TABLE_A_ID: 'rtb-a',
+        FSK_APP_ROUTE_TABLE_B_ID: 'rtb-b',
+        FSK_MIGRATION_SHELL_ROLE: 'control',
+        FSK_VPC_ID: OWNERSHIP_ENVIRONMENT.FSK_VPC_ID,
+        FSK_MOCK_RESPONSE: JSON.stringify(response),
+      },
+    );
+
+    if (shouldFail) {
+      expect(result.status).not.toBe(0);
+    } else {
+      expect(result.status, result.stderr).toBe(0);
+    }
+  });
+
   it('preserves a foreign default route when the pre-create guard fails', () => {
     const script = `set -euo pipefail
 fsk_run_current_deadline() { "$@"; }
@@ -914,6 +1194,117 @@ fsk_run_before_cleanup_deadline aws ec2 describe-nat-gateways
     expect(elapsedMs).toBeLessThan(3_000);
   });
 
+  it('waits for the exact owned NAT to reach deleted before releasing its EIP', () => {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-nat-delete-'));
+    const pollCountPath = join(fixtureDirectory, 'poll-count');
+    const script = `set -euo pipefail
+fsk_delete_owned_application_routes() { :; }
+fsk_discover_owned_db_ingress_ids() { :; }
+fsk_discover_owned_nat_ids() { printf 'nat-owned\\n'; }
+fsk_discover_owned_eip_ids() { printf 'eipalloc-owned\\n'; }
+fsk_discover_owned_route_table_ids() { :; }
+fsk_discover_owned_public_subnet_ids() { :; }
+fsk_discover_owned_igw_ids() { :; }
+fsk_discover_owned_operations_sg_ids() { :; }
+fsk_run_before_cleanup_deadline() { "$@"; }
+fsk_sleep_before_cleanup_deadline() { :; }
+FSK_CLEANUP_POLL_SECONDS=0
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_wait_for_owned_nat_deleted')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_owned_temporary_resources_once')}
+fsk_delete_owned_temporary_resources_once
+`;
+
+    try {
+      const result = runWithMockAws(
+        script,
+        `case " $* " in
+  *' ec2 delete-nat-gateway '*) exit 0 ;;
+  *' ec2 describe-nat-gateways '*)
+    count=0
+    if [ -f "$FSK_MOCK_POLL_COUNT" ]; then count="$(cat "$FSK_MOCK_POLL_COUNT")"; fi
+    count=$((count + 1))
+    printf '%s' "$count" > "$FSK_MOCK_POLL_COUNT"
+    state=deleting
+    if [ "$count" -ge 2 ]; then state=deleted; fi
+    printf '{"NatGateways":[{"NatGatewayId":"nat-owned","State":"%s","Tags":%s}]}' \
+      "$state" "$FSK_MOCK_TAGS"
+    ;;
+  *' ec2 release-address '*) exit 0 ;;
+  *) exit 64 ;;
+esac`,
+        {
+          ...OWNERSHIP_ENVIRONMENT,
+          FSK_MOCK_POLL_COUNT: pollCountPath,
+          FSK_MOCK_TAGS: JSON.stringify(OWNERSHIP_TAGS),
+        },
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        result.awsCalls.filter(
+          (call) =>
+            call.includes('delete-nat-gateway') ||
+            call.includes('describe-nat-gateways') ||
+            call.includes('release-address'),
+        ),
+      ).toEqual([
+        'ec2 delete-nat-gateway --region ap-northeast-1 --nat-gateway-id nat-owned',
+        'ec2 describe-nat-gateways --region ap-northeast-1 --nat-gateway-ids nat-owned --output json',
+        'ec2 describe-nat-gateways --region ap-northeast-1 --nat-gateway-ids nat-owned --output json',
+        'ec2 release-address --region ap-northeast-1 --allocation-id eipalloc-owned',
+      ]);
+    } finally {
+      rmSync(fixtureDirectory, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    ['deadline timeout', 'timeout'],
+    ['describe failure', 'failure'],
+  ])('does not release the EIP when NAT deletion polling has a %s', (_name, mode) => {
+    const script = `set -euo pipefail
+fsk_delete_owned_application_routes() { :; }
+fsk_discover_owned_db_ingress_ids() { :; }
+fsk_discover_owned_nat_ids() { printf 'nat-owned\\n'; }
+fsk_discover_owned_eip_ids() { printf 'eipalloc-owned\\n'; }
+fsk_discover_owned_route_table_ids() { :; }
+fsk_discover_owned_public_subnet_ids() { :; }
+fsk_discover_owned_igw_ids() { :; }
+fsk_discover_owned_operations_sg_ids() { :; }
+fsk_run_before_cleanup_deadline() {
+  if [ "$FSK_MOCK_POLL_MODE" = timeout ] && [[ " $* " == *' ec2 describe-nat-gateways '* ]]; then
+    return 124
+  fi
+  "$@"
+}
+fsk_sleep_before_cleanup_deadline() { :; }
+FSK_CLEANUP_POLL_SECONDS=0
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_wait_for_owned_nat_deleted')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_owned_temporary_resources_once')}
+fsk_delete_owned_temporary_resources_once
+`;
+    const result = runWithMockAws(
+      script,
+      `case " $* " in
+  *' ec2 delete-nat-gateway '*) exit 0 ;;
+  *' ec2 describe-nat-gateways '*) exit 47 ;;
+  *' ec2 release-address '*) exit 90 ;;
+  *) exit 64 ;;
+esac`,
+      {
+        ...OWNERSHIP_ENVIRONMENT,
+        FSK_MOCK_POLL_MODE: mode,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(
+      result.awsCalls.some((call) => call.includes('release-address')),
+    ).toBe(false);
+  });
+
   it('keeps a one-time real cleanup mutation failure terminally blocked', () => {
     const script = `set -euo pipefail
 FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH=$(($(date +%s) + 20))
@@ -921,6 +1312,8 @@ FSK_CLEANUP_COMMAND_MAX_SECONDS=5
 FSK_STABLE_ZERO_REQUIRED=1
 FSK_STABLE_ZERO_MIN_SECONDS=0
 FSK_CLEANUP_POLL_SECONDS=0
+fsk_load_cleanup_failure_latch() { printf '0'; }
+fsk_record_cleanup_failure_latch() { :; }
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_seconds_before_cleanup_deadline')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_run_before_cleanup_deadline')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_sleep_before_cleanup_deadline')}
@@ -1002,6 +1395,79 @@ esac`,
     ).toHaveLength(2);
   });
 
+  it('reloads a persisted cleanup failure latch after CleanupOwner restart', () => {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-cleanup-latch-'));
+    const statePath = join(fixtureDirectory, 'state.json');
+    const failedOncePath = join(fixtureDirectory, 'failed-once');
+    writeFileSync(
+      statePath,
+      JSON.stringify({ version: 1, sensitive: false, cleanupFailed: false }),
+    );
+    const script = `set -euo pipefail
+FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH=$(($(date +%s) + 20))
+FSK_STABLE_ZERO_REQUIRED=1
+FSK_STABLE_ZERO_MIN_SECONDS=0
+FSK_CLEANUP_POLL_SECONDS=0
+fsk_assert_state_parameter_owned() { :; }
+fsk_run_current_deadline() { "$@"; }
+fsk_sleep_before_cleanup_deadline() { :; }
+fsk_delete_owned_temporary_resources_once() {
+  if [ ! -f "$FSK_MOCK_DELETE_FAILED_ONCE" ]; then
+    touch "$FSK_MOCK_DELETE_FAILED_ONCE"
+    return 47
+  fi
+}
+fsk_discover_owned_residual_count() { printf '0\\n'; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_load_cleanup_failure_latch')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_record_cleanup_failure_latch')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_control_cleanup_owned_resources')}
+fsk_control_cleanup_owned_resources
+`;
+    const mockAwsBody = `case " $* " in
+  *' ssm get-parameter '*) cat "$FSK_MOCK_STATE_PATH" ;;
+  *' ssm put-parameter '*)
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = --value ]; then printf '%s' "$argument" > "$FSK_MOCK_STATE_PATH"; fi
+      previous="$argument"
+    done
+    printf '2\\n'
+    ;;
+  *) exit 64 ;;
+esac`;
+    const environment = {
+      ...OWNERSHIP_ENVIRONMENT,
+      FSK_STATE_PARAMETER: '/fsk/test/state',
+      FSK_MOCK_DELETE_FAILED_ONCE: failedOncePath,
+      FSK_MOCK_STATE_PATH: statePath,
+    };
+
+    try {
+      const firstOwner = runWithMockAws(
+        script,
+        mockAwsBody,
+        environment,
+      );
+      expect(firstOwner.status).not.toBe(0);
+      expect(JSON.parse(readFileSync(statePath, 'utf8'))).toMatchObject({
+        cleanupFailed: true,
+      });
+
+      const restartedOwner = runWithMockAws(
+        script,
+        mockAwsBody,
+        environment,
+      );
+      expect(restartedOwner.status).not.toBe(0);
+      expect(restartedOwner.stderr).toContain(
+        'CLEANUP_PREVIOUS_FAILURE_BLOCKED',
+      );
+      expect(restartedOwner.stdout).not.toContain('STABLE_ZERO_OBSERVATIONS');
+    } finally {
+      rmSync(fixtureDirectory, { force: true, recursive: true });
+    }
+  });
+
   it('requires three stable zero residual observations before cleanup passes', () => {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-cleanup-'));
     const discoveryCountPath = join(fixtureDirectory, 'discover-count');
@@ -1024,6 +1490,7 @@ FSK_STABLE_ZERO_REQUIRED=3
 FSK_STABLE_ZERO_MIN_SECONDS=0
 FSK_CLEANUP_POLL_SECONDS=0
 fsk_sleep_before_cleanup_deadline() { :; }
+fsk_load_cleanup_failure_latch() { printf '0'; }
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_control_cleanup_owned_resources')}
 fsk_control_cleanup_owned_resources
 `;
@@ -1050,6 +1517,7 @@ fsk_control_cleanup_owned_resources
 fsk_run_before_cleanup_deadline() { "$@"; }
 fsk_run_current_deadline() { fsk_run_before_cleanup_deadline "$@"; }
 fsk_discover_owned_residual_count() { printf '0\\n'; }
+fsk_load_cleanup_failure_latch() { printf '0'; }
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_snapshot_state_parameter')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_state_parameter_owned')}
@@ -1123,6 +1591,7 @@ fsk_run_before_cleanup_deadline() { "$@"; }
 fsk_run_current_deadline() { fsk_run_before_cleanup_deadline "$@"; }
 fsk_assert_no_task_id_collision() { :; }
 fsk_discover_owned_residual_count() { printf '0\\n'; }
+fsk_load_cleanup_failure_latch() { printf '0'; }
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_snapshot_state_parameter')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_state_parameter_owned')}
@@ -1209,6 +1678,7 @@ esac`,
 fsk_run_before_cleanup_deadline() { "$@"; }
 fsk_run_current_deadline() { fsk_run_before_cleanup_deadline "$@"; }
 fsk_discover_owned_residual_count() { printf '0\\n'; }
+fsk_load_cleanup_failure_latch() { printf '0'; }
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_no_task_id_collision')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_snapshot_state_parameter')}

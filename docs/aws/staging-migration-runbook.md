@@ -10,7 +10,7 @@
 
 - **control** 创建临时状态和网络，运行 deadline watchdog，并独占 EC2/SSM cleanup；control tab 不得关闭。
 - **worker** 只准备 exact source、构造进程内数据库 URL、执行 migration 两次和 verify、发布状态；worker 绝不删除自己的路由或 SG。
-- 三个临时 SSM `String` parameters 只传 operation state/status 和非敏感资源 ID。worker 只能在临时 NAT 就绪后访问它们。它们不是长期 endpoint 的替代品，最终必须删除。
+- 三个临时 SSM `String` parameters 只传 operation state/status、持久化 cleanup failure latch 和非敏感资源 ID。worker 只能在临时 NAT 就绪后访问它们。它们不是长期 endpoint 的替代品，最终必须删除。
 
 Migration ApprovalId 必须给出：account `444083008754`、region `ap-northeast-1`、exact foundation commit/tag、TaskId、UUIDv4 OperationToken、operation deadline、稍晚的 cleanup deadline、临时 public CIDR/AZ、两个 application route table IDs、CostOwner 和 CleanupOwner。OperationToken 是非秘密所有权证据，不是授权凭据。
 
@@ -21,7 +21,7 @@ control 和 worker 都只接受 immutable remote tag、remote `staging` 和批�
 ```bash
 set -euo pipefail
 : "${FSK_GIT_REMOTE_URL:=https://github.com/reikentoutou/F.S.K.git}"
-: "${FSK_FOUNDATION_TAG:=fsk-staging-foundation-v1}"
+: "${FSK_FOUNDATION_TAG:=fsk-staging-data-api-foundation-v1}"
 : "${FSK_FOUNDATION_COMMIT:?use the approved 40-character commit}"
 case "$FSK_FOUNDATION_COMMIT" in
   *[!0-9a-f]*|'') echo 'FOUNDATION_COMMIT_INVALID_STOP' >&2; exit 1 ;;
@@ -179,11 +179,21 @@ fsk_select_exact_owned_resource_ids() {
     FSK_RESOURCE_ID_FIELD="$id_field" \
     node -e '
       const input = JSON.parse(process.env.FSK_RESOURCE_JSON ?? "");
-      const resources = input[process.env.FSK_RESOURCE_COLLECTION] ?? [];
-      if (!Array.isArray(resources)) process.exit(2);
+      const collection = process.env.FSK_RESOURCE_COLLECTION;
+      if (!input || typeof input !== "object" || Array.isArray(input) ||
+          !collection || !Object.hasOwn(input, collection) ||
+          !Array.isArray(input[collection])) process.exit(2);
+      const resources = input[collection];
       for (const resource of resources) {
         const id = resource?.[process.env.FSK_RESOURCE_ID_FIELD];
-        if (typeof id !== "string" || !Array.isArray(resource?.Tags)) continue;
+        const tags = resource?.Tags;
+        const keys = Array.isArray(tags) ? tags.map((tag) => tag?.Key) : [];
+        if (!resource || typeof resource !== "object" || Array.isArray(resource) ||
+            typeof id !== "string" || !id || !Array.isArray(tags) ||
+            tags.some((tag) => !tag || typeof tag !== "object" ||
+              typeof tag.Key !== "string" || !tag.Key ||
+              typeof tag.Value !== "string") ||
+            new Set(keys).size !== keys.length) process.exit(2);
         process.stdout.write(`${id}\t${encodeURIComponent(JSON.stringify(resource.Tags))}\n`);
       }
     '
@@ -207,8 +217,20 @@ fsk_assert_no_task_id_collision() {
       --output json)" || return 1
   candidates="$(FSK_COLLISION_JSON="$mappings" node -e '
     const input = JSON.parse(process.env.FSK_COLLISION_JSON ?? "");
-    for (const item of input.ResourceTagMappingList ?? []) {
-      process.stdout.write(`${item.ResourceARN ?? ""}\t${encodeURIComponent(JSON.stringify(item.Tags ?? []))}\n`);
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+        !Object.hasOwn(input, "ResourceTagMappingList") ||
+        !Array.isArray(input.ResourceTagMappingList)) process.exit(2);
+    for (const item of input.ResourceTagMappingList) {
+      const tags = item?.Tags;
+      const keys = Array.isArray(tags) ? tags.map((tag) => tag?.Key) : [];
+      if (!item || typeof item !== "object" || Array.isArray(item) ||
+          typeof item.ResourceARN !== "string" || !item.ResourceARN ||
+          !Array.isArray(tags) || tags.some((tag) =>
+            !tag || typeof tag !== "object" ||
+            typeof tag.Key !== "string" || !tag.Key ||
+            typeof tag.Value !== "string") ||
+          new Set(keys).size !== keys.length) process.exit(2);
+      process.stdout.write(`${item.ResourceARN}\t${encodeURIComponent(JSON.stringify(tags))}\n`);
     }
   ')" || return 1
   while IFS=$'\t' read -r arn encoded; do
@@ -229,8 +251,13 @@ fsk_assert_no_task_id_collision() {
     --output json)" || return 1
   parameter_names="$(FSK_PARAMETERS_JSON="$parameters" node -e '
     const input = JSON.parse(process.env.FSK_PARAMETERS_JSON ?? "");
-    for (const parameter of input.Parameters ?? []) {
-      if (typeof parameter?.Name === "string") console.log(parameter.Name);
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+        !Object.hasOwn(input, "Parameters") ||
+        !Array.isArray(input.Parameters)) process.exit(2);
+    for (const parameter of input.Parameters) {
+      if (!parameter || typeof parameter !== "object" || Array.isArray(parameter) ||
+          typeof parameter.Name !== "string" || !parameter.Name) process.exit(2);
+      console.log(parameter.Name);
     }
   ')" || return 1
   while read -r name; do
@@ -285,7 +312,7 @@ FSK_STATE_PARAMETER="${FSK_STATE_PREFIX}/state"
 
 ## 3. 临时状态所有权
 
-每次 overwrite/delete 前后都复验 parameter 名称、类型和完整 tags。状态只含非敏感 ID、commit、deadline 和 cleanup 观察值；绝不包含 Secret、用户名、密码、数据库 endpoint 或 URL。
+每次 overwrite/delete 前后都复验 parameter 名称、类型和完整 tags。状态只含非敏感 ID、commit、deadline、cleanup 观察值和单向 `cleanupFailed` latch；绝不包含 Secret、用户名、密码、数据库 endpoint 或 URL。任何 cleanup mutation/discovery 失败都先持久化 latch；CleanupOwner 重启后必须重新读取，曾经失败的 operation 永远不得发布 PASS。
 
 ```bash
 fsk_snapshot_state_parameter() {
@@ -324,6 +351,40 @@ fsk_snapshot_state_parameter() {
 
 fsk_assert_state_parameter_owned() {
   fsk_snapshot_state_parameter "${1:?parameter name required}" >/dev/null
+}
+
+fsk_load_cleanup_failure_latch() {
+  local value
+  fsk_assert_state_parameter_owned "$FSK_STATE_PARAMETER" || return 1
+  value="$(fsk_run_current_deadline aws ssm get-parameter \
+    --region ap-northeast-1 --name "$FSK_STATE_PARAMETER" \
+    --query 'Parameter.Value' --output text)" || return 1
+  FSK_OPERATION_STATE="$value" node -e '
+    const state = JSON.parse(process.env.FSK_OPERATION_STATE ?? "");
+    if (!state || typeof state !== "object" || Array.isArray(state) ||
+        state.version !== 1 || state.sensitive !== false ||
+        typeof state.cleanupFailed !== "boolean") process.exit(2);
+    process.stdout.write(state.cleanupFailed ? "1" : "0");
+  '
+}
+
+fsk_record_cleanup_failure_latch() {
+  local value updated
+  fsk_assert_state_parameter_owned "$FSK_STATE_PARAMETER" || return 1
+  value="$(fsk_run_current_deadline aws ssm get-parameter \
+    --region ap-northeast-1 --name "$FSK_STATE_PARAMETER" \
+    --query 'Parameter.Value' --output text)" || return 1
+  updated="$(FSK_OPERATION_STATE="$value" node -e '
+    const state = JSON.parse(process.env.FSK_OPERATION_STATE ?? "");
+    if (!state || typeof state !== "object" || Array.isArray(state) ||
+        state.version !== 1 || state.sensitive !== false ||
+        typeof state.cleanupFailed !== "boolean") process.exit(2);
+    process.stdout.write(JSON.stringify({ ...state, cleanupFailed: true }));
+  ')" || return 1
+  fsk_run_current_deadline aws ssm put-parameter --region ap-northeast-1 \
+    --name "$FSK_STATE_PARAMETER" --type String --value "$updated" \
+    --overwrite --query Version --output text >/dev/null || return 1
+  fsk_assert_state_parameter_owned "$FSK_STATE_PARAMETER"
 }
 
 fsk_publish_worker_status() {
@@ -367,7 +428,7 @@ fsk_create_temporary_state_parameters() {
     case "$name" in
       "$FSK_WORKER_STATUS_PARAMETER") initial=WAITING_FOR_WORKER ;;
       "$FSK_CONTROL_STATUS_PARAMETER") initial=CONTROL_RUNNING ;;
-      *) initial='{"version":1,"sensitive":false}' ;;
+      *) initial='{"version":1,"sensitive":false,"cleanupFailed":false}' ;;
     esac
     if ! fsk_run_current_deadline aws ssm put-parameter \
       --region ap-northeast-1 \
@@ -514,14 +575,39 @@ fsk_select_exact_owned_db_ingress_ids() {
     FSK_EXPECTED_ACCOUNT="$FSK_AWS_ACCOUNT_ID" \
     node -e '
       const input = JSON.parse(process.env.FSK_RULES_JSON ?? "");
-      for (const rule of input.SecurityGroupRules ?? []) {
+      if (!input || typeof input !== "object" || Array.isArray(input) ||
+          !Object.hasOwn(input, "SecurityGroupRules") ||
+          !Array.isArray(input.SecurityGroupRules)) process.exit(2);
+      for (const rule of input.SecurityGroupRules) {
+        const tags = rule?.Tags;
+        const keys = Array.isArray(tags) ? tags.map((tag) => tag?.Key) : [];
+        const referenced = rule?.ReferencedGroupInfo;
+        if (!rule || typeof rule !== "object" || Array.isArray(rule) ||
+            typeof rule.SecurityGroupRuleId !== "string" || !rule.SecurityGroupRuleId ||
+            typeof rule.GroupId !== "string" || !rule.GroupId ||
+            typeof rule.GroupOwnerId !== "string" || !rule.GroupOwnerId ||
+            typeof rule.IsEgress !== "boolean" ||
+            typeof rule.IpProtocol !== "string" || !rule.IpProtocol ||
+            !Array.isArray(tags) || tags.some((tag) =>
+              !tag || typeof tag !== "object" ||
+              typeof tag.Key !== "string" || !tag.Key ||
+              typeof tag.Value !== "string") ||
+            new Set(keys).size !== keys.length ||
+            (rule.FromPort !== undefined && !Number.isInteger(rule.FromPort)) ||
+            (rule.ToPort !== undefined && !Number.isInteger(rule.ToPort)) ||
+            (referenced !== undefined &&
+              (!referenced || typeof referenced !== "object" ||
+               typeof referenced.GroupId !== "string" || !referenced.GroupId ||
+               typeof referenced.UserId !== "string" || !referenced.UserId))) {
+          process.exit(2);
+        }
         const semantic = rule.GroupId === process.env.FSK_EXPECTED_DB_SG &&
           rule.GroupOwnerId === process.env.FSK_EXPECTED_ACCOUNT &&
           rule.IsEgress === false && rule.IpProtocol === "tcp" &&
           rule.FromPort === 5432 && rule.ToPort === 5432 &&
           rule.ReferencedGroupInfo?.GroupId === process.env.FSK_EXPECTED_OPS_SG &&
           rule.ReferencedGroupInfo?.UserId === process.env.FSK_EXPECTED_ACCOUNT;
-        process.stdout.write(`${rule.SecurityGroupRuleId ?? ""}\t${semantic ? 1 : 0}\t${encodeURIComponent(JSON.stringify(rule.Tags ?? []))}\n`);
+        process.stdout.write(`${rule.SecurityGroupRuleId}\t${semantic ? 1 : 0}\t${encodeURIComponent(JSON.stringify(tags))}\n`);
       }
     '
   )" || return 1
@@ -712,8 +798,8 @@ fsk_worker_run_database_migration() {
   esac
   unset DATABASE_URL
   test -z "${DATABASE_URL+x}"
-  FSK_WORKER_READY_FOR_CLEANUP=1
   fsk_publish_worker_status READY_FOR_CLEANUP
+  FSK_WORKER_READY_FOR_CLEANUP=1
 }
 
 fsk_worker_run() {
@@ -734,7 +820,7 @@ Foundation outputs 必须从批准的 exact stack ID 读取，RDS describe 必�
 
 ## 6. control watchdog、幂等 cleanup 和稳定零残留
 
-control 从安装 trap 起就是唯一 cleanup 执行者。看到 `READY_FOR_CLEANUP`、任意 `FAILED:*`、连续三次 status 读取失败或 operation deadline 到达时进入同一 cleanup。control session 丢失时，CleanupOwner 从非敏感 evidence 恢复完整 tuple 和 deadline；不得只按 TaskId 扫描或删除。
+control 从安装 trap 起就是唯一 cleanup 执行者。看到 `READY_FOR_CLEANUP`、任意 `FAILED:*`、连续三次 status 读取失败或 operation deadline 到达时进入同一 cleanup。control session 丢失时，CleanupOwner 从非敏感 evidence 恢复完整 tuple 和 deadline，并从 owned state parameter 重载 failure latch；不得只按 TaskId 扫描或删除。删除 exact owned NAT 后必须在 cleanup deadline 内观察到其状态为 `deleted`，之后才可释放 EIP。
 
 ```bash
 fsk_control_watchdog() {
@@ -868,6 +954,42 @@ fsk_count_owned_application_route_residuals() {
   printf '%s\n' "$count"
 }
 
+fsk_wait_for_owned_nat_deleted() {
+  local nat_id="${1:?NAT gateway ID required}"
+  local response snapshot state encoded tags_json
+  while :; do
+    response="$(fsk_run_before_cleanup_deadline \
+      aws ec2 describe-nat-gateways --region ap-northeast-1 \
+        --nat-gateway-ids "$nat_id" --output json)" || return 1
+    snapshot="$(FSK_NAT_JSON="$response" FSK_EXPECTED_NAT_ID="$nat_id" node -e '
+      const input = JSON.parse(process.env.FSK_NAT_JSON ?? "");
+      if (!Object.hasOwn(input, "NatGateways") ||
+          !Array.isArray(input.NatGateways) || input.NatGateways.length !== 1) {
+        process.exit(2);
+      }
+      const nat = input.NatGateways[0];
+      if (!nat || typeof nat !== "object" ||
+          nat.NatGatewayId !== process.env.FSK_EXPECTED_NAT_ID ||
+          typeof nat.State !== "string" || !Array.isArray(nat.Tags)) {
+        process.exit(2);
+      }
+      process.stdout.write(`${nat.State}\t${encodeURIComponent(JSON.stringify(nat.Tags))}`);
+    ')" || return 1
+    IFS=$'\t' read -r state encoded <<< "$snapshot"
+    tags_json="$(FSK_ENCODED_TAGS="$encoded" node -e '
+      process.stdout.write(decodeURIComponent(process.env.FSK_ENCODED_TAGS ?? ""));
+    ')" || return 1
+    fsk_assert_exact_ownership_tags "$tags_json" || return 1
+    case "$state" in
+      deleted) return 0 ;;
+      pending|available|deleting|failed)
+        fsk_sleep_before_cleanup_deadline "$FSK_CLEANUP_POLL_SECONDS" || return 1
+        ;;
+      *) echo 'NAT_DELETE_STATE_INVALID_BLOCKED' >&2; return 1 ;;
+    esac
+  done
+}
+
 fsk_delete_owned_temporary_resources_once() {
   local id association ids attachment_vpc
   FSK_MIGRATION_PHASE=cleanup
@@ -886,6 +1008,7 @@ fsk_delete_owned_temporary_resources_once() {
     [ -n "$id" ] || continue
     fsk_run_before_cleanup_deadline aws ec2 delete-nat-gateway \
       --region ap-northeast-1 --nat-gateway-id "$id" >/dev/null || return 1
+    fsk_wait_for_owned_nat_deleted "$id" || return 1
   done <<< "$ids"
 
   ids="$(fsk_discover_owned_eip_ids)" || return 1
@@ -1008,8 +1131,14 @@ fsk_emit_terminal_cleanup_evidence() {
 
 fsk_finalize_cleanup_state() {
   local original_status="${1:-1}"
-  local residual_count control_snapshot terminal_status
+  local cleanup_failed residual_count control_snapshot terminal_status
   FSK_MIGRATION_PHASE=cleanup
+  cleanup_failed="$(fsk_load_cleanup_failure_latch)" || return 1
+  if [ "$cleanup_failed" -ne 0 ]; then
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:PREVIOUS_FAILURE:EXIT_${original_status}" || true
+    return 1
+  fi
   if ! fsk_publish_control_status \
     "CLEANUP_RESOURCES_STABLE_ZERO:EXIT_${original_status}"; then
     return 1
@@ -1064,20 +1193,32 @@ fsk_finalize_cleanup_state() {
 fsk_control_cleanup_owned_resources() {
   local stable_zero=0
   local stable_zero_started=0
-  local residual_count delete_succeeded cleanup_failed=0
+  local residual_count delete_succeeded cleanup_failed
   FSK_MIGRATION_PHASE=cleanup
   : "${FSK_STABLE_ZERO_REQUIRED:=3}"
   : "${FSK_STABLE_ZERO_MIN_SECONDS:=180}"
   : "${FSK_CLEANUP_POLL_SECONDS:=15}"
+  cleanup_failed="$(fsk_load_cleanup_failure_latch)" || {
+    echo 'CLEANUP_FAILURE_LATCH_LOAD_BLOCKED' >&2
+    return 1
+  }
   while [ "$(date +%s)" -lt "$FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH" ]; do
     delete_succeeded=0
     if fsk_delete_owned_temporary_resources_once; then
       delete_succeeded=1
     else
+      fsk_record_cleanup_failure_latch || {
+        echo 'CLEANUP_FAILURE_LATCH_PERSIST_BLOCKED' >&2
+        return 1
+      }
       cleanup_failed=1
       echo 'CLEANUP_MUTATION_FAILED_BLOCKED' >&2
     fi
     if ! residual_count="$(fsk_discover_owned_residual_count)"; then
+      fsk_record_cleanup_failure_latch || {
+        echo 'CLEANUP_FAILURE_LATCH_PERSIST_BLOCKED' >&2
+        return 1
+      }
       cleanup_failed=1
       echo 'CLEANUP_DISCOVERY_FAILED_BLOCKED' >&2
       stable_zero=0
@@ -1133,14 +1274,50 @@ fsk_control_exit() {
   exit "$cleanup_status"
 }
 
+fsk_assert_application_route_tables_ready() {
+  local response
+  response="$(cat)"
+  FSK_ROUTE_TABLES_JSON="$response" \
+  FSK_EXPECTED_ROUTE_TABLE_A_ID="$FSK_APP_ROUTE_TABLE_A_ID" \
+  FSK_EXPECTED_ROUTE_TABLE_B_ID="$FSK_APP_ROUTE_TABLE_B_ID" \
+  FSK_EXPECTED_VPC_ID="$FSK_VPC_ID" \
+  node -e '
+    const input = JSON.parse(process.env.FSK_ROUTE_TABLES_JSON ?? "");
+    const expectedIds = [
+      process.env.FSK_EXPECTED_ROUTE_TABLE_A_ID,
+      process.env.FSK_EXPECTED_ROUTE_TABLE_B_ID,
+    ];
+    if (expectedIds.some((id) => typeof id !== "string" || !id) ||
+        new Set(expectedIds).size !== 2 ||
+        !Object.hasOwn(input, "RouteTables") ||
+        !Array.isArray(input.RouteTables) || input.RouteTables.length !== 2) {
+      process.exit(2);
+    }
+    const remaining = new Set(expectedIds);
+    for (const table of input.RouteTables) {
+      if (!table || typeof table !== "object" ||
+          typeof table.RouteTableId !== "string" ||
+          !remaining.delete(table.RouteTableId) ||
+          table.VpcId !== process.env.FSK_EXPECTED_VPC_ID ||
+          !Array.isArray(table.Routes)) process.exit(2);
+      for (const route of table.Routes) {
+        if (!route || typeof route !== "object") process.exit(2);
+        if (route.DestinationCidrBlock === "0.0.0.0/0") process.exit(2);
+      }
+    }
+    if (remaining.size !== 0) process.exit(2);
+  '
+}
+
 fsk_assert_control_guard() {
+  local route_tables
   test "$FSK_MIGRATION_SHELL_ROLE" = control
   fsk_assert_migration_deadline
-  test "$(fsk_run_before_migration_deadline \
+  route_tables="$(fsk_run_before_migration_deadline \
     aws ec2 describe-route-tables --region ap-northeast-1 \
     --route-table-ids "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID" \
-    --query "length(RouteTables[].Routes[?DestinationCidrBlock=='0.0.0.0/0'])" \
-    --output text)" -eq 0
+    --output json)" || return 1
+  printf '%s' "$route_tables" | fsk_assert_application_route_tables_ready
 }
 
 fsk_control_run_migration() {
