@@ -11,14 +11,34 @@
     "typecheck": "pnpm run typecheck:api && pnpm run typecheck:web",
     "typecheck:api": "pnpm --filter @finance/api exec tsc --noEmit",
     "typecheck:web": "pnpm --filter @finance/web exec vue-tsc -b",
+    "typecheck:amplify": "tsc -p amplify/tsconfig.json --noEmit",
     "check": "pnpm run typecheck && pnpm run test:web",
+    "check:all": "pnpm run typecheck && pnpm run typecheck:amplify && pnpm run test:api && pnpm run test:web && pnpm run test:amplify && pnpm run build",
+    "test:amplify": "vitest run --config amplify/vitest.config.ts",
+    "test:api": "pnpm --filter @finance/api test",
     "test:web": "pnpm --filter @finance/web run test",
     "db:push": "pnpm --filter @finance/api exec prisma db push",
     "db:generate": "pnpm --filter @finance/api exec prisma generate",
     "docs:skills": "node scripts/update-skills-usage-doc.cjs"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "@aws-amplify/backend": "^1.24.0",
+    "@aws-amplify/backend-cli": "^1.9.0",
+    "@aws-sdk/client-cloudwatch": "^3.1116.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1116.0",
+    "@aws-sdk/client-rds-data": "^3.1116.0",
+    "@aws-sdk/client-s3": "^3.1116.0",
+    "@types/aws-lambda": "^8.10.162",
+    "@types/node": "^22.10.5",
+    "@types/pg": "^8.23.1",
+    "aws-cdk-lib": "^2.266.0",
+    "bcryptjs": "^3.0.3",
+    "concurrently": "^9.1.2",
+    "constructs": "^10.8.1",
+    "pg": "^8.23.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^3.0.5"
   },
   "packageManager": "pnpm@9.15.0+sha512.76e2379760a4328c4415728e080094b76b79e8793304cfaaf7bc1a2061a283d2d5285d46e169f943716a0758b1e2b8909a0b544fce460a065628a9fd5547c5e5"
 }
