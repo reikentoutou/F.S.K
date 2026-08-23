@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { deviationYenFromStoredFields } from '../calc/daily-report-calc';
+import {
+  deviationYenFromStoredFields,
+  staffMealTotalYen as computeStaffMealTotalYen,
+} from '../calc/daily-report-calc';
 import { Period, tokyoRange } from './period-range';
 
 @Injectable()
@@ -29,6 +32,9 @@ export class AnalyticsService {
         expenseYen: number;
         cashDepositYen: number;
         deviationYen: number;
+        staffMealCashYen: number;
+        staffMealAlipayYen: number;
+        staffMealTotalYen: number;
         count: number;
       }
     > = {};
@@ -38,6 +44,9 @@ export class AnalyticsService {
     let expenseYen = 0;
     let cashDepositYen = 0;
     let deviationYen = 0;
+    let staffMealCashYen = 0;
+    let staffMealAlipayYen = 0;
+    let staffMealTotalYen = 0;
 
     for (const r of rows) {
       const sid = r.shiftId;
@@ -51,6 +60,9 @@ export class AnalyticsService {
           expenseYen: 0,
           cashDepositYen: 0,
           deviationYen: 0,
+          staffMealCashYen: 0,
+          staffMealAlipayYen: 0,
+          staffMealTotalYen: 0,
           count: 0,
         };
       }
@@ -59,6 +71,16 @@ export class AnalyticsService {
       byShift[sid].expenseYen += r.expenseYen;
       byShift[sid].cashDepositYen += r.cashDepositYen;
       byShift[sid].deviationYen += dev;
+      const rowStaffMealTotalYen = computeStaffMealTotalYen(
+        r.staffMealCashYen,
+        r.staffMealAlipayYen,
+      );
+      byShift[sid].staffMealCashYen += r.staffMealCashYen;
+      byShift[sid].staffMealAlipayYen += r.staffMealAlipayYen;
+      byShift[sid].staffMealTotalYen += rowStaffMealTotalYen;
+      staffMealCashYen += r.staffMealCashYen;
+      staffMealAlipayYen += r.staffMealAlipayYen;
+      staffMealTotalYen += rowStaffMealTotalYen;
       byShift[sid].count += 1;
       totalSalesYen += r.totalSalesYen;
       imosSalesYen += r.imosSalesYen;
@@ -77,6 +99,9 @@ export class AnalyticsService {
         expenseYen,
         cashDepositYen,
         deviationYen,
+        staffMealCashYen,
+        staffMealAlipayYen,
+        staffMealTotalYen,
       },
       byShift: Object.values(byShift),
       rows,
