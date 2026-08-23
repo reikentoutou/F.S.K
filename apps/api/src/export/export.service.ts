@@ -5,7 +5,13 @@ import puppeteer from 'puppeteer';
 import { PrismaService } from '../prisma/prisma.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import type { Period } from '../analytics/period-range';
-import { deviationYenFromStoredFields } from '../calc/daily-report-calc';
+import {
+  aggregateGrandTotalsFromRows,
+  byShiftSummaryPairs,
+  grandTotalPairs,
+  shiftDetailPairs,
+  type GrandTotalsAgg,
+} from './export-report-data';
 
 function periodLabelJa(p: Period): string {
   switch (p) {
@@ -34,15 +40,6 @@ type SummaryRow = Awaited<
   ReturnType<AnalyticsService['summary']>
 >['rows'][number];
 
-type GrandTotalsAgg = {
-  imosSalesYen: number;
-  newageYen: number;
-  cashDepositYen: number;
-  expenseYen: number;
-  totalSalesYen: number;
-  deviationYen: number;
-};
-
 @Injectable()
 export class ExportService {
   constructor(
@@ -64,7 +61,7 @@ export class ExportService {
       { header: '項目', key: 'k', width: 28 },
       { header: '値', key: 'v', width: 40 },
     ];
-    this.shiftDetailPairs(row, registerFloat).forEach(([k, v]) =>
+    shiftDetailPairs(row, registerFloat).forEach(([k, v]) =>
       ws.addRow({ k, v }),
     );
 
@@ -93,7 +90,7 @@ export class ExportService {
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <style>body{font-family:sans-serif} table{border-collapse:collapse;width:100%} td{border:1px solid #333;padding:6px}</style>
 </head><body><h2>日報</h2><table>
-${this.shiftDetailPairs(row, registerFloat)
+${shiftDetailPairs(row, registerFloat)
   .map(
     ([k, v]) =>
       `<tr><td>${escapeHtml(String(k))}</td><td>${escapeHtml(String(v))}</td></tr>`,
@@ -119,14 +116,14 @@ ${this.shiftDetailPairs(row, registerFloat)
     const registerFloat = await this.getRegisterFloatAmount();
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet(period === 'day' ? '業務日日報' : '集計');
-    const gt = this.aggregateGrandTotalsFromRows(data.rows);
+    const gt = aggregateGrandTotalsFromRows(data.rows);
 
     ws.addRow([
       period === 'day' ? '業務日（当日）' : '期間',
       period === 'day' ? data.range.start : `${data.range.start} – ${data.range.end}`,
     ]);
     ws.addRow(['— 合計 —', '']);
-    for (const [k, v] of this.grandTotalPairs(gt)) {
+    for (const [k, v] of grandTotalPairs(gt)) {
       ws.addRow([k, v]);
     }
     ws.addRow([]);
@@ -147,7 +144,7 @@ ${this.shiftDetailPairs(row, registerFloat)
         ws.addRow([`業務日 ${date}`, '']);
         for (const r of this.sortRowsByShift(list)) {
           ws.addRow([`  【${r.shiftNameSnapshot}】`, '']);
-          for (const [k, v] of this.shiftDetailPairs(r, registerFloat)) {
+          for (const [k, v] of shiftDetailPairs(r, registerFloat)) {
             ws.addRow([`    ${k}`, v]);
           }
           ws.addRow([]);
@@ -158,12 +155,9 @@ ${this.shiftDetailPairs(row, registerFloat)
     ws.addRow(['— シフト別合算 —', '']);
     for (const b of data.byShift) {
       ws.addRow([`【${b.shiftName}】`, '']);
-      ws.addRow(['  件数', b.count]);
-      ws.addRow(['  Imos売上合計', b.imosSalesYen]);
-      ws.addRow(['  実際売上', b.totalSalesYen]);
-      ws.addRow(['  現金入金金額', b.cashDepositYen]);
-      ws.addRow(['  支出', b.expenseYen]);
-      ws.addRow(['  偏差', b.deviationYen]);
+      for (const [label, value] of byShiftSummaryPairs(b)) {
+        ws.addRow([`  ${label}`, value]);
+      }
       ws.addRow([]);
     }
 
@@ -185,7 +179,7 @@ ${this.shiftDetailPairs(row, registerFloat)
   ) {
     const data = await this.analytics.summary(period, anchorDate);
     const registerFloat = await this.getRegisterFloatAmount();
-    const gt = this.aggregateGrandTotalsFromRows(data.rows);
+    const gt = aggregateGrandTotalsFromRows(data.rows);
     const groups = this.groupRowsByReportDate(data.rows);
     const detailBlocks =
       groups.length === 0
@@ -254,44 +248,8 @@ ${this.verticalByShiftSummaryHtml(data.byShift)}
     return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }
 
-  private aggregateGrandTotalsFromRows(rows: SummaryRow[]): GrandTotalsAgg {
-    let imosSalesYen = 0;
-    let newageYen = 0;
-    let cashDepositYen = 0;
-    let expenseYen = 0;
-    let totalSalesYen = 0;
-    let deviationYen = 0;
-    for (const r of rows) {
-      imosSalesYen += r.imosSalesYen;
-      newageYen += r.newageYen;
-      cashDepositYen += r.cashDepositYen;
-      expenseYen += r.expenseYen;
-      totalSalesYen += r.totalSalesYen;
-      deviationYen += deviationYenFromStoredFields(r);
-    }
-    return {
-      imosSalesYen,
-      newageYen,
-      cashDepositYen,
-      expenseYen,
-      totalSalesYen,
-      deviationYen,
-    };
-  }
-
-  private grandTotalPairs(t: GrandTotalsAgg): [string, string | number][] {
-    return [
-      ['Imos売上合計', `${t.imosSalesYen} 円`],
-      ['Newage売上', `${t.newageYen} 円`],
-      ['現金入金金額', `${t.cashDepositYen} 円`],
-      ['支出', `${t.expenseYen} 円`],
-      ['実際売上', `${t.totalSalesYen} 円`],
-      ['偏差', `${t.deviationYen} 円`],
-    ];
-  }
-
   private verticalGrandTotalsTableHtml(t: GrandTotalsAgg): string {
-    const rows = this.grandTotalPairs(t)
+    const rows = grandTotalPairs(t)
       .map(
         ([k, v]) =>
           `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(String(v))}</td></tr>`,
@@ -309,22 +267,18 @@ ${this.verticalByShiftSummaryHtml(data.byShift)}
       cashDepositYen: number;
       totalSalesYen: number;
       deviationYen: number;
+      staffMealCashYen: number;
+      staffMealAlipayYen: number;
+      staffMealTotalYen: number;
     }[],
   ): string {
     if (!byShift.length) return '<p>（シフトデータなし）</p>';
     return byShift
       .map((b) => {
-        const rows = [
-          ['件数', String(b.count)],
-          ['Imos売上合計', `${b.imosSalesYen} 円`],
-          ['実際売上', `${b.totalSalesYen} 円`],
-          ['現金入金金額', `${b.cashDepositYen} 円`],
-          ['支出', `${b.expenseYen} 円`],
-          ['偏差', `${b.deviationYen} 円`],
-        ]
+        const rows = byShiftSummaryPairs(b)
           .map(
             ([k, v]) =>
-              `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`,
+              `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(String(v))}</td></tr>`,
           )
           .join('');
         return `<h3>${escapeHtml(b.shiftName)}</h3><table class="vtot">${rows}</table>`;
@@ -332,35 +286,11 @@ ${this.verticalByShiftSummaryHtml(data.byShift)}
       .join('');
   }
 
-  private shiftDetailPairs(
-    r: SummaryRow,
-    registerFloat: number,
-  ): [string, string | number][] {
-    return [
-      ['日付', r.reportDate],
-      ['シフト', r.shiftNameSnapshot],
-      ['責任者', r.responsiblePersonSnapshot],
-      ['Newage時間', r.timeRangeLabelSnapshot],
-      ['前期Imos残高', `${r.previousImosBalanceYen} 円`],
-      ['現在Imos残高', `${r.currentImosBalanceYen} 円`],
-      ['Imos売上合計', `${r.imosSalesYen} 円`],
-      ['Newage売上', `${r.newageYen} 円`],
-      ['お手元残高', `${r.cashTotalYen} 円`],
-      ['レジ底銭（設定）', `${registerFloat} 円`],
-      ['支出', `${r.expenseYen} 円`],
-      ['支出理由', r.expenseReason?.trim() || '—'],
-      ['実際売上', `${r.totalSalesYen} 円`],
-      ['現金入金金額', `${r.cashDepositYen} 円`],
-      ['偏差', `${deviationYenFromStoredFields(r)} 円`],
-      ['提出者', r.createdBy.username],
-    ];
-  }
-
   private businessDayShiftSectionHtml(
     r: SummaryRow,
     registerFloat: number,
   ): string {
-    const rows = this.shiftDetailPairs(r, registerFloat)
+    const rows = shiftDetailPairs(r, registerFloat)
       .map(
         ([k, v]) =>
           `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`,
