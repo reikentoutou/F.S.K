@@ -14,9 +14,9 @@
 | AWS Account | `444083008754` |
 | Region | `ap-northeast-1` |
 | Git deployment point | `fsk-staging-data-api-foundation-v1` |
-| MonthlyCeilingJpy | `25000` |
+| MonthlyCeilingJpy | `5000` |
 
-`MonthlyCeilingJpy=25000` 是待批准的治理上限，不是 AWS 硬停止，也不代表审批已经完成。只要 `GateStatus` 仍为 `NOT_APPROVED`，或任一审批字段仍为 `PENDING_USER_APPROVAL`，就不得创建 Amplify App、branch、CloudFormation stack、Budget、告警或其他 AWS 资源。本文不是批准记录，也不表示已经发生 AWS 写入。
+`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止，也不代表当前 commit/tag 的审批证据已经完成。只要 `GateStatus` 仍为 `NOT_APPROVED`，或任一审批字段仍为 `PENDING_USER_APPROVAL`，就不得创建 Amplify App、branch、CloudFormation stack、Budget、告警或其他 AWS 资源。本文不是可执行批准记录，也不表示已经发生 AWS 写入。
 
 ## 成本模型
 
@@ -27,13 +27,14 @@
 | PricingBaseline | `2026-08-23_DESIGN_ESTIMATE_ONLY` |
 | LowUseMonthlyJpy | `约 ¥1,000` |
 | OneAcuWorstMonthJpy | `约 ¥19,600` |
-| MonthlyCeilingJpy | `25000` |
+| OneAcuWorstMonthGateAction | `AUTO_INVALIDATE_STOP_REVIEW` |
+| MonthlyCeilingJpy | `5000` |
 | PricingCapturedAtJst | `PENDING_DEPLOYMENT_DAY_RECALCULATION` |
 | USDJPYRateAndSource | `PENDING_DEPLOYMENT_DAY_RECALCULATION` |
 | CostOwner | `PENDING_USER_APPROVAL` |
 | CleanupOwner | `PENDING_USER_APPROVAL` |
 
-低使用估算假设 Aurora 大部分时间自动暂停；指定最坏月假设 `1 ACU × 730h`，再加其他低使用项目。约 `¥19,600` 不是容量承诺，`¥25,000` 只是为该指定情景保留余量。部署日重算若超过上限，审批自动失效并保持 `NOT_APPROVED`。
+低使用估算假设 Aurora 大部分时间自动暂停；指定最坏月假设 `1 ACU × 730h`，再加其他低使用项目。约 `¥19,600` 不是容量承诺，而且明确高于 `¥5,000` 治理上限；该情景不在缓冲范围内，必须自动使审批失效、停止新增写入并进入成本/清理复查。部署日重算若超过上限，同样保持 `NOT_APPROVED`。
 
 ## 月成本清单
 
@@ -84,7 +85,7 @@
 
 - account、region、App/branch、批准 commit/tag 或资源集合变化；
 - Aurora 上限高于 1 ACU，或增加 RDS Proxy、长期 NAT、Interface Endpoint、数据库业务 ingress 或 Connector 家族资源；
-- 部署日重算、实际成本或预测成本超过 `25000`；
+- 部署日重算、实际成本或预测成本超过 `5000`；
 - 到达 `ExpiresAtJst`，或 CostOwner/CleanupOwner 不可用；
 - 发现真实用户、SQLite、bcrypt hash、uploads、Secret 或敏感日志进入 staging；
 - Aurora 版本在部署前只读复核不再支持 `ap-northeast-1` 的 Serverless v2 0 ACU；
@@ -98,7 +99,7 @@
 | ApprovalMessageOrTaskId | `PENDING_USER_APPROVAL` |
 | ApprovalId | `PENDING_USER_APPROVAL` |
 | ApprovedStage | `PENDING_USER_APPROVAL` |
-| MonthlyCeilingJpy | `25000` |
+| MonthlyCeilingJpy | `5000` |
 | Approver | `PENDING_USER_APPROVAL` |
 | ApprovedAtJst | `PENDING_USER_APPROVAL` |
 | ExpiresAtJst | `PENDING_USER_APPROVAL` |
@@ -107,4 +108,4 @@
 | CostOwner | `PENDING_USER_APPROVAL` |
 | CleanupOwner | `PENDING_USER_APPROVAL` |
 
-只有用户明确写出所批准的单一写入阶段、`MonthlyCeilingJpy=25000`、exact commit/tag 和有效期，并补齐上述字段后，才可进入对应 runbook。当前 `GateStatus=NOT_APPROVED`，没有任何 AWS、远程 Git、Hosting、预算或销毁写入获得授权。
+只有用户明确写出所批准的单一写入阶段、`MonthlyCeilingJpy=5000`、exact commit/tag 和有效期，并补齐上述字段后，才可进入对应 runbook。当前 exact commit/tag 的批准证据尚未补齐，`GateStatus=NOT_APPROVED`；没有任何 AWS、远程 Git、Hosting、预算或销毁写入可在此前执行。

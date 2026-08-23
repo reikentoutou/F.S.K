@@ -28,7 +28,7 @@
 | 5 | Budget/alarms | Budget、费用异常检测、指标和告警 | `PENDING_USER_APPROVAL` |
 | 6 | Destroy | App/branch/stacks/保留资源/共享 Git ref | `PENDING_USER_APPROVAL` |
 
-每次只批准一行。批准证据至少包含 ApprovalId、exact 40 位 commit、需要时的 immutable tag、`MonthlyCeilingJpy=25000`、Approver、ApprovedAtJst、ExpiresAtJst、CostOwner 和 CleanupOwner。
+每次只批准一行。批准证据至少包含 ApprovalId、exact 40 位 commit、需要时的 immutable tag、`MonthlyCeilingJpy=5000`、Approver、ApprovedAtJst、ExpiresAtJst、CostOwner 和 CleanupOwner。该金额是治理上限，不是 AWS 硬停止。
 
 本 Data API 流程的默认 deployment point 是 `fsk-staging-data-api-foundation-v1`。旧 `fsk-staging-foundation-v1` 继续标识旧设计的最后恢复点，不得移动、覆盖或删除。
 
@@ -230,7 +230,7 @@ fi
 
 ## 7. Budget/alarms 与每阶段费用复查
 
-Budget/Cost Anomaly Detection/alarms 属独立写入阶段。每个阶段结束先只读复查 Aurora ACU、NAT、VPC endpoints、DB ingress、S3 versions、logs 和 Amplify jobs；临时网络或状态残留非零、Aurora 不能回到 0 ACU、预测超过 `25000` 或价格证据失效时，停止新增写入并记 `BLOCKED`。
+Budget/Cost Anomaly Detection/alarms 属独立写入阶段。每个阶段结束先只读复查 Aurora ACU、NAT、VPC endpoints、DB ingress、S3 versions、logs 和 Amplify jobs；临时网络或状态残留非零、Aurora 不能回到 0 ACU、预测超过 `5000` 或价格证据失效时，停止新增写入、自动使当前审批失效并记 `BLOCKED`，进入成本/清理复查。`1 ACU × 730h` 的约 `¥19,600` 情景已超过该上限，不属于批准缓冲。
 
 ## 8. Destroy
 

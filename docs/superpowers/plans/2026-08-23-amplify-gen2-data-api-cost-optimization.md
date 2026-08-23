@@ -74,7 +74,7 @@ Migration: CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG
 Full backend: HTTP API + Kitchen/Admin/Export Functions
 Hosting: Vue/PWA
 Persistent network: no NAT, no Interface Endpoint, no 5432 ingress
-MonthlyCeilingJpy: 25000
+MonthlyCeilingJpy: 5000
 GateStatus: NOT_APPROVED
 ```
 
@@ -82,7 +82,7 @@ GateStatus: NOT_APPROVED
 - [ ] 添加新契约：migration 手册必须有 operation token、deadline、失败 trap、临时出口所有权标签、残留发现、migration 第一次 apply/第二次 no-op、verify 和最终 cleanup。
 - [ ] 运行 `pnpm run test:amplify`，确认旧成本表和旧 2918 行手册使测试失败。
 - [ ] 将长期部署步骤压缩到 `staging-deployment-runbook.md`；把临时网络和数据库迁移的可执行流程移动到 `staging-migration-runbook.md`，避免继续在单一文档叠加控制逻辑。
-- [ ] 在成本表删除 SSM Interface Endpoint 和 AppSync 成本项，新增 API Gateway HTTP API、Data API 调用、业务 Functions；记录低使用约 `¥1,000`、1 ACU 指定最坏月约 `¥19,600`、治理上限 `¥25,000`，并明确部署日重新计算。
+- [ ] 在成本表删除 SSM Interface Endpoint 和 AppSync 成本项，新增 API Gateway HTTP API、Data API 调用、业务 Functions；记录低使用约 `¥1,000`、1 ACU 指定最坏月约 `¥19,600`、治理上限 `¥5,000`，并明确后者超限时自动使审批失效、停止新增写入并进入复查，以及部署日重新计算。
 - [ ] 保持 `GateStatus=NOT_APPROVED`，审批字段不得预填为已批准；分别列出 Foundation、Migration、Full backend、Hosting、Budget/alarms、Destroy 六个写入阶段。
 - [ ] 运行 `pnpm run test:amplify`、`pnpm run check:all`、`git diff --check`。
 - [ ] 提交：`git commit -m "docs(amplify): 改写 Data API staging 部署流程"`
@@ -127,7 +127,7 @@ forbidden: appSync, sqlLambda, updaterLambda, interfaceEndpoint, natGateway
 **Required user approval statement:**
 
 ```text
-批准将 fsk-staging-data-api-foundation-v1 推送到远程，并在 AWS 账号 444083008754、ap-northeast-1 创建独立 FSK staging Foundation；月治理上限 ¥25,000，不包含完整 backend、Hosting、Budget/alarms、销毁或真实数据迁移。
+批准将 fsk-staging-data-api-foundation-v1 推送到远程，并在 AWS 账号 444083008754、ap-northeast-1 创建独立 FSK staging Foundation；月治理上限 ¥5,000，不包含完整 backend、Hosting、Budget/alarms、销毁或真实数据迁移。
 ```
 
 - [ ] 未收到上面同等明确的本轮授权时停止；不得把设计确认、计划确认或旧登录状态当作部署批准。
@@ -573,7 +573,7 @@ export interface CloudRuntimeConfig {
 **Required user approval statement:**
 
 ```text
-批准在现有 FSK staging 上部署 HTTP API、Kitchen/Admin/Export Functions、最小 IAM和合成账号/数据；继续执行 ¥25,000 月治理上限，不包含 Hosting、真实数据迁移、production、Budget/alarms 或销毁。
+批准在现有 FSK staging 上部署 HTTP API、Kitchen/Admin/Export Functions、最小 IAM和合成账号/数据；继续执行 ¥5,000 月治理上限，不包含 Hosting、真实数据迁移、production、Budget/alarms 或销毁。
 ```
 
 - [ ] 未收到本轮明确授权时停止；Task 4 的 foundation 批准不能自动覆盖本任务。
@@ -597,7 +597,7 @@ export interface CloudRuntimeConfig {
 **Required user approval statement:**
 
 ```text
-批准从已验收的精确 commit 构建并发布 FSK staging Amplify Hosting，供两台指定 iPhone 做 PWA 验收；继续执行 ¥25,000 月治理上限，不包含真实数据迁移、production、Budget/alarms 或销毁。
+批准从已验收的精确 commit 构建并发布 FSK staging Amplify Hosting，供两台指定 iPhone 做 PWA 验收；继续执行 ¥5,000 月治理上限，不包含真实数据迁移、production、Budget/alarms 或销毁。
 ```
 
 - [ ] 未收到本轮明确授权时停止；Task 15 的 backend 批准不能自动覆盖 Hosting build 和发布。
@@ -636,7 +636,7 @@ Cleanup: no temporary migration resources or synthetic probe leftovers
 - [ ] 在 iPhone 16 Pro Max 当前 iOS 重复相同验收，覆盖灵动岛 safe-area、纵横屏、触控区域和长表单确认页。
 - [ ] 核对 Aurora private/Data API/0–1、无 Proxy、无长期 NAT、无 Interface Endpoint、无业务 5432 ingress、Functions 无 VPC config。
 - [ ] 核对临时 NAT/IGW/EIP/SG/ingress/SSM parameters 和 CloudShell 临时凭据全部清零；记录 S3 pending/test lifecycle 与 noncurrent versions。
-- [ ] 只读获取当前月预测并与 `¥25,000` 比较。若超限，停止新增部署并进入成本/清理复查。
+- [ ] 只读获取当前月预测并与 `¥5,000` 比较。若超限，自动使当前审批失效、停止新增部署并进入成本/清理复查；该治理上限不是 AWS 硬停止。
 - [ ] Budget、Cost Anomaly Detection、alarms 属于新的 AWS 写入：另行取得“批准创建 staging 成本/运行告警”的明确授权后才执行；销毁也必须单独授权。
 - [ ] 运行最终 `pnpm install --frozen-lockfile`、`pnpm run check:all`、完整 synth、secret scan、`git diff --check`，并由独立 reviewer 检查 spec compliance 与 evidence chain。
 - [ ] 只有本任务全部通过才在 `staging-acceptance-report.md` 标记 Phase B complete；否则逐项记录 `FAILED`/`NOT_RUN`，不得宣称 staging 完成。
@@ -663,4 +663,4 @@ Cleanup: no temporary migration resources or synthetic probe leftovers
 - migration apply/no-op/verify 和临时资源稳定清零证据。
 - Kitchen/Admin 权限矩阵、幂等/冲突、网管餐费、统计、导出、附件和冷唤醒证据。
 - iPhone 7 Plus iOS 15.8.4 与 iPhone 16 Pro Max 当前 iOS 的主屏幕 standalone 实机证据。
-- Aurora 回到 0 ACU、当前月预测低于 `¥25,000`、无长期网络固定成本资源的证据。
+- Aurora 回到 0 ACU、当前月预测低于 `¥5,000`、无长期网络固定成本资源的证据。

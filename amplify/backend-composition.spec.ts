@@ -93,6 +93,15 @@ const documentFieldValues = (document: string, field: string): string[] =>
     .filter(([name]) => name === field)
     .map(([, value]) => value);
 
+const parseJpyAmount = (value: string): number => {
+  const match = value.match(/^(?:约 ¥)?([0-9][0-9,]*)$/);
+  const amount = Number(match?.[1].replaceAll(',', ''));
+  if (!match || !Number.isSafeInteger(amount)) {
+    throw new Error(`INVALID_JPY_AMOUNT:${value}`);
+  }
+  return amount;
+};
+
 const OWNERSHIP_TAGS = [
   { Key: 'Project', Value: 'FSK' },
   { Key: 'Environment', Value: 'staging' },
@@ -435,12 +444,9 @@ describe('foundation backend composition', () => {
 
 describe('staging deployment documentation contracts', () => {
   it('keeps the cost gate unapproved with the six separately approved write stages', () => {
-    expect(documentFieldValues(COST_APPROVAL, 'GateStatus')).toContain(
+    expect(documentFieldValues(COST_APPROVAL, 'GateStatus')).toEqual([
       'NOT_APPROVED',
-    );
-    expect(documentFieldValues(COST_APPROVAL, 'MonthlyCeilingJpy')).toContain(
-      '25000',
-    );
+    ]);
     expect(documentFieldValues(COST_APPROVAL, 'LowUseMonthlyJpy')).toContain(
       '约 ¥1,000',
     );
@@ -459,6 +465,23 @@ describe('staging deployment documentation contracts', () => {
       'Budget/alarms',
       'Destroy',
     ]);
+  });
+
+  it('auto-invalidates approval when the 1 ACU always-on scenario exceeds the ¥5,000 ceiling', () => {
+    const monthlyCeilings = documentFieldValues(
+      COST_APPROVAL,
+      'MonthlyCeilingJpy',
+    ).map(parseJpyAmount);
+    const [oneAcuWorstMonth] = documentFieldValues(
+      COST_APPROVAL,
+      'OneAcuWorstMonthJpy',
+    ).map(parseJpyAmount);
+
+    expect(monthlyCeilings).toEqual([5_000, 5_000, 5_000]);
+    expect(oneAcuWorstMonth).toBeGreaterThan(Math.max(...monthlyCeilings));
+    expect(
+      documentFieldValues(COST_APPROVAL, 'OneAcuWorstMonthGateAction'),
+    ).toEqual(['AUTO_INVALIDATE_STOP_REVIEW']);
   });
 
   it('budgets the Data API HTTP backend without persistent connector costs', () => {
