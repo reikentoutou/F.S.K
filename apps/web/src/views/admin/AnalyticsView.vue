@@ -4,6 +4,7 @@ import { http } from '@/api/http';
 import { todayTokyo } from '@/utils/tokyo';
 import {
   deviationYenFromStoredFields,
+  staffMealTotalYen as computeStaffMealTotalYen,
 } from '@/utils/daily-report-calc';
 import { useEchartsBarChart } from '@/composables/useEchartsBarChart';
 
@@ -24,6 +25,8 @@ type DayReportRow = {
   totalSalesYen: number;
   cashDepositYen: number;
   deviationYen: number;
+  staffMealCashYen: number;
+  staffMealAlipayYen: number;
   shift: { sortOrder: number };
   createdBy: { username: string };
 };
@@ -40,6 +43,9 @@ const summary = ref<{
     expenseYen: number;
     cashDepositYen: number;
     deviationYen: number;
+    staffMealCashYen: number;
+    staffMealAlipayYen: number;
+    staffMealTotalYen: number;
   };
   byShift: {
     shiftName: string;
@@ -48,6 +54,9 @@ const summary = ref<{
     expenseYen: number;
     cashDepositYen: number;
     deviationYen: number;
+    staffMealCashYen: number;
+    staffMealAlipayYen: number;
+    staffMealTotalYen: number;
     count: number;
   }[];
   rows?: DayReportRow[];
@@ -68,6 +77,9 @@ const grandTotals = computed(() => {
   let cashDepositYen = 0;
   let expenseYen = 0;
   let deviationYen = 0;
+  let staffMealCashYen = 0;
+  let staffMealAlipayYen = 0;
+  let staffMealTotalYen = 0;
   for (const r of rows) {
     totalSalesYen += r.totalSalesYen;
     imosSalesYen += r.imosSalesYen;
@@ -75,6 +87,12 @@ const grandTotals = computed(() => {
     cashDepositYen += r.cashDepositYen;
     expenseYen += r.expenseYen;
     deviationYen += deviationYenFromStoredFields(r);
+    staffMealCashYen += r.staffMealCashYen;
+    staffMealAlipayYen += r.staffMealAlipayYen;
+    staffMealTotalYen += computeStaffMealTotalYen(
+      r.staffMealCashYen,
+      r.staffMealAlipayYen,
+    );
   }
   return {
     totalSalesYen,
@@ -83,6 +101,9 @@ const grandTotals = computed(() => {
     cashDepositYen,
     expenseYen,
     deviationYen,
+    staffMealCashYen,
+    staffMealAlipayYen,
+    staffMealTotalYen,
     count: rows.length,
   };
 });
@@ -217,6 +238,15 @@ async function downloadAggregate(format: 'xlsx' | 'pdf') {
         <el-descriptions-item label="支出">
           {{ grandTotals.expenseYen }} 円
         </el-descriptions-item>
+        <el-descriptions-item label="网管餐費（現金）">
+          {{ grandTotals.staffMealCashYen }} 円
+        </el-descriptions-item>
+        <el-descriptions-item label="网管餐費（支付宝）">
+          {{ grandTotals.staffMealAlipayYen }} 円
+        </el-descriptions-item>
+        <el-descriptions-item label="网管餐費合計">
+          {{ grandTotals.staffMealTotalYen }} 円
+        </el-descriptions-item>
         <el-descriptions-item label="実際売上">
           {{ grandTotals.totalSalesYen }} 円
         </el-descriptions-item>
@@ -263,6 +293,15 @@ async function downloadAggregate(format: 'xlsx' | 'pdf') {
             <el-descriptions-item label="支出理由">
               {{ r.expenseReason || '—' }}
             </el-descriptions-item>
+            <el-descriptions-item label="网管餐費（現金）">
+              {{ r.staffMealCashYen }} 円
+            </el-descriptions-item>
+            <el-descriptions-item label="网管餐費（支付宝）">
+              {{ r.staffMealAlipayYen }} 円
+            </el-descriptions-item>
+            <el-descriptions-item label="网管餐費合計">
+              {{ computeStaffMealTotalYen(r.staffMealCashYen, r.staffMealAlipayYen) }} 円
+            </el-descriptions-item>
             <el-descriptions-item label="実際売上">
               {{ r.totalSalesYen }} 円
             </el-descriptions-item>
@@ -289,6 +328,9 @@ async function downloadAggregate(format: 'xlsx' | 'pdf') {
           <el-descriptions-item label="実際売上">{{ b.totalSalesYen }} 円</el-descriptions-item>
           <el-descriptions-item label="現金入金金額">{{ b.cashDepositYen }} 円</el-descriptions-item>
           <el-descriptions-item label="支出">{{ b.expenseYen }} 円</el-descriptions-item>
+          <el-descriptions-item label="网管餐費（現金）">{{ b.staffMealCashYen }} 円</el-descriptions-item>
+          <el-descriptions-item label="网管餐費（支付宝）">{{ b.staffMealAlipayYen }} 円</el-descriptions-item>
+          <el-descriptions-item label="网管餐費合計">{{ b.staffMealTotalYen }} 円</el-descriptions-item>
           <el-descriptions-item label="偏差">{{ b.deviationYen }} 円</el-descriptions-item>
         </el-descriptions>
       </div>

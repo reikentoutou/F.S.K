@@ -5,6 +5,7 @@ import { http } from '@/api/http';
 import { ElMessage } from 'element-plus';
 import { todayTokyo, isoMonthsAgoTokyo } from '@/utils/tokyo';
 import { httpErrorMessage } from '@/utils/http-error-message';
+import { staffMealTotalYen } from '@/utils/daily-report-calc';
 
 type Row = {
   id: string;
@@ -12,6 +13,8 @@ type Row = {
   shiftId: string;
   shiftNameSnapshot: string;
   totalSalesYen: number;
+  staffMealCashYen: number;
+  staffMealAlipayYen: number;
   createdBy: { username: string };
 };
 
@@ -36,9 +39,20 @@ const totalDays = computed(() => byDate.value.length);
 const totalSalesAll = computed(() =>
   rows.value.reduce((s, r) => s + r.totalSalesYen, 0),
 );
+const totalStaffMealAll = computed(() =>
+  rows.value.reduce(
+    (sum, row) =>
+      sum + staffMealTotalYen(row.staffMealCashYen, row.staffMealAlipayYen),
+    0,
+  ),
+);
 
 function daySalesYen(list: Row[]): number {
   return list.reduce((s, r) => s + r.totalSalesYen, 0);
+}
+
+function rowStaffMealTotalYen(row: Row): number {
+  return staffMealTotalYen(row.staffMealCashYen, row.staffMealAlipayYen);
 }
 
 function formatYen(n: number): string {
@@ -124,6 +138,8 @@ function edit(id: string) {
             <template v-if="totalReports > 0">
               <span class="meta-dot" aria-hidden="true">·</span>
               表示期間の実際売上計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
+              <span class="meta-dot" aria-hidden="true">·</span>
+              网管餐費計 <span class="meta-strong">{{ formatYen(totalStaffMealAll) }}</span>
             </template>
           </p>
           <p class="panel-hint">業務日を開くとシフト別の一覧が表示されます。</p>
@@ -154,6 +170,21 @@ function edit(id: string) {
               <el-table-column label="実際売上" min-width="120">
                 <template #default="{ row }">
                   {{ formatYen(row.totalSalesYen) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="网管餐費（現金）" min-width="138">
+                <template #default="{ row }">
+                  {{ formatYen(row.staffMealCashYen) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="网管餐費（支付宝）" min-width="148">
+                <template #default="{ row }">
+                  {{ formatYen(row.staffMealAlipayYen) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="网管餐費合計" min-width="128">
+                <template #default="{ row }">
+                  {{ formatYen(rowStaffMealTotalYen(row)) }}
                 </template>
               </el-table-column>
               <el-table-column prop="createdBy.username" label="提出者" min-width="100" />
