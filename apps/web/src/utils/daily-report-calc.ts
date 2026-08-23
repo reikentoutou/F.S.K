@@ -12,12 +12,24 @@ export function cashDepositYen(
   return cashTotalYen - registerFloatYen;
 }
 
+export function staffMealTotalYen(
+  staffMealCashYen: number,
+  staffMealAlipayYen: number,
+): number {
+  return staffMealCashYen + staffMealAlipayYen;
+}
+
 export function actualSalesYen(
   newageYen: number,
   cashTotalYen: number,
   registerFloatYen: number,
+  staffMealCashYen = 0,
 ): number {
-  return newageYen + cashDepositYen(cashTotalYen, registerFloatYen);
+  return (
+    newageYen +
+    cashDepositYen(cashTotalYen, registerFloatYen) -
+    staffMealCashYen
+  );
 }
 
 export function deviationYen(
@@ -35,6 +47,7 @@ export function computeDailyReportTotals(data: {
   cashTotalYen: number;
   expenseYen: number;
   registerFloatYen: number;
+  staffMealCashYen?: number;
 }) {
   const imosSales = imosSalesYen(
     data.previousImosBalanceYen,
@@ -45,6 +58,7 @@ export function computeDailyReportTotals(data: {
     data.newageYen,
     data.cashTotalYen,
     data.registerFloatYen,
+    data.staffMealCashYen ?? 0,
   );
   return {
     imosSalesYen: imosSales,

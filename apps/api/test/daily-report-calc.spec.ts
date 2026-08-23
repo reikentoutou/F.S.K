@@ -6,20 +6,16 @@ import {
   deviationYen,
   imosSalesYen,
   staffMealTotalYen,
-} from './daily-report-calc';
+} from '../src/calc/daily-report-calc';
 
 describe('daily report calc with staff meals', () => {
-  it('computes Imos sales and cash deposit without changing cash deposit for meals', () => {
-    expect(imosSalesYen(10_000, 32_000)).toBe(22_000);
+  it('keeps staff meal cash inside cash deposit but removes it from actual sales', () => {
     expect(cashDepositYen(20_000, 5_000)).toBe(15_000);
-  });
-
-  it('subtracts only staff meal cash from actual sales', () => {
     expect(actualSalesYen(8_000, 20_000, 5_000, 1_200)).toBe(21_800);
-    expect(staffMealTotalYen(1_200, 800)).toBe(2_000);
   });
 
-  it('returns only the stored server totals', () => {
+  it('derives the staff meal total without storing it in report totals', () => {
+    expect(staffMealTotalYen(1_200, 800)).toBe(2_000);
     expect(
       computeDailyReportTotals({
         previousImosBalanceYen: 10_000,
@@ -38,9 +34,9 @@ describe('daily report calc with staff meals', () => {
     });
   });
 
-  it('keeps old reports unchanged when both meal fields are zero', () => {
+  it('preserves the previous result when staff meal cash is zero', () => {
     expect(actualSalesYen(8_000, 20_000, 5_000)).toBe(23_000);
-    expect(staffMealTotalYen(0, 0)).toBe(0);
+    expect(imosSalesYen(10_000, 32_000)).toBe(22_000);
     expect(deviationYen(23_000, 1_000, 22_000)).toBe(2_000);
   });
 });
