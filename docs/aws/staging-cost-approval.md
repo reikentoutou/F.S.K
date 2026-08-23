@@ -32,9 +32,12 @@
 | S3 Gateway VPC Endpoint | 是 | Gateway Endpoint 本身无固定小时费；仍计算 S3 请求/传输费用 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
 | Amplify Hosting build | 后续 Hosting | 构建分钟、构建实例规格和构建产物 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_HOSTING` |
 | Amplify Hosting delivery/storage | 后续 Hosting | 托管 GB-month、出站流量和请求 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_HOSTING` |
-| Lambda / Amplify Functions | 后续 full backend | 调用次数、执行时间和内存；foundation 不创建业务 Functions | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
+| Amplify branch-linker Lambda | 是 | branch/pipeline foundation synth 固定包含 1 个 Node.js branch-linker；按调用、执行时间和内存计费 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
+| CDK custom-resource provider Lambda | 是 | branch-linker 固定包含 1 个 provider framework Lambda；CloudFormation create/update/delete 时调用 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
+| Foundation 平台 Lambda CloudWatch Logs | 是 | 上述 2 个平台 Lambda 首次调用会产生相应日志写入和保留费用；不得因为没有业务 Function 而漏计 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
+| 业务 Lambda / Amplify Functions | 后续 full backend | 厨房提交、管理更正、附件和健康检查等业务调用次数、执行时间和内存；foundation 不包含这些业务 Functions | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
 | AppSync / Amplify Data | 后续 full backend | Query/Mutation 次数及实时连接；foundation 不创建 AppSync/Amplify Data API | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
-| CloudWatch Logs/Metrics/Alarms | 分阶段 | 日志写入/保留、指标和 alarms；Task 17 有独立写入审批门 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_OBSERVABILITY_GATE` |
+| 业务 CloudWatch Logs/Metrics/Alarms | 后续 full backend / Task 17 | 业务 Function/AppSync/Aurora 日志、指标和 alarms；Task 17 有独立写入审批门 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_OBSERVABILITY_GATE` |
 | S3 对象、请求和版本 | 是 | pending/test/migration 7 天生命周期；正式对象和非当前版本可能持续保留 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
 | Cognito | 是 | 仅两个合成 stage 用户和 disposable probe 用户；按当期 MAU 规则复核 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
 | Secrets Manager | 是 | Aurora generated credentials Secret 的 secret-month 和 API 调用 | `PENDING_RATE_LOOKUP` | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |

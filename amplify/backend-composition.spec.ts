@@ -1,16 +1,16 @@
-import { Stack } from 'aws-cdk-lib';
+import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 let composition: typeof import('./backend.foundation.js');
 
 beforeAll(async () => {
+  process.env.AWS_REGION = 'ap-northeast-1';
+  process.env.AWS_DEFAULT_REGION = 'ap-northeast-1';
   process.env.CDK_CONTEXT_JSON = JSON.stringify({
     'amplify-backend-name': 'staging',
     'amplify-backend-namespace': 'test-app-id',
-    // Standalone avoids the branch-linker asset bundler in a local unit test;
-    // the deployment runbook reserves retention verification for branch mode.
-    'amplify-backend-type': 'standalone',
+    'amplify-backend-type': 'branch',
   });
   composition = await import('./backend.foundation.js');
 });
@@ -31,13 +31,126 @@ describe('foundation backend composition', () => {
       'aurora',
       'dataApi',
     ]);
+  });
 
-    const resourceNames = composition.FOUNDATION_RESOURCE_SET.join(
-      ',',
-    ).toLowerCase();
-    expect(resourceNames).not.toContain('submitkitchenreport');
-    expect(resourceNames).not.toContain('production');
-    expect(composition.FOUNDATION_RESOURCE_SET).not.toContain('data');
+  it('requires both AWS SDK region variables to match staging', () => {
+    expect(() =>
+      composition.assertStagingDeploymentRegion({
+        AWS_REGION: 'ap-northeast-1',
+        AWS_DEFAULT_REGION: 'ap-northeast-1',
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    [{ AWS_DEFAULT_REGION: 'ap-northeast-1' }],
+    [{ AWS_REGION: 'ap-northeast-1' }],
+    [
+      {
+        AWS_REGION: 'us-east-1',
+        AWS_DEFAULT_REGION: 'ap-northeast-1',
+      },
+    ],
+    [
+      {
+        AWS_REGION: 'ap-northeast-1',
+        AWS_DEFAULT_REGION: 'us-east-1',
+      },
+    ],
+  ])('rejects missing or drifting SDK region variables: %j', (environment) => {
+    expect(() =>
+      composition.assertStagingDeploymentRegion(environment),
+    ).toThrow('STAGING_REGION_MISMATCH');
+  });
+
+  it('synthesizes the branch deployment without Data or business Functions', () => {
+    const app = composition.backend.stack.node.root;
+    expect(app).toBeInstanceOf(App);
+
+    const assembly = (app as App).synth({ errorOnDuplicateSynth: false });
+    const templates = [
+      ['root', composition.backend.stack],
+      ['auth', composition.backend.auth.stack],
+      ['storage', composition.backend.storage.stack],
+      ['foundation', composition.foundationStack],
+    ] as const;
+    const synthesizedTemplates = templates.map(([name, stack]) => ({
+      name,
+      template: Template.fromStack(stack),
+    }));
+
+    for (const { template } of synthesizedTemplates) {
+      template.resourceCountIs('AWS::AppSync::GraphQLApi', 0);
+    }
+
+    const rootTemplate = synthesizedTemplates.find(
+      ({ name }) => name === 'root',
+    )?.template;
+    expect(rootTemplate).toBeDefined();
+
+    const rootLambdas = rootTemplate!.findResources('AWS::Lambda::Function');
+    const lambdaEntries = Object.entries(rootLambdas);
+    expect(lambdaEntries).toHaveLength(2);
+
+    const linkerEntry = lambdaEntries.find(([logicalId]) =>
+      /^AmplifyBranchLinkerCustomResourceLambda[A-F0-9]+$/.test(logicalId),
+    );
+    const providerEntry = lambdaEntries.find(([logicalId]) =>
+      /^AmplifyBranchLinkerCustomResourceProviderframeworkonEvent[A-F0-9]+$/.test(
+        logicalId,
+      ),
+    );
+    expect(linkerEntry?.[1].Properties).toMatchObject({
+      Handler: 'index.handler',
+      Runtime: 'nodejs22.x',
+      Timeout: 10,
+    });
+    expect(providerEntry?.[1].Properties).toMatchObject({
+      Description: expect.stringContaining(
+        '/AmplifyBranchLinker/CustomResourceProvider)',
+      ),
+      Handler: 'framework.onEvent',
+    });
+    expect(
+      providerEntry?.[1].Properties.Environment.Variables
+        .USER_ON_EVENT_FUNCTION_ARN,
+    ).toEqual({
+      'Fn::GetAtt': [linkerEntry?.[0], 'Arn'],
+    });
+
+    for (const { name, template } of synthesizedTemplates) {
+      if (name !== 'root') {
+        template.resourceCountIs('AWS::Lambda::Function', 0);
+      }
+    }
+
+    const nestedStacks = rootTemplate!.findResources(
+      'AWS::CloudFormation::Stack',
+    );
+    const nestedStackIds = Object.keys(nestedStacks);
+    expect(nestedStackIds).toHaveLength(2);
+    expect(nestedStackIds.some((id) => /^auth[A-F0-9]+$/.test(id))).toBe(
+      true,
+    );
+    expect(nestedStackIds.some((id) => /^storage[A-F0-9]+$/.test(id))).toBe(
+      true,
+    );
+
+    const synthesizedEvidence = JSON.stringify({
+      stackNames: assembly.stacks.map((stack) => stack.stackName),
+      templates: synthesizedTemplates.map(({ name, template }) => [
+        name,
+        template.toJSON(),
+      ]),
+    }).toLowerCase();
+
+    expect(synthesizedEvidence).not.toContain('submitkitchenreport');
+    expect(synthesizedEvidence).not.toContain('generatedsqlschema');
+    expect(synthesizedEvidence).not.toContain('schema.sql');
+    expect(synthesizedEvidence).not.toContain('production');
+    expect(
+      assembly.stacks.some((stack) => /data/i.test(stack.stackName)),
+    ).toBe(false);
   });
 
   it('disables guest identities and applies the staging Cognito overrides', () => {
@@ -115,6 +228,7 @@ describe('foundation backend composition', () => {
     foundationTemplate.hasOutput('VpcId', {});
     foundationTemplate.hasOutput('AuroraClusterArn', {});
     foundationTemplate.hasOutput('AuroraSecretArn', {});
+    foundationTemplate.hasOutput('DatabaseSecurityGroupId', {});
     foundationTemplate.hasOutput('DatabaseName', { Value: 'fsk_staging' });
   });
 

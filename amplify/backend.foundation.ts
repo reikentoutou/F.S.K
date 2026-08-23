@@ -26,6 +26,26 @@ export const FOUNDATION_RESOURCE_SET = [
   'dataApi',
 ] as const;
 
+export interface StagingDeploymentRegionEnvironment {
+  readonly AWS_REGION?: string;
+  readonly AWS_DEFAULT_REGION?: string;
+}
+
+export function assertStagingDeploymentRegion(
+  environment: StagingDeploymentRegionEnvironment,
+): void {
+  if (
+    environment.AWS_REGION !== STAGING_CONFIG.region ||
+    environment.AWS_DEFAULT_REGION !== STAGING_CONFIG.region
+  ) {
+    throw new Error(
+      `STAGING_REGION_MISMATCH: AWS_REGION and AWS_DEFAULT_REGION must both equal ${STAGING_CONFIG.region}`,
+    );
+  }
+}
+
+assertStagingDeploymentRegion(process.env);
+
 export const backend = defineBackend({ auth, storage });
 
 const app = backend.stack.node.root;
@@ -75,6 +95,9 @@ new CfnOutput(foundationStack, 'AuroraClusterArn', {
 });
 new CfnOutput(foundationStack, 'AuroraSecretArn', {
   value: foundation.clusterSecret.secretArn,
+});
+new CfnOutput(foundationStack, 'DatabaseSecurityGroupId', {
+  value: foundation.databaseSecurityGroup.securityGroupId,
 });
 new CfnOutput(foundationStack, 'DatabaseName', {
   value: foundation.databaseName,
