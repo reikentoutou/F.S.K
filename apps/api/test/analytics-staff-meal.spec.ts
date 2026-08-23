@@ -22,6 +22,21 @@ describe('AnalyticsService staff meal summary', () => {
       },
       {
         id: 'r2',
+        reportDate: '2026-08-24',
+        shiftId: 'day',
+        shiftNameSnapshot: '白班',
+        totalSalesYen: 5_000,
+        imosSalesYen: 5_000,
+        expenseYen: 0,
+        cashDepositYen: 5_000,
+        deviationYen: 0,
+        staffMealCashYen: 400,
+        staffMealAlipayYen: 600,
+        shift: { sortOrder: 2 },
+        createdBy: { username: 'kitchen' },
+      },
+      {
+        id: 'r3',
         reportDate: '2026-08-23',
         shiftId: 'night',
         shiftNameSnapshot: '夜班',
@@ -42,22 +57,22 @@ describe('AnalyticsService staff meal summary', () => {
     } as unknown as PrismaService;
 
     const result = await new AnalyticsService(prisma).summary(
-      'day',
+      'month',
       '2026-08-23',
     );
 
     expect(result.totals).toMatchObject({
-      staffMealCashYen: 1_500,
-      staffMealAlipayYen: 1_300,
-      staffMealTotalYen: 2_800,
-      totalSalesYen: 31_800,
+      staffMealCashYen: 1_900,
+      staffMealAlipayYen: 1_900,
+      staffMealTotalYen: 3_800,
+      totalSalesYen: 36_800,
     });
     expect(result.byShift).toEqual([
       expect.objectContaining({
         shiftId: 'day',
-        staffMealCashYen: 1_200,
-        staffMealAlipayYen: 800,
-        staffMealTotalYen: 2_000,
+        staffMealCashYen: 1_600,
+        staffMealAlipayYen: 1_400,
+        staffMealTotalYen: 3_000,
       }),
       expect.objectContaining({
         shiftId: 'night',
