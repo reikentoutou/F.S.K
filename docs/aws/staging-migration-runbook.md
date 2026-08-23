@@ -1034,26 +1034,29 @@ fsk_finalize_cleanup_state() {
       "CLEANUP_BLOCKED:RESOURCE_FINAL_RESIDUAL:EXIT_${original_status}" || true
     return 1
   }
-  residual_count="$(fsk_count_state_parameter_path_residuals)" || return 1
+  residual_count="$(fsk_count_state_parameter_path_residuals)" || {
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:STATE_FINAL_QUERY:EXIT_${original_status}" || true
+    return 1
+  }
   [ "$residual_count" -eq 1 ] || {
     fsk_publish_control_status \
       "CLEANUP_BLOCKED:STATE_FINAL_RESIDUAL:EXIT_${original_status}" || true
     return 1
   }
   terminal_status="CLEANUP_PASS:EXIT_${original_status}"
-  fsk_publish_control_status "$terminal_status" || return 1
+  fsk_publish_control_status \
+    "CLEANUP_FINAL_CHECKS_PASS_CONTROL_DELETE_PENDING:EXIT_${original_status}" || return 1
   control_snapshot="$(
     fsk_snapshot_state_parameter "$FSK_CONTROL_STATUS_PARAMETER"
   )" || return 1
-  fsk_emit_terminal_cleanup_evidence "$terminal_status" "$control_snapshot" || return 1
   if ! fsk_delete_state_parameter_if_owned "$FSK_CONTROL_STATUS_PARAMETER"; then
     fsk_publish_control_status \
       "CLEANUP_BLOCKED:CONTROL_DELETE:EXIT_${original_status}" || true
     return 1
   fi
-  residual_count="$(fsk_count_state_parameter_path_residuals)" || return 1
-  [ "$residual_count" -eq 0 ] || return 1
   printf 'FINAL_PARAMETER_PATH_RESIDUAL_COUNT=0\n'
+  fsk_emit_terminal_cleanup_evidence "$terminal_status" "$control_snapshot"
 }
 ```
 
@@ -1061,7 +1064,7 @@ fsk_finalize_cleanup_state() {
 fsk_control_cleanup_owned_resources() {
   local stable_zero=0
   local stable_zero_started=0
-  local residual_count delete_succeeded
+  local residual_count delete_succeeded cleanup_failed=0
   FSK_MIGRATION_PHASE=cleanup
   : "${FSK_STABLE_ZERO_REQUIRED:=3}"
   : "${FSK_STABLE_ZERO_MIN_SECONDS:=180}"
@@ -1070,8 +1073,13 @@ fsk_control_cleanup_owned_resources() {
     delete_succeeded=0
     if fsk_delete_owned_temporary_resources_once; then
       delete_succeeded=1
+    else
+      cleanup_failed=1
+      echo 'CLEANUP_MUTATION_FAILED_BLOCKED' >&2
     fi
     if ! residual_count="$(fsk_discover_owned_residual_count)"; then
+      cleanup_failed=1
+      echo 'CLEANUP_DISCOVERY_FAILED_BLOCKED' >&2
       stable_zero=0
       stable_zero_started=0
       fsk_sleep_before_cleanup_deadline "$FSK_CLEANUP_POLL_SECONDS" || return 1
@@ -1087,6 +1095,10 @@ fsk_control_cleanup_owned_resources() {
           "$FSK_STABLE_ZERO_MIN_SECONDS" ]; then
         residual_count="$(fsk_discover_owned_residual_count)" || return 1
         test "$residual_count" -eq 0 || return 1
+        if [ "$cleanup_failed" -ne 0 ]; then
+          echo 'CLEANUP_PREVIOUS_FAILURE_BLOCKED' >&2
+          return 1
+        fi
         printf 'STABLE_ZERO_OBSERVATIONS=%s\n' "$stable_zero"
         return 0
       fi
@@ -1153,8 +1165,8 @@ fsk_control_run_migration() {
 3. 创建 exact VPC worker environment；worker detached checkout exact foundation commit，安装 trap，再安装依赖。
 4. worker 第一次执行 migration，必须得到 `MIGRATIONS_APPLIED count=1`；第二次必须得到 `count=0`；verify 必须得到 `SCHEMA_VERIFIED`。
 5. worker 清除 `DATABASE_URL`、发布 READY，操作者删除 exact worker environment；失败、timeout 或 tab 丢失由 status/deadline 触发 control cleanup。
-6. control 反复 discovery → delete → discovery；每个 AWS 调用都受单命令上限和 cleanup 剩余时间共同约束。应用 route table 必须属于 exact VPC，且默认路由当前 target 必须等于唯一 full-tuple-owned NAT 才允许删除；缺失或 foreign target 保持不动并进入 `CLEANUP_BLOCKED`。
-7. 至少连续三次资源残留为 0，且首尾不少于 180 秒后，先发布非终态 `CLEANUP_RESOURCES_STABLE_ZERO`，再删除 worker/state 参数并复查全部临时资源与参数路径；control status 保留到最后，用于发布 `CLEANUP_PASS` 或任何局部失败的 `CLEANUP_BLOCKED`。输出脱离 SSM 的 terminal evidence 后才删除 control status，并确认最终参数路径残留为 0。
+6. control 反复 discovery → delete → discovery；每个 AWS 调用都受单命令上限和 cleanup 剩余时间共同约束。应用 route table 必须属于 exact VPC，且默认路由当前 target 必须等于唯一 full-tuple-owned NAT 才允许删除；缺失或 foreign target 保持不动并进入 `CLEANUP_BLOCKED`。任何一次 mutation/discovery 失败都会留下 sticky failure evidence；后续 retry 仍可清除资源，但本 operation 永远不得转为 PASS。
+7. 至少连续三次资源残留为 0，且首尾不少于 180 秒后，先发布非终态 `CLEANUP_RESOURCES_STABLE_ZERO`，再删除 worker/state 参数并复查全部临时资源与参数路径。所有 final check 完成且路径只剩 control status 后，发布非终态 `CLEANUP_FINAL_CHECKS_PASS_CONTROL_DELETE_PENDING`；control status 的 exact CAS 删除确认成功后，才输出脱离 SSM 的 `CLEANUP_PASS` terminal evidence 和最终参数路径残留 0。任一 final check 失败时 control status 仍存在并发布 `CLEANUP_BLOCKED`。
 
 | 证据字段 | 值 |
 | --- | --- |

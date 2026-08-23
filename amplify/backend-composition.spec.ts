@@ -139,7 +139,7 @@ marker="$(mktemp)"
   kill -TERM "$child" 2>/dev/null || true
   sleep 0.1
   kill -KILL "$child" 2>/dev/null || true
-) & watchdog=$!
+) >/dev/null 2>&1 & watchdog=$!
 set +e
 wait "$child"
 status=$?
@@ -914,22 +914,92 @@ fsk_run_before_cleanup_deadline aws ec2 describe-nat-gateways
     expect(elapsedMs).toBeLessThan(3_000);
   });
 
-  it('does not report stable zero after a cleanup mutation fails', () => {
+  it('keeps a one-time real cleanup mutation failure terminally blocked', () => {
     const script = `set -euo pipefail
-fsk_delete_owned_temporary_resources_once() { return 47; }
-fsk_discover_owned_residual_count() { printf '0\\n'; }
-fsk_sleep_before_cleanup_deadline() { :; }
-FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH=$(($(date +%s) + 1))
-FSK_STABLE_ZERO_REQUIRED=3
+FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH=$(($(date +%s) + 20))
+FSK_CLEANUP_COMMAND_MAX_SECONDS=5
+FSK_STABLE_ZERO_REQUIRED=1
 FSK_STABLE_ZERO_MIN_SECONDS=0
 FSK_CLEANUP_POLL_SECONDS=0
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_seconds_before_cleanup_deadline')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_run_before_cleanup_deadline')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_sleep_before_cleanup_deadline')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_run_current_deadline')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_require_single_owned_id')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_select_exact_owned_resource_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_operations_sg_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_igw_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_public_subnet_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_route_table_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_eip_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_nat_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_select_exact_owned_db_ingress_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_db_ingress_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_residual_count')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_describe_default_route_target')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_owned_application_routes')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_count_owned_application_route_residuals')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_owned_temporary_resources_once')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_control_cleanup_owned_resources')}
 fsk_control_cleanup_owned_resources
 `;
-    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    const result = runWithMockAws(
+      script,
+      `case " $* " in
+  *' ec2 describe-route-tables '*--route-table-ids*)
+    route_table_id=''
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = --route-table-ids ]; then route_table_id="$argument"; fi
+      previous="$argument"
+    done
+    printf '{"RouteTables":[{"RouteTableId":"%s","VpcId":"%s","Routes":[]}]}' \
+      "$route_table_id" "$FSK_VPC_ID"
+    ;;
+  *' ec2 describe-route-tables '*) printf '{"RouteTables":[]}' ;;
+  *' ec2 describe-security-group-rules '*) printf '{"SecurityGroupRules":[]}' ;;
+  *' ec2 describe-nat-gateways '*) printf '{"NatGateways":[]}' ;;
+  *' ec2 describe-addresses '*) printf '{"Addresses":[]}' ;;
+  *' ec2 describe-subnets '*) printf '{"Subnets":[]}' ;;
+  *' ec2 describe-internet-gateways '*) printf '{"InternetGateways":[]}' ;;
+  *' ec2 describe-security-groups '*)
+    if [ -f "$FSK_MOCK_AWS_LOG.deleted" ]; then
+      printf '{"SecurityGroups":[]}'
+    else
+      printf '%s' "$FSK_MOCK_OWNED_SG_RESPONSE"
+    fi
+    ;;
+  *' ec2 delete-security-group '*)
+    if [ ! -f "$FSK_MOCK_AWS_LOG.failed" ]; then
+      touch "$FSK_MOCK_AWS_LOG.failed"
+      exit 47
+    fi
+    touch "$FSK_MOCK_AWS_LOG.deleted"
+    ;;
+  *) exit 64 ;;
+esac`,
+      {
+        ...OWNERSHIP_ENVIRONMENT,
+        FSK_APP_ROUTE_TABLE_A_ID: 'rtb-a',
+        FSK_APP_ROUTE_TABLE_B_ID: 'rtb-b',
+        FSK_DB_SECURITY_GROUP_ID: 'sg-database',
+        FSK_OPS_SG_ID: 'sg-operations',
+        FSK_MOCK_OWNED_SG_RESPONSE: JSON.stringify({
+          SecurityGroups: [
+            { GroupId: 'sg-operations', Tags: OWNERSHIP_TAGS },
+          ],
+        }),
+      },
+      15_000,
+    );
 
     expect(result.status).not.toBe(0);
     expect(result.stdout).not.toContain('STABLE_ZERO_OBSERVATIONS');
+    expect(result.stderr).toContain('CLEANUP_MUTATION_FAILED_BLOCKED');
+    expect(
+      result.awsCalls.filter((call) => call.includes('delete-security-group')),
+    ).toHaveLength(2);
   });
 
   it('requires three stable zero residual observations before cleanup passes', () => {
@@ -1043,6 +1113,92 @@ esac`,
     expect(log).not.toContain('delete-parameter --region ap-northeast-1 --name /fsk/test/control-status');
   });
 
+  it('keeps control status BLOCKED-capable when the final path query fails', () => {
+    const statePrefix = '/fsk/test-final-query';
+    const workerStatus = `${statePrefix}/worker-status`;
+    const state = `${statePrefix}/state`;
+    const controlStatus = `${statePrefix}/control-status`;
+    const script = `set -euo pipefail
+fsk_run_before_cleanup_deadline() { "$@"; }
+fsk_run_current_deadline() { fsk_run_before_cleanup_deadline "$@"; }
+fsk_assert_no_task_id_collision() { :; }
+fsk_discover_owned_residual_count() { printf '0\\n'; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_snapshot_state_parameter')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_state_parameter_owned')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_publish_control_status')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_state_parameter_if_owned')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_nonterminal_state_parameters')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_count_state_parameter_path_residuals')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_emit_terminal_cleanup_evidence')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_finalize_cleanup_state')}
+fsk_finalize_cleanup_state 0
+`;
+    const result = runWithMockAws(
+      script,
+      `parameter_name() {
+  local previous='' argument
+  for argument in "$@"; do
+    if [ "$previous" = --name ] || [ "$previous" = --resource-id ]; then
+      printf '%s' "$argument"
+      return
+    fi
+    previous="$argument"
+  done
+}
+case " $* " in
+  *' ssm get-parameter '*)
+    name="$(parameter_name "$@")"
+    printf '{"Parameter":{"Name":"%s","Type":"String","Version":1}}' "$name"
+    ;;
+  *' ssm list-tags-for-resource '*) printf '%s' "$FSK_MOCK_TAG_RESPONSE" ;;
+  *' ssm put-parameter '*) printf '2\\n' ;;
+  *' ssm delete-parameter '*)
+    case "$*" in
+      *control-status*) exit 90 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  *' ssm describe-parameters '*)
+    if [[ " $* " == *'Option=BeginsWith'* ]]; then
+      exit 47
+    fi
+    name=''
+    for argument in "$@"; do
+      case "$argument" in
+        Key=Name,Option=Equals,Values=*)
+          name="$(printf '%s' "$argument" | cut -d= -f4-)"
+          ;;
+      esac
+    done
+    if grep -Fq -- "delete-parameter --region ap-northeast-1 --name $name" "$FSK_MOCK_AWS_LOG"; then
+      printf '0\\n'
+    else
+      printf '1\\n'
+    fi
+    ;;
+  *) exit 64 ;;
+esac`,
+      {
+        ...OWNERSHIP_ENVIRONMENT,
+        FSK_WORKER_STATUS_PARAMETER: workerStatus,
+        FSK_STATE_PARAMETER: state,
+        FSK_CONTROL_STATUS_PARAMETER: controlStatus,
+        FSK_STATE_PREFIX: statePrefix,
+        FSK_MOCK_TAG_RESPONSE: JSON.stringify({ TagList: OWNERSHIP_TAGS }),
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    const log = result.awsCalls.join('\n');
+    const deleteCall = 'delete-parameter --region ap-northeast-1 --name';
+    expect(log).toContain(`${deleteCall} ${workerStatus}`);
+    expect(log).toContain(`${deleteCall} ${state}`);
+    expect(log).toContain('CLEANUP_BLOCKED:STATE_FINAL_QUERY:EXIT_0');
+    expect(log).not.toContain('CLEANUP_PASS');
+    expect(log).not.toContain(`${deleteCall} ${controlStatus}`);
+  });
+
   it('checks the full TaskId residual set and deletes control status last', () => {
     const statePrefix =
       '/fsk/staging/migration/task-1/00000000-0000-4000-8000-000000000000';
@@ -1150,8 +1306,10 @@ esac`,
     expect(log.indexOf(`${deleteCall} ${state}`)).toBeLessThan(
       log.indexOf(`${deleteCall} ${controlStatus}`),
     );
-    expect(log).toContain('CLEANUP_PASS:EXIT_0');
+    expect(log).toContain('CLEANUP_FINAL_CHECKS_PASS_CONTROL_DELETE_PENDING');
+    expect(log).not.toContain('CLEANUP_PASS');
     expect(result.stdout).toContain('FSK_MIGRATION_TERMINAL_CLEANUP_EVIDENCE');
+    expect(result.stdout).toContain('CLEANUP_PASS:EXIT_0');
     expect(result.stdout).toContain('FINAL_PARAMETER_PATH_RESIDUAL_COUNT=0');
     expect(`${result.stdout}${result.stderr}`).not.toContain('CLEANUP_BLOCKED');
   });
