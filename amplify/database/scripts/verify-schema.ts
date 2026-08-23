@@ -62,16 +62,39 @@ WHERE tc.table_schema = 'public'
   AND tc.constraint_type = 'PRIMARY KEY'
 ORDER BY tc.table_name, kcu.ordinal_position`;
 
-const DAILY_REPORT_UNIQUES_SQL = `SELECT array_agg(kcu.column_name ORDER BY kcu.ordinal_position) AS columns
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-  ON kcu.constraint_schema = tc.constraint_schema
- AND kcu.constraint_name = tc.constraint_name
-WHERE tc.table_schema = 'public'
-  AND tc.table_name = 'daily_report'
-  AND tc.constraint_type = 'UNIQUE'
-GROUP BY tc.constraint_name
-ORDER BY tc.constraint_name`;
+const DAILY_REPORT_UNIQUES_SQL = `SELECT array_agg(
+         CASE
+           WHEN index_key.attnum = 0 THEN pg_catalog.pg_get_indexdef(
+             index_relation.oid,
+             index_key.ordinality::integer,
+             true
+           )
+           ELSE table_attribute.attname::text
+         END
+         ORDER BY index_key.ordinality
+       ) AS columns
+FROM pg_catalog.pg_index index_definition
+JOIN pg_catalog.pg_class table_relation
+  ON table_relation.oid = index_definition.indrelid
+JOIN pg_catalog.pg_namespace table_namespace
+  ON table_namespace.oid = table_relation.relnamespace
+JOIN pg_catalog.pg_class index_relation
+  ON index_relation.oid = index_definition.indexrelid
+JOIN LATERAL pg_catalog.unnest(index_definition.indkey) WITH ORDINALITY
+  AS index_key(attnum, ordinality)
+  ON index_key.ordinality <= index_definition.indnkeyatts
+LEFT JOIN pg_catalog.pg_attribute table_attribute
+  ON table_attribute.attrelid = table_relation.oid
+ AND table_attribute.attnum = index_key.attnum
+WHERE table_namespace.nspname = 'public'
+  AND table_relation.relname = 'daily_report'
+  AND index_definition.indisunique
+  AND NOT index_definition.indisprimary
+  AND index_definition.indisvalid
+  AND index_definition.indisready
+  AND index_definition.indislive
+GROUP BY index_relation.oid, index_relation.relname
+ORDER BY index_relation.relname`;
 
 const AMOUNT_COLUMNS_SQL = `WITH expected_amount(table_name, column_name) AS (
   VALUES

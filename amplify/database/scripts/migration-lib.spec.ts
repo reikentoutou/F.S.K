@@ -113,6 +113,22 @@ describe('migration planning', () => {
       ]),
     ).toThrow('MIGRATION_VERSION_GAP');
   });
+
+  it('rejects applied history that is not a contiguous committed prefix', () => {
+    expect(() =>
+      planMigrations(
+        [
+          { version: '001', checksum: 'abc' },
+          { version: '003', checksum: 'ghi' },
+        ],
+        [
+          { version: '001', checksum: 'abc' },
+          { version: '002', checksum: 'def' },
+          { version: '003', checksum: 'ghi' },
+        ],
+      ),
+    ).toThrow('MIGRATION_APPLIED_HISTORY_NOT_PREFIX');
+  });
 });
 
 describe('migration file loading', () => {
@@ -425,9 +441,17 @@ describe('transactional migration application', () => {
 
   it.each([
     'BEGIN; SELECT 1;',
-    'SELECT 1; COMMIT;',
-    '-- misleading comment\nROLLBACK;',
     'START TRANSACTION; SELECT 1;',
+    'SELECT 1; COMMIT;',
+    'END;',
+    '-- misleading comment\nROLLBACK;',
+    'ABORT;',
+    "PREPARE TRANSACTION 'migration-001';",
+    "COMMIT PREPARED 'migration-001';",
+    "ROLLBACK PREPARED 'migration-001';",
+    'SAVEPOINT migration_001;',
+    'RELEASE SAVEPOINT migration_001;',
+    'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;',
   ])('rejects migration-owned transaction control before BEGIN: %s', async (sql) => {
     const client = new FakeMigrationClient();
 
@@ -565,6 +589,7 @@ type VerificationFixture = {
   tables: Array<Record<string, unknown>>;
   primaryKeys: Array<Record<string, unknown>>;
   uniqueConstraints: Array<Record<string, unknown>>;
+  uniqueIndexes: Array<Record<string, unknown>>;
   amountColumns: Array<Record<string, unknown>>;
   migrations: Array<Record<string, unknown>>;
 };
@@ -575,6 +600,10 @@ const validVerificationFixture = (): VerificationFixture => ({
   })),
   primaryKeys: expectedPrimaryKeys,
   uniqueConstraints: [
+    { columns: ['idempotency_key'] },
+    { columns: ['report_date', 'shift_id'] },
+  ],
+  uniqueIndexes: [
     { columns: ['idempotency_key'] },
     { columns: ['report_date', 'shift_id'] },
   ],
@@ -597,6 +626,9 @@ class FakeVerificationClient implements MigrationClient {
     }
     if (text.includes("constraint_type = 'UNIQUE'")) {
       return { rows: this.fixture.uniqueConstraints };
+    }
+    if (text.includes('FROM pg_catalog.pg_index')) {
+      return { rows: this.fixture.uniqueIndexes };
     }
     if (text.includes('FROM information_schema.tables')) {
       return { rows: this.fixture.tables };
@@ -629,6 +661,11 @@ describe('read-only schema verification', () => {
     expect(client.calls.some((query) => query.includes('FROM public.schema_migrations'))).toBe(
       true,
     );
+    expect(
+      client.calls.some((query) =>
+        query.includes('FROM pg_catalog.pg_index'),
+      ),
+    ).toBe(true);
   });
 
   it('rejects a missing business table', async () => {
@@ -660,6 +697,7 @@ describe('read-only schema verification', () => {
   it('rejects a missing daily report uniqueness invariant', async () => {
     const fixture = validVerificationFixture();
     fixture.uniqueConstraints = [{ columns: ['idempotency_key'] }];
+    fixture.uniqueIndexes = [{ columns: ['idempotency_key'] }];
 
     await expect(
       verifySchema(new FakeVerificationClient(fixture), [
@@ -671,6 +709,18 @@ describe('read-only schema verification', () => {
   it('rejects an extra dangerous daily report unique constraint', async () => {
     const fixture = validVerificationFixture();
     fixture.uniqueConstraints.push({ columns: ['report_date'] });
+    fixture.uniqueIndexes.push({ columns: ['report_date'] });
+
+    await expect(
+      verifySchema(new FakeVerificationClient(fixture), [
+        { version: '001', checksum: 'expected-checksum' },
+      ]),
+    ).rejects.toThrow('SCHEMA_DAILY_REPORT_UNIQUE_MISMATCH');
+  });
+
+  it('rejects an extra standalone unique index on report_date', async () => {
+    const fixture = validVerificationFixture();
+    fixture.uniqueIndexes.push({ columns: ['report_date'] });
 
     await expect(
       verifySchema(new FakeVerificationClient(fixture), [

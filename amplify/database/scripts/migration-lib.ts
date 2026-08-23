@@ -126,6 +126,14 @@ export function planMigrations(
     }
   }
   const sortedFiles = validateCommittedVersions(files);
+  const sortedApplied = [...applied].sort((left, right) =>
+    left.version.localeCompare(right.version),
+  );
+  for (const [index, migration] of sortedApplied.entries()) {
+    if (migration.version !== sortedFiles[index]?.version) {
+      throw new Error('MIGRATION_APPLIED_HISTORY_NOT_PREFIX');
+    }
+  }
 
   const appliedByVersion = new Map(
     applied.map((migration) => [migration.version, migration.checksum]),
@@ -279,13 +287,12 @@ const stripSqlCommentsAndLiterals = (sql: string): string => {
   return result;
 };
 
+const TRANSACTION_CONTROL_PATTERN =
+  /(?:^|;)\s*(?:BEGIN\b|START\s+TRANSACTION\b|COMMIT\b|END\b|ROLLBACK\b|ABORT\b|PREPARE\s+TRANSACTION\b|SAVEPOINT\b|RELEASE(?:\s+SAVEPOINT)?\b|SET\s+TRANSACTION\b)/i;
+
 const assertNoMigrationTransactionControl = (sql: string): void => {
   const executableSql = stripSqlCommentsAndLiterals(sql);
-  if (
-    /(?:^|;)\s*(?:BEGIN\b|COMMIT\b|ROLLBACK\b|START\s+TRANSACTION\b)/i.test(
-      executableSql,
-    )
-  ) {
+  if (TRANSACTION_CONTROL_PATTERN.test(executableSql)) {
     throw new Error('MIGRATION_TRANSACTION_CONTROL_FORBIDDEN');
   }
 };
