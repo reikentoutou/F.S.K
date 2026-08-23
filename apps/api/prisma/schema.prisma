@@ -72,7 +72,12 @@ model DailyReport {
   expenseYen                 Int @default(0)
   expenseReason              String?
 
-  /// 実際売上 = Newage売上 + お手元残高 - 底銭
+  /// 网管餐费现金：包含在钱箱现金中，但不属于实际销售
+  staffMealCashYen           Int @default(0)
+  /// 网管餐费支付宝：独立保存，不进入现金入金或实际销售
+  staffMealAlipayYen         Int @default(0)
+
+  /// 実際売上 = Newage売上 + お手元残高 - 底銭 - 网管餐费现金
   totalSalesYen              Int @default(0)
   cashDepositYen             Int @default(0)
   deviationYen               Int @default(0)
