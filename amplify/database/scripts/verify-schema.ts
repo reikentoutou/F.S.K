@@ -72,7 +72,9 @@ const DAILY_REPORT_UNIQUES_SQL = `SELECT array_agg(
            ELSE table_attribute.attname::text
          END
          ORDER BY index_key.ordinality
-       ) AS columns
+       ) AS columns,
+       pg_catalog.bool_and(index_definition.indpred IS NULL) AS is_global,
+       pg_catalog.bool_and(index_key.attnum <> 0) AS has_only_columns
 FROM pg_catalog.pg_index index_definition
 JOIN pg_catalog.pg_class table_relation
   ON table_relation.oid = index_definition.indrelid
@@ -193,6 +195,9 @@ export async function verifySchema(
     normalizedColumns(row.columns).join(','),
   );
   if (
+    uniqueResult.rows.some(
+      (row) => row.is_global !== true || row.has_only_columns !== true,
+    ) ||
     !sameStringSet(uniqueColumns, [
       'idempotency_key',
       'report_date,shift_id',

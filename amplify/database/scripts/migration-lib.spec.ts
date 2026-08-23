@@ -604,8 +604,16 @@ const validVerificationFixture = (): VerificationFixture => ({
     { columns: ['report_date', 'shift_id'] },
   ],
   uniqueIndexes: [
-    { columns: ['idempotency_key'] },
-    { columns: ['report_date', 'shift_id'] },
+    {
+      columns: ['idempotency_key'],
+      is_global: true,
+      has_only_columns: true,
+    },
+    {
+      columns: ['report_date', 'shift_id'],
+      is_global: true,
+      has_only_columns: true,
+    },
   ],
   amountColumns: expectedAmountColumns,
   migrations: [
@@ -666,6 +674,11 @@ describe('read-only schema verification', () => {
         query.includes('FROM pg_catalog.pg_index'),
       ),
     ).toBe(true);
+    expect(
+      client.calls.find((query) =>
+        query.includes('FROM pg_catalog.pg_index'),
+      ),
+    ).toMatch(/index_definition\.indpred\s+IS\s+NULL/i);
   });
 
   it('rejects a missing business table', async () => {
@@ -697,7 +710,13 @@ describe('read-only schema verification', () => {
   it('rejects a missing daily report uniqueness invariant', async () => {
     const fixture = validVerificationFixture();
     fixture.uniqueConstraints = [{ columns: ['idempotency_key'] }];
-    fixture.uniqueIndexes = [{ columns: ['idempotency_key'] }];
+    fixture.uniqueIndexes = [
+      {
+        columns: ['idempotency_key'],
+        is_global: true,
+        has_only_columns: true,
+      },
+    ];
 
     await expect(
       verifySchema(new FakeVerificationClient(fixture), [
@@ -709,7 +728,11 @@ describe('read-only schema verification', () => {
   it('rejects an extra dangerous daily report unique constraint', async () => {
     const fixture = validVerificationFixture();
     fixture.uniqueConstraints.push({ columns: ['report_date'] });
-    fixture.uniqueIndexes.push({ columns: ['report_date'] });
+    fixture.uniqueIndexes.push({
+      columns: ['report_date'],
+      is_global: true,
+      has_only_columns: true,
+    });
 
     await expect(
       verifySchema(new FakeVerificationClient(fixture), [
@@ -720,7 +743,41 @@ describe('read-only schema verification', () => {
 
   it('rejects an extra standalone unique index on report_date', async () => {
     const fixture = validVerificationFixture();
-    fixture.uniqueIndexes.push({ columns: ['report_date'] });
+    fixture.uniqueIndexes.push({
+      columns: ['report_date'],
+      is_global: true,
+      has_only_columns: true,
+    });
+
+    await expect(
+      verifySchema(new FakeVerificationClient(fixture), [
+        { version: '001', checksum: 'expected-checksum' },
+      ]),
+    ).rejects.toThrow('SCHEMA_DAILY_REPORT_UNIQUE_MISMATCH');
+  });
+
+  it('rejects a partial index substituting for a required global unique key', async () => {
+    const fixture = validVerificationFixture();
+    fixture.uniqueIndexes[0] = {
+      columns: ['idempotency_key'],
+      is_global: false,
+      has_only_columns: true,
+    };
+
+    await expect(
+      verifySchema(new FakeVerificationClient(fixture), [
+        { version: '001', checksum: 'expected-checksum' },
+      ]),
+    ).rejects.toThrow('SCHEMA_DAILY_REPORT_UNIQUE_MISMATCH');
+  });
+
+  it('rejects an expression index substituting for a required unique key', async () => {
+    const fixture = validVerificationFixture();
+    fixture.uniqueIndexes[0] = {
+      columns: ['lower(idempotency_key)'],
+      is_global: true,
+      has_only_columns: false,
+    };
 
     await expect(
       verifySchema(new FakeVerificationClient(fixture), [
