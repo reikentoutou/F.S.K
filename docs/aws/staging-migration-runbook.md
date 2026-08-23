@@ -65,6 +65,14 @@ fsk_render_temporary_tags() {
   '
 }
 
+fsk_assert_operation_token() {
+  local token="${1:-}"
+  if [[ ! "$token" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+    echo 'OPERATION_TOKEN_INVALID_STOP' >&2
+    return 1
+  fi
+}
+
 fsk_assert_migration_deadline() {
   if [ "$(date +%s)" -ge "$FSK_MIGRATION_OPERATION_DEADLINE_EPOCH" ]; then
     echo 'MIGRATION_OPERATION_DEADLINE_EXCEEDED' >&2
@@ -77,6 +85,41 @@ fsk_run_before_migration_deadline() {
   fsk_assert_migration_deadline
   remaining=$((FSK_MIGRATION_OPERATION_DEADLINE_EPOCH - $(date +%s)))
   timeout --signal=TERM --kill-after=10 "$remaining" "$@"
+}
+
+fsk_seconds_before_cleanup_deadline() {
+  local remaining
+  remaining=$((FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH - $(date +%s)))
+  if [ "$remaining" -le 0 ]; then
+    echo 'CLEANUP_DEADLINE_EXCEEDED_BLOCKED' >&2
+    return 124
+  fi
+  printf '%s\n' "$remaining"
+}
+
+fsk_run_before_cleanup_deadline() {
+  local remaining limit
+  remaining="$(fsk_seconds_before_cleanup_deadline)" || return $?
+  : "${FSK_CLEANUP_COMMAND_MAX_SECONDS:=30}"
+  limit="$remaining"
+  if [ "$limit" -gt "$FSK_CLEANUP_COMMAND_MAX_SECONDS" ]; then
+    limit="$FSK_CLEANUP_COMMAND_MAX_SECONDS"
+  fi
+  timeout --signal=TERM --kill-after=5 "$limit" "$@"
+}
+
+fsk_sleep_before_cleanup_deadline() {
+  local seconds="${1:?sleep seconds required}"
+  [ "$seconds" -eq 0 ] || \
+    fsk_run_before_cleanup_deadline sleep "$seconds"
+}
+
+fsk_run_current_deadline() {
+  if [ "${FSK_MIGRATION_PHASE:-operation}" = cleanup ]; then
+    fsk_run_before_cleanup_deadline "$@"
+  else
+    fsk_run_before_migration_deadline "$@"
+  fi
 }
 
 fsk_require_single_owned_id() {
@@ -93,6 +136,113 @@ fsk_require_single_owned_id() {
     "${prefix}"*) printf '%s\n' "$values" ;;
     *) echo 'OWNED_ID_FORMAT_INVALID_STOP' >&2; return 1 ;;
   esac
+}
+
+fsk_assert_exact_ownership_tags() {
+  local tags_json="${1:?tags JSON required}"
+  FSK_TAGS_JSON="$tags_json" \
+  FSK_EXPECTED_ACCOUNT_ID="$FSK_AWS_ACCOUNT_ID" \
+  FSK_EXPECTED_VPC_ID="$FSK_VPC_ID" \
+  FSK_EXPECTED_TASK_ID="$FSK_MIGRATION_TASK_ID" \
+  FSK_EXPECTED_OPERATION_TOKEN="$FSK_MIGRATION_OPERATION_TOKEN" \
+  node -e '
+    const tags = JSON.parse(process.env.FSK_TAGS_JSON ?? "");
+    if (!Array.isArray(tags)) process.exit(2);
+    const expected = {
+      Project: "FSK",
+      Environment: "staging",
+      ManagedBy: "AmplifyGen2",
+      CostCenter: "FSK",
+      AccountId: process.env.FSK_EXPECTED_ACCOUNT_ID,
+      VpcId: process.env.FSK_EXPECTED_VPC_ID,
+      TaskId: process.env.FSK_EXPECTED_TASK_ID,
+      OperationToken: process.env.FSK_EXPECTED_OPERATION_TOKEN,
+    };
+    const byKey = new Map();
+    for (const tag of tags) {
+      if (typeof tag?.Key !== "string" || typeof tag?.Value !== "string" ||
+          byKey.has(tag.Key)) process.exit(2);
+      byKey.set(tag.Key, tag.Value);
+    }
+    if (Object.entries(expected).some(([key, value]) =>
+      !value || byKey.get(key) !== value)) process.exit(2);
+  '
+}
+
+fsk_select_exact_owned_resource_ids() {
+  local collection="${1:?collection required}"
+  local id_field="${2:?ID field required}"
+  local input candidates id encoded tags_json
+  input="$(cat)"
+  candidates="$(FSK_RESOURCE_JSON="$input" \
+    FSK_RESOURCE_COLLECTION="$collection" \
+    FSK_RESOURCE_ID_FIELD="$id_field" \
+    node -e '
+      const input = JSON.parse(process.env.FSK_RESOURCE_JSON ?? "");
+      const resources = input[process.env.FSK_RESOURCE_COLLECTION] ?? [];
+      if (!Array.isArray(resources)) process.exit(2);
+      for (const resource of resources) {
+        const id = resource?.[process.env.FSK_RESOURCE_ID_FIELD];
+        if (typeof id !== "string" || !Array.isArray(resource?.Tags)) continue;
+        process.stdout.write(`${id}\t${encodeURIComponent(JSON.stringify(resource.Tags))}\n`);
+      }
+    '
+  )" || return 1
+  while IFS=$'\t' read -r id encoded; do
+    [ -n "$id" ] || continue
+    tags_json="$(FSK_ENCODED_TAGS="$encoded" node -e '
+      process.stdout.write(decodeURIComponent(process.env.FSK_ENCODED_TAGS ?? ""));
+    ')" || return 1
+    if fsk_assert_exact_ownership_tags "$tags_json"; then
+      printf '%s\n' "$id"
+    fi
+  done <<< "$candidates"
+}
+
+fsk_assert_no_task_id_collision() {
+  local mappings candidates arn encoded tags_json parameters parameter_names name tags
+  mappings="$(fsk_run_current_deadline \
+    aws resourcegroupstaggingapi get-resources --region ap-northeast-1 \
+      --tag-filters Key=TaskId,Values="$FSK_MIGRATION_TASK_ID" \
+      --output json)" || return 1
+  candidates="$(FSK_COLLISION_JSON="$mappings" node -e '
+    const input = JSON.parse(process.env.FSK_COLLISION_JSON ?? "");
+    for (const item of input.ResourceTagMappingList ?? []) {
+      process.stdout.write(`${item.ResourceARN ?? ""}\t${encodeURIComponent(JSON.stringify(item.Tags ?? []))}\n`);
+    }
+  ')" || return 1
+  while IFS=$'\t' read -r arn encoded; do
+    [ -n "$arn" ] || continue
+    tags_json="$(FSK_ENCODED_TAGS="$encoded" node -e '
+      process.stdout.write(decodeURIComponent(process.env.FSK_ENCODED_TAGS ?? ""));
+    ')" || return 1
+    if ! fsk_assert_exact_ownership_tags "$tags_json"; then
+      echo 'TASK_ID_OWNERSHIP_COLLISION_STOP' >&2
+      return 1
+    fi
+  done <<< "$candidates"
+
+  parameters="$(fsk_run_current_deadline aws ssm describe-parameters \
+    --region ap-northeast-1 \
+    --parameter-filters \
+      "Key=Name,Option=BeginsWith,Values=/fsk/staging/migration/${FSK_MIGRATION_TASK_ID}/" \
+    --output json)" || return 1
+  parameter_names="$(FSK_PARAMETERS_JSON="$parameters" node -e '
+    const input = JSON.parse(process.env.FSK_PARAMETERS_JSON ?? "");
+    for (const parameter of input.Parameters ?? []) {
+      if (typeof parameter?.Name === "string") console.log(parameter.Name);
+    }
+  ')" || return 1
+  while read -r name; do
+    [ -n "$name" ] || continue
+    tags="$(fsk_run_current_deadline aws ssm list-tags-for-resource \
+      --region ap-northeast-1 --resource-type Parameter \
+      --resource-id "$name" --query TagList --output json)" || return 1
+    if ! fsk_assert_exact_ownership_tags "$tags"; then
+      echo 'TASK_ID_OWNERSHIP_COLLISION_STOP' >&2
+      return 1
+    fi
+  done <<< "$parameter_names"
 }
 ```
 
@@ -116,10 +266,7 @@ case "$FSK_MIGRATION_SHELL_ROLE" in control|worker) ;; *) exit 2 ;; esac
 case "$FSK_MIGRATION_TASK_ID" in
   *[!A-Za-z0-9_-]*|'') echo 'TASK_ID_INVALID_STOP' >&2; exit 1 ;;
 esac
-case "$FSK_MIGRATION_OPERATION_TOKEN" in
-  ????????-????-4???-[89abAB]???-????????????) ;;
-  *) echo 'OPERATION_TOKEN_INVALID_STOP' >&2; exit 1 ;;
-esac
+fsk_assert_operation_token "$FSK_MIGRATION_OPERATION_TOKEN"
 case "$FSK_MIGRATION_OPERATION_DEADLINE_EPOCH:$FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH" in
   *[!0-9:]*|:*|*:) echo 'DEADLINE_INVALID_STOP' >&2; exit 1 ;;
 esac
@@ -143,15 +290,21 @@ FSK_STATE_PARAMETER="${FSK_STATE_PREFIX}/state"
 ```bash
 fsk_snapshot_state_parameter() {
   local name="${1:?parameter name required}"
-  local metadata tags
-  metadata="$(aws ssm get-parameter --region ap-northeast-1 \
+  local metadata tags tag_list
+  metadata="$(fsk_run_current_deadline aws ssm get-parameter \
+    --region ap-northeast-1 \
     --name "$name" \
     --query 'Parameter.{Name:Name,Type:Type,Version:Version}' --output json)" || return 1
-  tags="$(aws ssm list-tags-for-resource --region ap-northeast-1 \
+  tags="$(fsk_run_current_deadline aws ssm list-tags-for-resource \
+    --region ap-northeast-1 \
     --resource-type Parameter --resource-id "$name" --output json)" || return 1
+  tag_list="$(FSK_PARAMETER_TAGS="$tags" node -e '
+    const input = JSON.parse(process.env.FSK_PARAMETER_TAGS ?? "");
+    process.stdout.write(JSON.stringify(input.TagList ?? input));
+  ')" || return 1
+  fsk_assert_exact_ownership_tags "$tag_list" || return 1
   FSK_PARAMETER_METADATA="$metadata" FSK_PARAMETER_TAGS="$tags" \
   FSK_EXPECTED_PARAMETER_NAME="$name" \
-  FSK_EXPECTED_OPERATION_TOKEN="$FSK_MIGRATION_OPERATION_TOKEN" \
   node -e '
     const metadata = JSON.parse(process.env.FSK_PARAMETER_METADATA ?? "");
     const tagInput = JSON.parse(process.env.FSK_PARAMETER_TAGS ?? "");
@@ -161,11 +314,6 @@ fsk_snapshot_state_parameter() {
         parameter.Type !== "String" || !Number.isInteger(parameter.Version) ||
         !Array.isArray(tags)) process.exit(2);
     const byKey = new Map(tags.map((tag) => [tag.Key, tag.Value]));
-    if (byKey.get("Project") !== "FSK" ||
-        byKey.get("Environment") !== "staging" ||
-        byKey.get("OperationToken") !== process.env.FSK_EXPECTED_OPERATION_TOKEN) {
-      process.exit(2);
-    }
     process.stdout.write(JSON.stringify({
       name: parameter.Name,
       version: parameter.Version,
@@ -181,7 +329,7 @@ fsk_assert_state_parameter_owned() {
 fsk_publish_worker_status() {
   local value="${1:?worker status required}"
   fsk_assert_state_parameter_owned "$FSK_WORKER_STATUS_PARAMETER" || return 1
-  aws ssm put-parameter --region ap-northeast-1 \
+  fsk_run_current_deadline aws ssm put-parameter --region ap-northeast-1 \
     --name "$FSK_WORKER_STATUS_PARAMETER" --type String \
     --value "$value" --overwrite --query Version --output text >/dev/null || return 1
   fsk_assert_state_parameter_owned "$FSK_WORKER_STATUS_PARAMETER"
@@ -190,7 +338,7 @@ fsk_publish_worker_status() {
 fsk_publish_control_status() {
   local value="${1:?control status required}"
   fsk_assert_state_parameter_owned "$FSK_CONTROL_STATUS_PARAMETER" || return 1
-  aws ssm put-parameter --region ap-northeast-1 \
+  fsk_run_current_deadline aws ssm put-parameter --region ap-northeast-1 \
     --name "$FSK_CONTROL_STATUS_PARAMETER" --type String \
     --value "$value" --overwrite --query Version --output text >/dev/null || return 1
   fsk_assert_state_parameter_owned "$FSK_CONTROL_STATUS_PARAMETER"
@@ -212,7 +360,8 @@ fsk_create_temporary_state_parameters() {
     "$FSK_WORKER_STATUS_PARAMETER" \
     "$FSK_CONTROL_STATUS_PARAMETER" \
     "$FSK_STATE_PARAMETER"; do
-    test "$(aws ssm describe-parameters --region ap-northeast-1 \
+    test "$(fsk_run_current_deadline aws ssm describe-parameters \
+      --region ap-northeast-1 \
       --parameter-filters "Key=Name,Option=Equals,Values=${name}" \
       --query 'length(Parameters)' --output text)" -eq 0
     case "$name" in
@@ -220,7 +369,8 @@ fsk_create_temporary_state_parameters() {
       "$FSK_CONTROL_STATUS_PARAMETER") initial=CONTROL_RUNNING ;;
       *) initial='{"version":1,"sensitive":false}' ;;
     esac
-    if ! aws ssm put-parameter --region ap-northeast-1 \
+    if ! fsk_run_current_deadline aws ssm put-parameter \
+      --region ap-northeast-1 \
       --name "$name" --type String --value "$initial" \
       --tags "${tag_args[@]}" --query Version --output text >/dev/null; then
       fsk_assert_state_parameter_owned "$name" || return 1
@@ -236,31 +386,31 @@ fsk_create_temporary_state_parameters() {
 
 ```bash
 fsk_discover_owned_operations_sg_ids() {
-  aws ec2 describe-security-groups --region ap-northeast-1 \
+  fsk_run_current_deadline aws ec2 describe-security-groups \
+    --region ap-northeast-1 \
     --filters \
       "Name=vpc-id,Values=${FSK_VPC_ID}" \
       'Name=tag:Project,Values=FSK' \
       'Name=tag:Environment,Values=staging' \
+      'Name=tag:ManagedBy,Values=AmplifyGen2' \
+      'Name=tag:CostCenter,Values=FSK' \
       "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
       "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
       "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
-    --query 'SecurityGroups[].GroupId' --output text |
-    tr '\t' '\n'
+    --output json |
+    fsk_select_exact_owned_resource_ids SecurityGroups GroupId
 }
 
 fsk_create_or_recover_operations_sg() {
-  local id=''
-  if ! id="$(fsk_run_before_migration_deadline \
+  fsk_create_or_recover_owned_id sg- \
+    fsk_discover_owned_operations_sg_ids \
     aws ec2 create-security-group --region ap-northeast-1 \
       --vpc-id "$FSK_VPC_ID" \
       --group-name "fsk-staging-migration-${FSK_MIGRATION_TASK_ID}-${FSK_MIGRATION_OPERATION_TOKEN}" \
       --description 'FSK staging temporary migration access' \
       --tag-specifications "[{\"ResourceType\":\"security-group\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
-      --query 'GroupId' --output text)"; then
-    id="$(fsk_discover_owned_operations_sg_ids)" || return 1
-  fi
-  fsk_require_single_owned_id "$id" sg-
+      --query 'GroupId' --output text
 }
 
 fsk_create_or_recover_owned_id() {
@@ -269,50 +419,137 @@ fsk_create_or_recover_owned_id() {
   shift 2
   local id=''
   if ! id="$(fsk_run_before_migration_deadline "$@")"; then
+    id=''
+  fi
+  if ! fsk_require_single_owned_id "$id" "$prefix" >/dev/null 2>&1; then
     id="$("$discovery_function")" || return 1
   fi
   fsk_require_single_owned_id "$id" "$prefix"
 }
 
 fsk_discover_owned_igw_ids() {
-  aws ec2 describe-internet-gateways --region ap-northeast-1 \
-    --filters "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
+  fsk_run_current_deadline aws ec2 describe-internet-gateways \
+    --region ap-northeast-1 \
+    --filters 'Name=tag:Project,Values=FSK' \
+      'Name=tag:Environment,Values=staging' \
+      'Name=tag:ManagedBy,Values=AmplifyGen2' \
+      'Name=tag:CostCenter,Values=FSK' \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
       "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
       "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
-    --query 'InternetGateways[].InternetGatewayId' --output text | tr '\t' '\n'
+    --output json |
+    fsk_select_exact_owned_resource_ids InternetGateways InternetGatewayId
 }
 
 fsk_discover_owned_public_subnet_ids() {
-  aws ec2 describe-subnets --region ap-northeast-1 \
+  fsk_run_current_deadline aws ec2 describe-subnets --region ap-northeast-1 \
     --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      'Name=tag:Project,Values=FSK' \
+      'Name=tag:Environment,Values=staging' \
+      'Name=tag:ManagedBy,Values=AmplifyGen2' \
+      'Name=tag:CostCenter,Values=FSK' \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
       "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
       "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
-    --query 'Subnets[].SubnetId' --output text | tr '\t' '\n'
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+    --output json |
+    fsk_select_exact_owned_resource_ids Subnets SubnetId
 }
 
 fsk_discover_owned_route_table_ids() {
-  aws ec2 describe-route-tables --region ap-northeast-1 \
+  fsk_run_current_deadline aws ec2 describe-route-tables \
+    --region ap-northeast-1 \
     --filters "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      'Name=tag:Project,Values=FSK' \
+      'Name=tag:Environment,Values=staging' \
+      'Name=tag:ManagedBy,Values=AmplifyGen2' \
+      'Name=tag:CostCenter,Values=FSK' \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
       "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
       "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
-    --query 'RouteTables[].RouteTableId' --output text | tr '\t' '\n'
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+    --output json |
+    fsk_select_exact_owned_resource_ids RouteTables RouteTableId
 }
 
 fsk_discover_owned_eip_ids() {
-  aws ec2 describe-addresses --region ap-northeast-1 \
-    --filters "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
+  fsk_run_current_deadline aws ec2 describe-addresses \
+    --region ap-northeast-1 \
+    --filters 'Name=tag:Project,Values=FSK' \
+      'Name=tag:Environment,Values=staging' \
+      'Name=tag:ManagedBy,Values=AmplifyGen2' \
+      'Name=tag:CostCenter,Values=FSK' \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
       "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
       "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
-    --query 'Addresses[].AllocationId' --output text | tr '\t' '\n'
+    --output json |
+    fsk_select_exact_owned_resource_ids Addresses AllocationId
 }
 
 fsk_discover_owned_nat_ids() {
-  aws ec2 describe-nat-gateways --region ap-northeast-1 \
+  fsk_run_current_deadline aws ec2 describe-nat-gateways \
+    --region ap-northeast-1 \
     --filter "Name=vpc-id,Values=${FSK_VPC_ID}" \
+      'Name=tag:Project,Values=FSK' \
+      'Name=tag:Environment,Values=staging' \
+      'Name=tag:ManagedBy,Values=AmplifyGen2' \
+      'Name=tag:CostCenter,Values=FSK' \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
       "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
       "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
       'Name=state,Values=pending,available,deleting,failed' \
-    --query 'NatGateways[].NatGatewayId' --output text | tr '\t' '\n'
+    --output json |
+    fsk_select_exact_owned_resource_ids NatGateways NatGatewayId
+}
+
+fsk_select_exact_owned_db_ingress_ids() {
+  local input candidates id semantic encoded tags_json
+  input="$(cat)"
+  candidates="$(FSK_RULES_JSON="$input" \
+    FSK_EXPECTED_DB_SG="$FSK_DB_SECURITY_GROUP_ID" \
+    FSK_EXPECTED_OPS_SG="$FSK_OPS_SG_ID" \
+    FSK_EXPECTED_ACCOUNT="$FSK_AWS_ACCOUNT_ID" \
+    node -e '
+      const input = JSON.parse(process.env.FSK_RULES_JSON ?? "");
+      for (const rule of input.SecurityGroupRules ?? []) {
+        const semantic = rule.GroupId === process.env.FSK_EXPECTED_DB_SG &&
+          rule.GroupOwnerId === process.env.FSK_EXPECTED_ACCOUNT &&
+          rule.IsEgress === false && rule.IpProtocol === "tcp" &&
+          rule.FromPort === 5432 && rule.ToPort === 5432 &&
+          rule.ReferencedGroupInfo?.GroupId === process.env.FSK_EXPECTED_OPS_SG &&
+          rule.ReferencedGroupInfo?.UserId === process.env.FSK_EXPECTED_ACCOUNT;
+        process.stdout.write(`${rule.SecurityGroupRuleId ?? ""}\t${semantic ? 1 : 0}\t${encodeURIComponent(JSON.stringify(rule.Tags ?? []))}\n`);
+      }
+    '
+  )" || return 1
+  while IFS=$'\t' read -r id semantic encoded; do
+    [ -n "$id" ] || continue
+    tags_json="$(FSK_ENCODED_TAGS="$encoded" node -e '
+      process.stdout.write(decodeURIComponent(process.env.FSK_ENCODED_TAGS ?? ""));
+    ')" || return 1
+    if [ "$semantic" -eq 1 ] && fsk_assert_exact_ownership_tags "$tags_json"; then
+      printf '%s\n' "$id"
+    fi
+  done <<< "$candidates"
+}
+
+fsk_discover_owned_db_ingress_ids() {
+  fsk_run_current_deadline aws ec2 describe-security-group-rules \
+    --region ap-northeast-1 \
+    --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
+      'Name=tag:Project,Values=FSK' \
+      'Name=tag:Environment,Values=staging' \
+      'Name=tag:ManagedBy,Values=AmplifyGen2' \
+      'Name=tag:CostCenter,Values=FSK' \
+      "Name=tag:AccountId,Values=${FSK_AWS_ACCOUNT_ID}" \
+      "Name=tag:VpcId,Values=${FSK_VPC_ID}" \
+      "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
+      "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
+    --output json |
+    fsk_select_exact_owned_db_ingress_ids
 }
 ```
 
@@ -322,32 +559,24 @@ fsk_create_temporary_access() {
   : "${FSK_TEMP_AZ:?approved availability zone required}"
   FSK_OPS_SG_ID="$(fsk_create_or_recover_operations_sg)"
 
-  if ! FSK_DB_INGRESS_RULE_ID="$(fsk_run_before_migration_deadline \
+  FSK_DB_INGRESS_RULE_ID="$(fsk_create_or_recover_owned_id sgr- \
+    fsk_discover_owned_db_ingress_ids \
     aws ec2 authorize-security-group-ingress --region ap-northeast-1 \
       --group-id "$FSK_DB_SECURITY_GROUP_ID" \
       --protocol tcp --port 5432 --source-group "$FSK_OPS_SG_ID" \
       --tag-specifications "[{\"ResourceType\":\"security-group-rule\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
-      --query 'SecurityGroupRules[0].SecurityGroupRuleId' --output text)"; then
-    FSK_DB_INGRESS_RULE_ID="$(aws ec2 describe-security-group-rules \
-      --region ap-northeast-1 \
-      --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
-        "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
-        "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
-      --query "SecurityGroupRules[?IsEgress==\`false\` && IpProtocol=='tcp' && FromPort==\`5432\` && ToPort==\`5432\` && ReferencedGroupInfo.GroupId=='${FSK_OPS_SG_ID}'].SecurityGroupRuleId" \
-      --output text | tr '\t' '\n')"
-  fi
-  FSK_DB_INGRESS_RULE_ID="$(
-    fsk_require_single_owned_id "$FSK_DB_INGRESS_RULE_ID" sgr-
-  )"
+      --query 'SecurityGroupRules[0].SecurityGroupRuleId' --output text)"
 
   FSK_TEMP_IGW_ID="$(fsk_create_or_recover_owned_id igw- \
     fsk_discover_owned_igw_ids aws ec2 create-internet-gateway \
     --region ap-northeast-1 \
     --tag-specifications "[{\"ResourceType\":\"internet-gateway\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query 'InternetGateway.InternetGatewayId' --output text)"
-  if ! aws ec2 attach-internet-gateway --region ap-northeast-1 \
+  if ! fsk_run_before_migration_deadline aws ec2 attach-internet-gateway \
+    --region ap-northeast-1 \
     --internet-gateway-id "$FSK_TEMP_IGW_ID" --vpc-id "$FSK_VPC_ID"; then
-    test "$(aws ec2 describe-internet-gateways --region ap-northeast-1 \
+    test "$(fsk_run_before_migration_deadline \
+      aws ec2 describe-internet-gateways --region ap-northeast-1 \
       --internet-gateway-ids "$FSK_TEMP_IGW_ID" \
       --query 'InternetGateways[0].Attachments[0].VpcId' --output text)" = \
       "$FSK_VPC_ID"
@@ -364,10 +593,12 @@ fsk_create_temporary_access() {
     --region ap-northeast-1 --vpc-id "$FSK_VPC_ID" \
     --tag-specifications "[{\"ResourceType\":\"route-table\",\"Tags\":${FSK_TEMP_EC2_TAGS}}]" \
     --query 'RouteTable.RouteTableId' --output text)"
-  aws ec2 associate-route-table --region ap-northeast-1 \
+  fsk_run_before_migration_deadline aws ec2 associate-route-table \
+    --region ap-northeast-1 \
     --route-table-id "$FSK_TEMP_ROUTE_TABLE_ID" \
     --subnet-id "$FSK_TEMP_PUBLIC_SUBNET_ID" >/dev/null
-  aws ec2 create-route --region ap-northeast-1 \
+  fsk_run_before_migration_deadline aws ec2 create-route \
+    --region ap-northeast-1 \
     --route-table-id "$FSK_TEMP_ROUTE_TABLE_ID" \
     --destination-cidr-block 0.0.0.0/0 \
     --gateway-id "$FSK_TEMP_IGW_ID" >/dev/null
@@ -386,10 +617,12 @@ fsk_create_temporary_access() {
     --query 'NatGateway.NatGatewayId' --output text)"
   fsk_run_before_migration_deadline aws ec2 wait nat-gateway-available \
     --region ap-northeast-1 --nat-gateway-ids "$FSK_TEMP_NAT_ID"
-  aws ec2 create-route --region ap-northeast-1 \
+  fsk_run_before_migration_deadline aws ec2 create-route \
+    --region ap-northeast-1 \
     --route-table-id "$FSK_APP_ROUTE_TABLE_A_ID" \
     --destination-cidr-block 0.0.0.0/0 --nat-gateway-id "$FSK_TEMP_NAT_ID"
-  aws ec2 create-route --region ap-northeast-1 \
+  fsk_run_before_migration_deadline aws ec2 create-route \
+    --region ap-northeast-1 \
     --route-table-id "$FSK_APP_ROUTE_TABLE_B_ID" \
     --destination-cidr-block 0.0.0.0/0 --nat-gateway-id "$FSK_TEMP_NAT_ID"
 }
@@ -507,7 +740,8 @@ control 从安装 trap 起就是唯一 cleanup 执行者。看到 `READY_FOR_CLE
 fsk_control_watchdog() {
   local failures=0 status
   while [ "$(date +%s)" -lt "$FSK_MIGRATION_OPERATION_DEADLINE_EPOCH" ]; do
-    if status="$(aws ssm get-parameter --region ap-northeast-1 \
+    if status="$(fsk_run_before_migration_deadline \
+      aws ssm get-parameter --region ap-northeast-1 \
       --name "$FSK_WORKER_STATUS_PARAMETER" \
       --query 'Parameter.Value' --output text)"; then
       failures=0
@@ -547,91 +781,279 @@ fsk_discover_owned_residual_count() {
   total=$((total + value))
   value="$(fsk_discover_owned_nat_ids | awk 'NF { count += 1 } END { print count + 0 }')" || return 1
   total=$((total + value))
-  value="$(aws ec2 describe-security-group-rules --region ap-northeast-1 \
-    --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
-      "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
-      "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
-    --query 'length(SecurityGroupRules)' --output text)" || return 1
+  value="$(fsk_discover_owned_db_ingress_ids | awk 'NF { count += 1 } END { print count + 0 }')" || return 1
   total=$((total + value))
-  value="$(aws ec2 describe-route-tables --region ap-northeast-1 \
-    --route-table-ids "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID" \
-    --query "length(RouteTables[].Routes[?DestinationCidrBlock=='0.0.0.0/0'])" \
-    --output text)" || return 1
+  value="$(fsk_count_owned_application_route_residuals)" || return 1
   total=$((total + value))
   printf '%s\n' "$total"
 }
 
-fsk_delete_owned_temporary_resources_once() {
-  local id association
-  while read -r id; do
-    [ -n "$id" ] || continue
-    aws ec2 revoke-security-group-ingress --region ap-northeast-1 \
-      --group-id "$FSK_DB_SECURITY_GROUP_ID" \
-      --security-group-rule-ids "$id" >/dev/null || true
-  done < <(aws ec2 describe-security-group-rules --region ap-northeast-1 \
-    --filters "Name=group-id,Values=${FSK_DB_SECURITY_GROUP_ID}" \
-      "Name=tag:OperationToken,Values=${FSK_MIGRATION_OPERATION_TOKEN}" \
-      "Name=tag:TaskId,Values=${FSK_MIGRATION_TASK_ID}" \
-    --query 'SecurityGroupRules[].SecurityGroupRuleId' --output text | tr '\t' '\n')
-  for id in "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID"; do
-    aws ec2 delete-route --region ap-northeast-1 --route-table-id "$id" \
-      --destination-cidr-block 0.0.0.0/0 >/dev/null || true
-  done
-  while read -r id; do
-    [ -n "$id" ] || continue
-    aws ec2 delete-nat-gateway --region ap-northeast-1 \
-      --nat-gateway-id "$id" >/dev/null || true
-    aws ec2 wait nat-gateway-deleted --region ap-northeast-1 \
-      --nat-gateway-ids "$id" >/dev/null || true
-  done < <(fsk_discover_owned_nat_ids)
-  while read -r id; do
-    [ -n "$id" ] || continue
-    aws ec2 release-address --region ap-northeast-1 \
-      --allocation-id "$id" >/dev/null || true
-  done < <(fsk_discover_owned_eip_ids)
-  while read -r id; do
-    [ -n "$id" ] || continue
-    association="$(aws ec2 describe-route-tables --region ap-northeast-1 \
-      --route-table-ids "$id" \
-      --query 'RouteTables[0].Associations[?Main==`false`].RouteTableAssociationId' \
-      --output text)" || return 1
-    [ -z "$association" ] || aws ec2 disassociate-route-table \
-      --region ap-northeast-1 --association-id "$association" >/dev/null || true
-    aws ec2 delete-route-table --region ap-northeast-1 \
-      --route-table-id "$id" >/dev/null || true
-  done < <(fsk_discover_owned_route_table_ids)
-  while read -r id; do
-    [ -n "$id" ] || continue
-    aws ec2 delete-subnet --region ap-northeast-1 --subnet-id "$id" >/dev/null || true
-  done < <(fsk_discover_owned_public_subnet_ids)
-  while read -r id; do
-    [ -n "$id" ] || continue
-    aws ec2 detach-internet-gateway --region ap-northeast-1 \
-      --internet-gateway-id "$id" --vpc-id "$FSK_VPC_ID" >/dev/null || true
-    aws ec2 delete-internet-gateway --region ap-northeast-1 \
-      --internet-gateway-id "$id" >/dev/null || true
-  done < <(fsk_discover_owned_igw_ids)
-  while read -r id; do
-    [ -n "$id" ] || continue
-    aws ec2 delete-security-group --region ap-northeast-1 \
-      --group-id "$id" >/dev/null || true
-  done < <(fsk_discover_owned_operations_sg_ids)
+fsk_describe_default_route_target() {
+  local route_table_id="${1:?route table ID required}"
+  local response
+  response="$(fsk_run_current_deadline aws ec2 describe-route-tables \
+    --region ap-northeast-1 --route-table-ids "$route_table_id" \
+    --output json)" || return 1
+  FSK_ROUTE_TABLE_JSON="$response" \
+  FSK_EXPECTED_ROUTE_TABLE_ID="$route_table_id" \
+  FSK_EXPECTED_VPC_ID="$FSK_VPC_ID" \
+  node -e '
+    const input = JSON.parse(process.env.FSK_ROUTE_TABLE_JSON ?? "");
+    if (!Array.isArray(input.RouteTables) || input.RouteTables.length !== 1) process.exit(2);
+    const table = input.RouteTables[0];
+    if (table.RouteTableId !== process.env.FSK_EXPECTED_ROUTE_TABLE_ID ||
+        table.VpcId !== process.env.FSK_EXPECTED_VPC_ID) process.exit(2);
+    const routes = (table.Routes ?? []).filter((route) =>
+      route.DestinationCidrBlock === "0.0.0.0/0");
+    if (routes.length === 0) {
+      process.stdout.write("NONE");
+      process.exit(0);
+    }
+    if (routes.length !== 1) process.exit(2);
+    const route = routes[0];
+    const targets = ["NatGatewayId", "GatewayId", "TransitGatewayId",
+      "NetworkInterfaceId", "VpcPeeringConnectionId", "InstanceId"]
+      .filter((key) => typeof route[key] === "string" && route[key]);
+    if (targets.length !== 1) process.exit(2);
+    process.stdout.write(`${targets[0]}:${route[targets[0]]}`);
+  '
 }
 
-fsk_delete_owned_state_parameters() {
-  local name before immediate
-  for name in \
-    "$FSK_WORKER_STATUS_PARAMETER" \
-    "$FSK_CONTROL_STATUS_PARAMETER" \
-    "$FSK_STATE_PARAMETER"; do
-    before="$(fsk_snapshot_state_parameter "$name")" || return 1
-    immediate="$(fsk_snapshot_state_parameter "$name")" || return 1
-    test "$before" = "$immediate" || return 1
-    aws ssm delete-parameter --region ap-northeast-1 --name "$name" || return 1
-    test "$(aws ssm describe-parameters --region ap-northeast-1 \
-      --parameter-filters "Key=Name,Option=Equals,Values=${name}" \
-      --query 'length(Parameters)' --output text)" -eq 0 || return 1
+fsk_delete_owned_application_routes() {
+  local nat_ids owned_nat_id='' route_table_id target
+  nat_ids="$(fsk_discover_owned_nat_ids)" || return 1
+  if [ -n "$nat_ids" ]; then
+    owned_nat_id="$(fsk_require_single_owned_id "$nat_ids" nat-)" || return 1
+  fi
+  for route_table_id in \
+    "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID"; do
+    target="$(fsk_describe_default_route_target "$route_table_id")" || return 1
+    case "$target" in
+      NONE) ;;
+      "NatGatewayId:${owned_nat_id}")
+        [ -n "$owned_nat_id" ] || return 1
+        fsk_run_before_cleanup_deadline aws ec2 delete-route \
+          --region ap-northeast-1 --route-table-id "$route_table_id" \
+          --destination-cidr-block 0.0.0.0/0 >/dev/null || return 1
+        ;;
+      *)
+        echo "FOREIGN_DEFAULT_ROUTE_BLOCKED:${route_table_id}:${target}" >&2
+        return 1
+        ;;
+    esac
   done
+}
+
+fsk_count_owned_application_route_residuals() {
+  local nat_ids owned_nat_id='' route_table_id target count=0
+  nat_ids="$(fsk_discover_owned_nat_ids)" || return 1
+  if [ -n "$nat_ids" ]; then
+    owned_nat_id="$(fsk_require_single_owned_id "$nat_ids" nat-)" || return 1
+  fi
+  for route_table_id in \
+    "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID"; do
+    target="$(fsk_describe_default_route_target "$route_table_id")" || return 1
+    case "$target" in
+      NONE) ;;
+      "NatGatewayId:${owned_nat_id}")
+        [ -n "$owned_nat_id" ] || return 1
+        count=$((count + 1))
+        ;;
+      *)
+        echo "FOREIGN_DEFAULT_ROUTE_BLOCKED:${route_table_id}:${target}" >&2
+        return 1
+        ;;
+    esac
+  done
+  printf '%s\n' "$count"
+}
+
+fsk_delete_owned_temporary_resources_once() {
+  local id association ids attachment_vpc
+  FSK_MIGRATION_PHASE=cleanup
+  fsk_delete_owned_application_routes || return 1
+
+  ids="$(fsk_discover_owned_db_ingress_ids)" || return 1
+  while read -r id; do
+    [ -n "$id" ] || continue
+    fsk_run_before_cleanup_deadline aws ec2 revoke-security-group-ingress \
+      --region ap-northeast-1 --group-id "$FSK_DB_SECURITY_GROUP_ID" \
+      --security-group-rule-ids "$id" >/dev/null || return 1
+  done <<< "$ids"
+
+  ids="$(fsk_discover_owned_nat_ids)" || return 1
+  while read -r id; do
+    [ -n "$id" ] || continue
+    fsk_run_before_cleanup_deadline aws ec2 delete-nat-gateway \
+      --region ap-northeast-1 --nat-gateway-id "$id" >/dev/null || return 1
+  done <<< "$ids"
+
+  ids="$(fsk_discover_owned_eip_ids)" || return 1
+  while read -r id; do
+    [ -n "$id" ] || continue
+    fsk_run_before_cleanup_deadline aws ec2 release-address \
+      --region ap-northeast-1 --allocation-id "$id" >/dev/null || return 1
+  done <<< "$ids"
+
+  ids="$(fsk_discover_owned_route_table_ids)" || return 1
+  while read -r id; do
+    [ -n "$id" ] || continue
+    association="$(fsk_run_before_cleanup_deadline \
+      aws ec2 describe-route-tables --region ap-northeast-1 \
+        --route-table-ids "$id" \
+        --query 'RouteTables[0].Associations[?Main==`false`].RouteTableAssociationId | [0]' \
+        --output text)" || return 1
+    case "$association" in
+      ''|None) ;;
+      *) fsk_run_before_cleanup_deadline aws ec2 disassociate-route-table \
+        --region ap-northeast-1 --association-id "$association" >/dev/null || return 1 ;;
+    esac
+    fsk_run_before_cleanup_deadline aws ec2 delete-route-table \
+      --region ap-northeast-1 --route-table-id "$id" >/dev/null || return 1
+  done <<< "$ids"
+
+  ids="$(fsk_discover_owned_public_subnet_ids)" || return 1
+  while read -r id; do
+    [ -n "$id" ] || continue
+    fsk_run_before_cleanup_deadline aws ec2 delete-subnet \
+      --region ap-northeast-1 --subnet-id "$id" >/dev/null || return 1
+  done <<< "$ids"
+
+  ids="$(fsk_discover_owned_igw_ids)" || return 1
+  while read -r id; do
+    [ -n "$id" ] || continue
+    attachment_vpc="$(fsk_run_before_cleanup_deadline \
+      aws ec2 describe-internet-gateways --region ap-northeast-1 \
+        --internet-gateway-ids "$id" \
+        --query 'InternetGateways[0].Attachments[0].VpcId' --output text)" || return 1
+    if [ "$attachment_vpc" = "$FSK_VPC_ID" ]; then
+      fsk_run_before_cleanup_deadline aws ec2 detach-internet-gateway \
+        --region ap-northeast-1 --internet-gateway-id "$id" \
+        --vpc-id "$FSK_VPC_ID" >/dev/null || return 1
+    elif [ "$attachment_vpc" != None ] && [ -n "$attachment_vpc" ]; then
+      echo 'IGW_FOREIGN_ATTACHMENT_BLOCKED' >&2
+      return 1
+    fi
+    fsk_run_before_cleanup_deadline aws ec2 delete-internet-gateway \
+      --region ap-northeast-1 --internet-gateway-id "$id" >/dev/null || return 1
+  done <<< "$ids"
+
+  ids="$(fsk_discover_owned_operations_sg_ids)" || return 1
+  while read -r id; do
+    [ -n "$id" ] || continue
+    fsk_run_before_cleanup_deadline aws ec2 delete-security-group \
+      --region ap-northeast-1 --group-id "$id" >/dev/null || return 1
+  done <<< "$ids"
+}
+
+fsk_delete_state_parameter_if_owned() {
+  local name="${1:?parameter name required}"
+  local before immediate residual
+  FSK_MIGRATION_PHASE=cleanup
+  if ! before="$(fsk_snapshot_state_parameter "$name")"; then
+    residual="$(fsk_run_before_cleanup_deadline aws ssm describe-parameters \
+      --region ap-northeast-1 \
+      --parameter-filters "Key=Name,Option=Equals,Values=${name}" \
+      --query 'length(Parameters)' --output text)" || return 1
+    [ "$residual" -eq 0 ] && return 0
+    return 1
+  fi
+  immediate="$(fsk_snapshot_state_parameter "$name")" || return 1
+  test "$before" = "$immediate" || return 1
+  if ! fsk_run_before_cleanup_deadline aws ssm delete-parameter \
+    --region ap-northeast-1 --name "$name" >/dev/null; then
+    residual="$(fsk_run_before_cleanup_deadline aws ssm describe-parameters \
+      --region ap-northeast-1 \
+      --parameter-filters "Key=Name,Option=Equals,Values=${name}" \
+      --query 'length(Parameters)' --output text)" || return 1
+    [ "$residual" -eq 0 ] || return 1
+    return 0
+  fi
+  residual="$(fsk_run_before_cleanup_deadline aws ssm describe-parameters \
+    --region ap-northeast-1 \
+    --parameter-filters "Key=Name,Option=Equals,Values=${name}" \
+    --query 'length(Parameters)' --output text)" || return 1
+  [ "$residual" -eq 0 ]
+}
+
+fsk_delete_nonterminal_state_parameters() {
+  fsk_delete_state_parameter_if_owned "$FSK_WORKER_STATUS_PARAMETER" || return 1
+  fsk_delete_state_parameter_if_owned "$FSK_STATE_PARAMETER"
+}
+
+fsk_count_state_parameter_path_residuals() {
+  fsk_run_before_cleanup_deadline aws ssm describe-parameters \
+    --region ap-northeast-1 \
+    --parameter-filters "Key=Name,Option=BeginsWith,Values=${FSK_STATE_PREFIX}/" \
+    --query 'length(Parameters)' --output text
+}
+
+fsk_emit_terminal_cleanup_evidence() {
+  local status="${1:?terminal status required}"
+  local control_snapshot="${2:?control snapshot required}"
+  FSK_TERMINAL_STATUS="$status" \
+  FSK_CONTROL_SNAPSHOT="$control_snapshot" \
+  FSK_OPERATION_TOKEN="$FSK_MIGRATION_OPERATION_TOKEN" \
+  FSK_TASK_ID="$FSK_MIGRATION_TASK_ID" \
+  node -e '
+    process.stdout.write(JSON.stringify({
+      event: "FSK_MIGRATION_TERMINAL_CLEANUP_EVIDENCE",
+      status: process.env.FSK_TERMINAL_STATUS,
+      taskId: process.env.FSK_TASK_ID,
+      operationToken: process.env.FSK_OPERATION_TOKEN,
+      controlSnapshot: JSON.parse(process.env.FSK_CONTROL_SNAPSHOT ?? ""),
+    }) + "\n");
+  '
+}
+
+fsk_finalize_cleanup_state() {
+  local original_status="${1:-1}"
+  local residual_count control_snapshot terminal_status
+  FSK_MIGRATION_PHASE=cleanup
+  if ! fsk_publish_control_status \
+    "CLEANUP_RESOURCES_STABLE_ZERO:EXIT_${original_status}"; then
+    return 1
+  fi
+  if ! fsk_delete_nonterminal_state_parameters; then
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:STATE_DELETE:EXIT_${original_status}" || true
+    return 1
+  fi
+  if ! fsk_assert_no_task_id_collision; then
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:TASK_ID_FINAL_QUERY:EXIT_${original_status}" || true
+    return 1
+  fi
+  residual_count="$(fsk_discover_owned_residual_count)" || {
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:RESOURCE_FINAL_QUERY:EXIT_${original_status}" || true
+    return 1
+  }
+  [ "$residual_count" -eq 0 ] || {
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:RESOURCE_FINAL_RESIDUAL:EXIT_${original_status}" || true
+    return 1
+  }
+  residual_count="$(fsk_count_state_parameter_path_residuals)" || return 1
+  [ "$residual_count" -eq 1 ] || {
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:STATE_FINAL_RESIDUAL:EXIT_${original_status}" || true
+    return 1
+  }
+  terminal_status="CLEANUP_PASS:EXIT_${original_status}"
+  fsk_publish_control_status "$terminal_status" || return 1
+  control_snapshot="$(
+    fsk_snapshot_state_parameter "$FSK_CONTROL_STATUS_PARAMETER"
+  )" || return 1
+  fsk_emit_terminal_cleanup_evidence "$terminal_status" "$control_snapshot" || return 1
+  if ! fsk_delete_state_parameter_if_owned "$FSK_CONTROL_STATUS_PARAMETER"; then
+    fsk_publish_control_status \
+      "CLEANUP_BLOCKED:CONTROL_DELETE:EXIT_${original_status}" || true
+    return 1
+  fi
+  residual_count="$(fsk_count_state_parameter_path_residuals)" || return 1
+  [ "$residual_count" -eq 0 ] || return 1
+  printf 'FINAL_PARAMETER_PATH_RESIDUAL_COUNT=0\n'
 }
 ```
 
@@ -639,14 +1061,23 @@ fsk_delete_owned_state_parameters() {
 fsk_control_cleanup_owned_resources() {
   local stable_zero=0
   local stable_zero_started=0
-  local residual_count
+  local residual_count delete_succeeded
+  FSK_MIGRATION_PHASE=cleanup
   : "${FSK_STABLE_ZERO_REQUIRED:=3}"
   : "${FSK_STABLE_ZERO_MIN_SECONDS:=180}"
   : "${FSK_CLEANUP_POLL_SECONDS:=15}"
   while [ "$(date +%s)" -lt "$FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH" ]; do
-    fsk_delete_owned_temporary_resources_once || true
-    residual_count="$(fsk_discover_owned_residual_count)" || return 1
-    if [ "$residual_count" -eq 0 ]; then
+    delete_succeeded=0
+    if fsk_delete_owned_temporary_resources_once; then
+      delete_succeeded=1
+    fi
+    if ! residual_count="$(fsk_discover_owned_residual_count)"; then
+      stable_zero=0
+      stable_zero_started=0
+      fsk_sleep_before_cleanup_deadline "$FSK_CLEANUP_POLL_SECONDS" || return 1
+      continue
+    fi
+    if [ "$delete_succeeded" -eq 1 ] && [ "$residual_count" -eq 0 ]; then
       if [ "$stable_zero" -eq 0 ]; then
         stable_zero_started="$(date +%s)"
       fi
@@ -663,7 +1094,7 @@ fsk_control_cleanup_owned_resources() {
       stable_zero=0
       stable_zero_started=0
     fi
-    sleep "$FSK_CLEANUP_POLL_SECONDS"
+    fsk_sleep_before_cleanup_deadline "$FSK_CLEANUP_POLL_SECONDS" || return 1
   done
   echo 'CLEANUP_DEADLINE_BLOCKED_OWNER_REQUIRED' >&2
   return 1
@@ -672,19 +1103,19 @@ fsk_control_cleanup_owned_resources() {
 fsk_control_exit() {
   local original_status="${1:-1}"
   local cleanup_status=0
+  local blocked_status
   trap - EXIT HUP INT TERM
   set +e
+  FSK_MIGRATION_PHASE=cleanup
   fsk_control_cleanup_owned_resources
   cleanup_status=$?
   if [ "$cleanup_status" -eq 0 ]; then
-    fsk_publish_control_status "CLEANUP_PASS:EXIT_${original_status}" || \
-      cleanup_status=1
-  fi
-  if [ "$cleanup_status" -eq 0 ]; then
-    fsk_delete_owned_state_parameters || cleanup_status=1
+    fsk_finalize_cleanup_state "$original_status" || cleanup_status=1
   fi
   if [ "$cleanup_status" -ne 0 ]; then
-    fsk_publish_control_status "CLEANUP_BLOCKED:EXIT_${original_status}" || true
+    blocked_status="CLEANUP_BLOCKED:EXIT_${original_status}"
+    echo "$blocked_status" >&2
+    fsk_publish_control_status "$blocked_status" || true
   fi
   if [ "$original_status" -ne 0 ]; then exit "$original_status"; fi
   exit "$cleanup_status"
@@ -693,7 +1124,8 @@ fsk_control_exit() {
 fsk_assert_control_guard() {
   test "$FSK_MIGRATION_SHELL_ROLE" = control
   fsk_assert_migration_deadline
-  test "$(aws ec2 describe-route-tables --region ap-northeast-1 \
+  test "$(fsk_run_before_migration_deadline \
+    aws ec2 describe-route-tables --region ap-northeast-1 \
     --route-table-ids "$FSK_APP_ROUTE_TABLE_A_ID" "$FSK_APP_ROUTE_TABLE_B_ID" \
     --query "length(RouteTables[].Routes[?DestinationCidrBlock=='0.0.0.0/0'])" \
     --output text)" -eq 0
@@ -704,6 +1136,7 @@ fsk_control_run_migration() {
   trap 'exit 129' HUP
   trap 'exit 130' INT TERM
   fsk_assert_control_guard
+  fsk_assert_no_task_id_collision
   test "$(fsk_discover_owned_residual_count)" -eq 0
   fsk_create_temporary_state_parameters
   fsk_create_temporary_access
@@ -720,7 +1153,8 @@ fsk_control_run_migration() {
 3. 创建 exact VPC worker environment；worker detached checkout exact foundation commit，安装 trap，再安装依赖。
 4. worker 第一次执行 migration，必须得到 `MIGRATIONS_APPLIED count=1`；第二次必须得到 `count=0`；verify 必须得到 `SCHEMA_VERIFIED`。
 5. worker 清除 `DATABASE_URL`、发布 READY，操作者删除 exact worker environment；失败、timeout 或 tab 丢失由 status/deadline 触发 control cleanup。
-6. control 反复 discovery → delete → discovery；只删除完整 ownership tuple。至少连续三次为 0，且首尾不少于 180 秒，才删除临时参数并做最终零残留查询。
+6. control 反复 discovery → delete → discovery；每个 AWS 调用都受单命令上限和 cleanup 剩余时间共同约束。应用 route table 必须属于 exact VPC，且默认路由当前 target 必须等于唯一 full-tuple-owned NAT 才允许删除；缺失或 foreign target 保持不动并进入 `CLEANUP_BLOCKED`。
+7. 至少连续三次资源残留为 0，且首尾不少于 180 秒后，先发布非终态 `CLEANUP_RESOURCES_STABLE_ZERO`，再删除 worker/state 参数并复查全部临时资源与参数路径；control status 保留到最后，用于发布 `CLEANUP_PASS` 或任何局部失败的 `CLEANUP_BLOCKED`。输出脱离 SSM 的 terminal evidence 后才删除 control status，并确认最终参数路径残留为 0。
 
 | 证据字段 | 值 |
 | --- | --- |
