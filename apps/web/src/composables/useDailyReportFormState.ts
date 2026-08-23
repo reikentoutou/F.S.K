@@ -12,6 +12,8 @@ export type DailyReportFormPayload = {
   currentImosBalanceYen: number;
   newageYen: number;
   cashTotalYen: number;
+  staffMealCashYen: number;
+  staffMealAlipayYen: number;
   expenseYen: number;
   expenseReason: string;
 };
@@ -24,6 +26,8 @@ export type DailyReportExistingData = {
   currentImosBalanceYen: number;
   newageYen: number;
   cashTotalYen: number;
+  staffMealCashYen?: number;
+  staffMealAlipayYen?: number;
   expenseYen: number;
   expenseReason: string | null;
 };
@@ -40,6 +44,8 @@ export function useDailyReportFormState() {
     currentImosBalanceYen: 0,
     newageYen: 0,
     cashInDrawerYen: 0,
+    staffMealCashYen: 0,
+    staffMealAlipayYen: 0,
     expenseYen: 0,
     expenseReason: '',
     expenseReceiptStored: false,
@@ -52,6 +58,8 @@ export function useDailyReportFormState() {
     form.currentImosBalanceYen = 0;
     form.newageYen = 0;
     form.cashInDrawerYen = 0;
+    form.staffMealCashYen = 0;
+    form.staffMealAlipayYen = 0;
     form.expenseYen = 0;
     form.expenseReason = '';
     form.expenseReceiptStored = false;
@@ -68,6 +76,8 @@ export function useDailyReportFormState() {
     form.currentImosBalanceYen = data.currentImosBalanceYen;
     form.newageYen = data.newageYen;
     form.cashInDrawerYen = data.cashTotalYen;
+    form.staffMealCashYen = data.staffMealCashYen ?? 0;
+    form.staffMealAlipayYen = data.staffMealAlipayYen ?? 0;
     form.expenseYen = data.expenseYen;
     form.expenseReason = data.expenseReason || '';
     form.expenseReceiptStored = data.expenseYen <= 0;
@@ -90,6 +100,8 @@ export function useDailyReportFormState() {
       currentImosBalanceYen: form.currentImosBalanceYen,
       newageYen: form.newageYen,
       cashTotalYen: form.cashInDrawerYen,
+      staffMealCashYen: form.staffMealCashYen,
+      staffMealAlipayYen: form.staffMealAlipayYen,
       expenseYen: form.expenseYen,
       expenseReason: form.expenseReason,
     };

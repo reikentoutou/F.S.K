@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { QuestionFilled } from '@element-plus/icons-vue';
+import { MAX_DAILY_REPORT_AMOUNT_YEN } from '@/utils/daily-report-form-validate';
 import DailyReportSection from './DailyReportSection.vue';
 import type { DailyReportFormFieldsModel } from './daily-report-form.types';
 
@@ -11,6 +12,7 @@ defineProps<{
     totalSalesYen: number;
     cashDepositYen: number;
     deviationYen: number;
+    staffMealTotalYen: number;
   };
 }>();
 
@@ -88,12 +90,50 @@ function yen(n: number): string {
       </div>
     </el-form-item>
 
+    <el-form-item label="网管餐费" class="item-plain">
+      <div class="staff-meal-wrap">
+        <div class="staff-meal-grid">
+          <div class="money-cell">
+            <span class="sub-label">現金</span>
+            <el-input-number
+              v-model="form.staffMealCashYen"
+              :min="0"
+              :max="MAX_DAILY_REPORT_AMOUNT_YEN"
+              :precision="0"
+              :step="1"
+              controls-position="right"
+            />
+          </div>
+          <div class="money-cell">
+            <span class="sub-label">支付宝</span>
+            <el-input-number
+              v-model="form.staffMealAlipayYen"
+              :min="0"
+              :max="MAX_DAILY_REPORT_AMOUNT_YEN"
+              :precision="0"
+              :step="1"
+              controls-position="right"
+            />
+          </div>
+          <div class="result-cell">
+            <span class="sub-label">网管餐费合計</span>
+            <strong>{{ yen(preview.staffMealTotalYen) }}</strong>
+          </div>
+        </div>
+        <p class="field-guide staff-meal-guide">
+          現金は現金入金金額に含まれますが、実際売上から除外します。支付宝は単独保存し、実際売上には含めません。
+        </p>
+      </div>
+    </el-form-item>
+
     <el-form-item label="総計" class="item-plain">
       <div class="totals-grid">
         <div class="result-cell">
           <span class="sub-label">実際売上</span>
           <strong>{{ yen(preview.totalSalesYen) }}</strong>
-          <p class="field-guide result-guide">Imos売上とNewage売上の合計です。</p>
+          <p class="field-guide result-guide">
+            Newage売上 + 現金入金金額 − 网管餐費（現金）です。
+          </p>
         </div>
         <div class="result-cell">
           <span class="sub-label">現金入金金額</span>
@@ -221,6 +261,22 @@ function yen(n: number): string {
   margin-top: 8px;
 }
 
+.staff-meal-wrap {
+  width: 100%;
+}
+
+.staff-meal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 200px));
+  gap: 14px 20px;
+  width: 100%;
+}
+
+.staff-meal-guide {
+  max-width: 72ch;
+  margin-top: 8px;
+}
+
 .receipt-box {
   min-height: 40px;
   padding: 8px 10px;
@@ -251,6 +307,10 @@ function yen(n: number): string {
 }
 
 @media (max-width: 560px) {
+  .staff-meal-grid {
+    grid-template-columns: 1fr;
+  }
+
   .expense-row {
     grid-template-columns: 1fr;
   }

@@ -22,7 +22,7 @@ import { Role } from '@prisma/client';
 import { DailyReportsService } from './daily-reports.service';
 import { Roles } from '../common/decorators/roles.decorator';
 
-class CreateDailyReportDto {
+export class CreateDailyReportDto {
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   reportDate!: string;
 
@@ -66,13 +66,23 @@ class CreateDailyReportDto {
   @IsString()
   expenseReason?: string;
 
+  @IsInt()
+  @Min(0)
+  @Max(2_000_000_000)
+  staffMealCashYen!: number;
+
+  @IsInt()
+  @Min(0)
+  @Max(2_000_000_000)
+  staffMealAlipayYen!: number;
+
   /** 管理员 POST 补录时必填：归属网管的用户 id */
   @IsOptional()
   @IsString()
   createdByUserId?: string;
 }
 
-class UpdateDailyReportDto {
+export class UpdateDailyReportDto {
   @IsOptional()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   reportDate?: string;
@@ -125,6 +135,18 @@ class UpdateDailyReportDto {
   @IsOptional()
   @IsString()
   expenseReason?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(2_000_000_000)
+  staffMealCashYen?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(2_000_000_000)
+  staffMealAlipayYen?: number;
 }
 
 @Controller('daily-reports')

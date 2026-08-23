@@ -17,6 +17,7 @@ defineProps<{
       totalSalesYen: number;
       cashDepositYen: number;
       deviationYen: number;
+      staffMealTotalYen: number;
     };
     variant: 'wm' | 'admin';
     showWmTimeHint?: boolean;

@@ -24,6 +24,7 @@ export class DailyReportsService {
       cashTotalYen: number;
       expenseYen: number;
       expenseReason: string | null | undefined;
+      staffMealCashYen: number;
     },
     registerFloatYen: number,
   ) {
@@ -38,6 +39,7 @@ export class DailyReportsService {
       cashTotalYen: data.cashTotalYen,
       expenseYen: data.expenseYen,
       registerFloatYen,
+      staffMealCashYen: data.staffMealCashYen,
     });
   }
 
@@ -55,6 +57,8 @@ export class DailyReportsService {
       cashTotalYen: number;
       expenseYen: number;
       expenseReason?: string;
+      staffMealCashYen: number;
+      staffMealAlipayYen: number;
       createdByUserId?: string;
     },
   ) {
@@ -93,6 +97,7 @@ export class DailyReportsService {
         cashTotalYen: dto.cashTotalYen,
         expenseYen: dto.expenseYen,
         expenseReason: dto.expenseReason,
+        staffMealCashYen: dto.staffMealCashYen,
       },
       registerFloatYen,
     );
@@ -128,6 +133,8 @@ export class DailyReportsService {
         cashTotalYen: dto.cashTotalYen,
         expenseYen: dto.expenseYen,
         expenseReason: dto.expenseReason?.trim() || null,
+        staffMealCashYen: dto.staffMealCashYen,
+        staffMealAlipayYen: dto.staffMealAlipayYen,
         ...computed,
         status: 'approved',
         createdByUserId,
@@ -150,6 +157,8 @@ export class DailyReportsService {
       cashTotalYen: number;
       expenseYen: number;
       expenseReason?: string;
+      staffMealCashYen: number;
+      staffMealAlipayYen: number;
     }>,
   ) {
     const row = await this.prisma.dailyReport.findUnique({ where: { id } });
@@ -173,6 +182,8 @@ export class DailyReportsService {
       expenseYen: dto.expenseYen ?? row.expenseYen,
       expenseReason:
         dto.expenseReason !== undefined ? dto.expenseReason : row.expenseReason,
+      staffMealCashYen: dto.staffMealCashYen ?? row.staffMealCashYen,
+      staffMealAlipayYen: dto.staffMealAlipayYen ?? row.staffMealAlipayYen,
     };
 
     assertValidRange(next.startMinuteOfDay, next.endMinuteOfDay);
@@ -199,6 +210,7 @@ export class DailyReportsService {
         cashTotalYen: next.cashTotalYen,
         expenseYen: next.expenseYen,
         expenseReason: next.expenseReason,
+        staffMealCashYen: next.staffMealCashYen,
       },
       registerFloatYen,
     );
@@ -234,6 +246,8 @@ export class DailyReportsService {
         cashTotalYen: next.cashTotalYen,
         expenseYen: next.expenseYen,
         expenseReason: next.expenseReason?.trim() || null,
+        staffMealCashYen: next.staffMealCashYen,
+        staffMealAlipayYen: next.staffMealAlipayYen,
         ...computed,
       },
     });

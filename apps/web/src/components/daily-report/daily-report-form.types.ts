@@ -6,6 +6,8 @@ export type DailyReportFormFieldsModel = {
   currentImosBalanceYen: number;
   newageYen: number;
   cashInDrawerYen: number;
+  staffMealCashYen: number;
+  staffMealAlipayYen: number;
   expenseYen: number;
   expenseReason: string;
   expenseReceiptStored: boolean;
