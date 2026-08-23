@@ -474,6 +474,15 @@ describe('staging deployment documentation contracts', () => {
     expect(costItems.some((item) => /AppSync/i.test(item))).toBe(false);
   });
 
+  it('binds both cost approval tag fields to the Data API recovery point', () => {
+    expect(documentFieldValues(COST_APPROVAL, 'Git deployment point')).toEqual([
+      'fsk-staging-data-api-foundation-v1',
+    ]);
+    expect(documentFieldValues(COST_APPROVAL, 'ApprovedTag')).toEqual([
+      'fsk-staging-data-api-foundation-v1',
+    ]);
+  });
+
   it('keeps removed connector operations out of both executable runbooks', () => {
     expect(MIGRATION_RUNBOOK).not.toBe('');
     const executableSteps = [DEPLOYMENT_RUNBOOK, MIGRATION_RUNBOOK]

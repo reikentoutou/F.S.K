@@ -13,7 +13,7 @@
 | ApprovalScope | `PENDING_USER_APPROVAL` |
 | AWS Account | `444083008754` |
 | Region | `ap-northeast-1` |
-| Git deployment point | `fsk-staging-foundation-v1` |
+| Git deployment point | `fsk-staging-data-api-foundation-v1` |
 | MonthlyCeilingJpy | `25000` |
 
 `MonthlyCeilingJpy=25000` 是待批准的治理上限，不是 AWS 硬停止，也不代表审批已经完成。只要 `GateStatus` 仍为 `NOT_APPROVED`，或任一审批字段仍为 `PENDING_USER_APPROVAL`，就不得创建 Amplify App、branch、CloudFormation stack、Budget、告警或其他 AWS 资源。本文不是批准记录，也不表示已经发生 AWS 写入。
@@ -103,7 +103,7 @@
 | ApprovedAtJst | `PENDING_USER_APPROVAL` |
 | ExpiresAtJst | `PENDING_USER_APPROVAL` |
 | ApprovedCommit | `PENDING_USER_APPROVAL` |
-| ApprovedTag | `fsk-staging-foundation-v1` |
+| ApprovedTag | `fsk-staging-data-api-foundation-v1` |
 | CostOwner | `PENDING_USER_APPROVAL` |
 | CleanupOwner | `PENDING_USER_APPROVAL` |
 
