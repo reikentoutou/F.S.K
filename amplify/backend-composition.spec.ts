@@ -1,12 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,14 +31,26 @@ const REQUIRED_TAGS = [
   { Key: 'CostCenter', Value: 'FSK' },
 ] as const;
 
-const RUNBOOK_PATH = join(
-  process.cwd(),
-  'docs/aws/staging-deployment-runbook.md',
-);
-const RUNBOOK = readFileSync(RUNBOOK_PATH, 'utf8');
+const readDocument = (path: string): string =>
+  existsSync(path) ? readFileSync(path, 'utf8') : '';
 
-const extractBashFunction = (name: string): string => {
-  const match = RUNBOOK.match(
+const DEPLOYMENT_RUNBOOK = readDocument(
+  join(process.cwd(), 'docs/aws/staging-deployment-runbook.md'),
+);
+const MIGRATION_RUNBOOK = readDocument(
+  join(process.cwd(), 'docs/aws/staging-migration-runbook.md'),
+);
+const COST_APPROVAL = readDocument(
+  join(process.cwd(), 'docs/aws/staging-cost-approval.md'),
+);
+
+const extractBashSteps = (document: string): string =>
+  [...document.matchAll(/^```bash\n([\s\S]*?)^```$/gm)]
+    .map((match) => match[1])
+    .join('\n');
+
+const extractBashFunction = (document: string, name: string): string => {
+  const match = extractBashSteps(document).match(
     new RegExp(`^${name.replaceAll('_', '[_]')}\\(\\) \\{\\n[\\s\\S]*?^\\}\\n`, 'm'),
   );
   if (!match) {
@@ -50,206 +59,22 @@ const extractBashFunction = (name: string): string => {
   return match[0];
 };
 
-const extractRunbookRange = (start: string, end: string): string => {
-  const startIndex = RUNBOOK.indexOf(start);
-  const endIndex = RUNBOOK.indexOf(end, startIndex);
-  if (startIndex < 0 || endIndex < 0) {
-    throw new Error(`RUNBOOK_RANGE_NOT_FOUND:${start}:${end}`);
-  }
-  return RUNBOOK.slice(startIndex, endIndex).trim();
-};
+const markdownRows = (document: string): string[][] =>
+  document
+    .split('\n')
+    .filter((line) => /^\|.*\|$/.test(line))
+    .map((line) =>
+      line
+        .slice(1, -1)
+        .split('|')
+        .map((cell) => cell.trim().replaceAll('`', '')),
+    )
+    .filter((cells) => !cells.every((cell) => /^:?-+:?$/.test(cell)));
 
-type StateWriterFixture = {
-  call: string;
-  name: string;
-};
-
-const STATE_WRITER_FIXTURES: StateWriterFixture[] = [
-  {
-    name: 'fsk_put_task8_worker_status',
-    call: 'fsk_put_task8_worker_status TEST_STATUS',
-  },
-  {
-    name: 'fsk_put_task8_control_status',
-    call: 'fsk_put_task8_control_status TEST_STATUS',
-  },
-  {
-    name: 'fsk_persist_temp_egress_state',
-    call: 'fsk_persist_temp_egress_state',
-  },
-  {
-    name: 'fsk_persist_cleanup_result',
-    call: 'fsk_persist_cleanup_result PASS',
-  },
-];
-
-type StateWriterFailureMode =
-  | 'failed_precheck'
-  | 'failed_put'
-  | 'failed_postcheck';
-
-type StateWriterCallContext = 'conditional' | 'errexit_off';
-
-const runStateWriterFixture = (
-  fixture: StateWriterFixture,
-  failureMode: StateWriterFailureMode,
-  callContext: StateWriterCallContext,
-) => {
-  const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-task8-writer-'));
-  const mockBinDirectory = join(fixtureDirectory, 'bin');
-  const mockAwsPath = join(mockBinDirectory, 'aws');
-  const mockTimeoutPath = join(mockBinDirectory, 'timeout');
-  const mockAwsLogPath = join(fixtureDirectory, 'aws.log');
-  mkdirSync(mockBinDirectory);
-  writeFileSync(
-    mockTimeoutPath,
-    `#!/usr/bin/env bash
-set -u
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --signal=*|--kill-after=*) shift ;;
-    [0-9]*) shift; break ;;
-    *) break ;;
-  esac
-done
-exec "$@"
-`,
-  );
-  writeFileSync(
-    mockAwsPath,
-    `#!/usr/bin/env bash
-set -u
-printf '%s\\n' "$*" >> "$FSK_MOCK_AWS_LOG"
-case " $* " in
-  *' ssm put-parameter '*)
-    if [ "\${FSK_MOCK_PUT_MODE:-success}" = fail ]; then
-      exit 47
-    fi
-    printf '1\\n'
-    ;;
-  *) exit 64 ;;
-esac
-`,
-  );
-  chmodSync(mockTimeoutPath, 0o755);
-  chmodSync(mockAwsPath, 0o755);
-
-  const invoke =
-    callContext === 'conditional'
-      ? `set -e
-if ${fixture.call}; then
-  helper_status=0
-else
-  helper_status=$?
-fi
-exit "$helper_status"`
-      : `set +e
-${fixture.call}
-helper_status=$?
-exit "$helper_status"`;
-  const script = `set -uo pipefail
-MOCK_OWNERSHIP_CALLS=0
-fsk_assert_task8_parameter_owned() {
-  MOCK_OWNERSHIP_CALLS=$((MOCK_OWNERSHIP_CALLS + 1))
-  if [ "$FSK_MOCK_FAILURE_MODE" = failed_precheck ] && \
-    [ "$MOCK_OWNERSHIP_CALLS" -eq 1 ]; then
-    return 41
-  fi
-  if [ "$FSK_MOCK_FAILURE_MODE" = failed_postcheck ] && \
-    [ "$MOCK_OWNERSHIP_CALLS" -eq 2 ]; then
-    return 42
-  fi
-  return 0
-}
-fsk_render_task8_state() {
-  printf '{"version":2}'
-}
-fsk_run_before_temp_egress_deadline() {
-  "$@"
-}
-fsk_run_before_cleanup_deadline() {
-  shift
-  "$@"
-}
-FSK_TASK8_WORKER_STATUS_PARAMETER=/fsk/test/worker-status
-FSK_TASK8_CONTROL_STATUS_PARAMETER=/fsk/test/control-status
-FSK_TASK8_STATE_PARAMETER=/fsk/test/state
-${extractBashFunction(fixture.name)}
-${invoke}
-`;
-
-  try {
-    const result = spawnSync('bash', ['-c', script], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        FSK_MOCK_AWS_LOG: mockAwsLogPath,
-        FSK_MOCK_FAILURE_MODE: failureMode,
-        FSK_MOCK_PUT_MODE: failureMode === 'failed_put' ? 'fail' : 'success',
-        PATH: `${mockBinDirectory}:${process.env.PATH ?? ''}`,
-      },
-      timeout: 5_000,
-    });
-    return {
-      ...result,
-      awsCalls: existsSync(mockAwsLogPath)
-        ? readFileSync(mockAwsLogPath, 'utf8').trim().split('\n')
-        : [],
-    };
-  } finally {
-    rmSync(fixtureDirectory, { force: true, recursive: true });
-  }
-};
-
-const extractTemporaryEc2TagCalls = () => {
-  const lines = RUNBOOK.split('\n');
-  return lines.flatMap((line, index) => {
-    if (!line.includes('--tag-specifications') ||
-        !line.includes('${FSK_TEMP_EC2_TAGS}')) {
-      return [];
-    }
-    const operationLine = lines
-      .slice(Math.max(0, index - 12), index + 1)
-      .reverse()
-      .find((candidate) => candidate.includes('aws ec2 '));
-    const operation = operationLine?.match(/aws ec2 ([a-z-]+)/)?.[1];
-    const specification = line.match(/--tag-specifications "(.*)" \\/)?.[1];
-    if (!operation || !specification) {
-      throw new Error(`RUNBOOK_TAGGED_CREATE_PARSE_FAILED:${index + 1}`);
-    }
-    return [{ operation, specification }];
-  });
-};
-
-const expandTemporaryEc2Tags = (): string => {
-  const assignment = RUNBOOK.match(/^FSK_TEMP_EC2_TAGS=.*$/m)?.[0];
-  if (!assignment) {
-    throw new Error('RUNBOOK_TEMP_EC2_TAG_ASSIGNMENT_NOT_FOUND');
-  }
-  const result = spawnSync(
-    'bash',
-    ['-c', `${assignment}\nprintf '%s' "$FSK_TEMP_EC2_TAGS"`],
-    {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        FSK_AWS_ACCOUNT_ID: '444083008754',
-        FSK_CLOUDSHELL_TASK_ID: 'task-1',
-        FSK_TASK8_OPERATION_TOKEN: '00000000-0000-4000-8000-000000000000',
-        FSK_VPC_ID: 'vpc-0123456789abcdef0',
-      },
-    },
-  );
-  if (result.status !== 0) {
-    throw new Error(`RUNBOOK_TEMP_EC2_TAG_EXPANSION_FAILED:${result.stderr}`);
-  }
-  return result.stdout;
-};
-
-const AWS_CLI_AVAILABLE = spawnSync('aws', ['--version'], {
-  encoding: 'utf8',
-}).status === 0;
+const documentFieldValues = (document: string, field: string): string[] =>
+  markdownRows(document)
+    .filter(([name]) => name === field)
+    .map(([, value]) => value);
 
 describe('foundation backend composition', () => {
   it('exports exactly the approved foundation resource set', () => {
@@ -493,67 +318,96 @@ describe('foundation backend composition', () => {
   });
 });
 
-describe('Task 8 runbook executable contracts', () => {
-  for (const fixture of STATE_WRITER_FIXTURES) {
-    describe(fixture.name, () => {
-      it.each<StateWriterCallContext>(['conditional', 'errexit_off'])(
-        'does not write and returns failure after an ownership precheck failure in %s context',
-        (callContext) => {
-          const result = runStateWriterFixture(
-            fixture,
-            'failed_precheck',
-            callContext,
-          );
+describe('staging deployment documentation contracts', () => {
+  it('keeps the cost gate unapproved with the six separately approved write stages', () => {
+    expect(documentFieldValues(COST_APPROVAL, 'GateStatus')).toContain(
+      'NOT_APPROVED',
+    );
+    expect(documentFieldValues(COST_APPROVAL, 'MonthlyCeilingJpy')).toContain(
+      '25000',
+    );
+    expect(documentFieldValues(COST_APPROVAL, 'LowUseMonthlyJpy')).toContain(
+      '约 ¥1,000',
+    );
+    expect(
+      documentFieldValues(COST_APPROVAL, 'OneAcuWorstMonthJpy'),
+    ).toContain('约 ¥19,600');
 
-          expect(result.status, result.stderr).not.toBe(0);
-          expect(
-            result.awsCalls.filter((call) => call.includes('put-parameter')),
-          ).toHaveLength(0);
+    const stages = markdownRows(COST_APPROVAL)
+      .filter(([, , approval]) => approval === 'PENDING_USER_APPROVAL')
+      .map(([stage]) => stage);
+    expect(stages).toEqual(
+      expect.arrayContaining([
+        'Foundation',
+        'Migration',
+        'Full backend',
+        'Hosting',
+        'Budget/alarms',
+        'Destroy',
+      ]),
+    );
+  });
+
+  it('budgets the Data API HTTP backend without persistent connector costs', () => {
+    const costItems = markdownRows(COST_APPROVAL).map(([item]) => item);
+    expect(costItems).toEqual(
+      expect.arrayContaining([
+        'API Gateway HTTP API',
+        'RDS Data API calls',
+        'Kitchen/Admin/Export Functions',
+      ]),
+    );
+    expect(costItems.some((item) => /SSM Interface/i.test(item))).toBe(false);
+    expect(costItems.some((item) => /AppSync/i.test(item))).toBe(false);
+  });
+
+  it('keeps removed connector operations out of both executable runbooks', () => {
+    expect(MIGRATION_RUNBOOK).not.toBe('');
+    const executableSteps = [DEPLOYMENT_RUNBOOK, MIGRATION_RUNBOOK]
+      .map(extractBashSteps)
+      .join('\n');
+    const removedOperations = [
+      /ampx\s+generate\s+schema-from-database/i,
+      /schema[.]sql[.]ts/i,
+      /SQL_CONNECTION_STRING/,
+      /AppSync/i,
+      /SQL[-_ ]?Lambda/i,
+      /create-vpc-endpoint[\s\S]{0,300}ssm/i,
+      /com[.]amazonaws[.]ap-northeast-1[.]ssm/i,
+    ];
+
+    for (const removedOperation of removedOperations) {
+      expect(executableSteps).not.toMatch(removedOperation);
+    }
+  });
+});
+
+describe('staging migration runbook executable contracts', () => {
+  it('builds complete temporary ownership tags from the approved operation tuple', () => {
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_render_temporary_tags')}
+fsk_render_temporary_tags
+`,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FSK_AWS_ACCOUNT_ID: '444083008754',
+          FSK_MIGRATION_OPERATION_TOKEN:
+            '00000000-0000-4000-8000-000000000000',
+          FSK_MIGRATION_TASK_ID: 'task-1',
+          FSK_VPC_ID: 'vpc-0123456789abcdef0',
         },
-      );
+      },
+    );
 
-      it.each<StateWriterCallContext>(['conditional', 'errexit_off'])(
-        'returns failure when put-parameter fails in %s context',
-        (callContext) => {
-          const result = runStateWriterFixture(
-            fixture,
-            'failed_put',
-            callContext,
-          );
-
-          expect(result.status, result.stderr).not.toBe(0);
-          expect(
-            result.awsCalls.filter((call) => call.includes('put-parameter')),
-          ).toHaveLength(1);
-        },
-      );
-
-      it.each<StateWriterCallContext>(['conditional', 'errexit_off'])(
-        'returns failure when the ownership postcheck fails in %s context',
-        (callContext) => {
-          const result = runStateWriterFixture(
-            fixture,
-            'failed_postcheck',
-            callContext,
-          );
-
-          expect(result.status, result.stderr).not.toBe(0);
-          expect(
-            result.awsCalls.filter((call) => call.includes('put-parameter')),
-          ).toHaveLength(1);
-        },
-      );
-    });
-  }
-
-  it('builds temporary EC2 tags as a canonical JSON array', () => {
-    const expandedTags = expandTemporaryEc2Tags();
-    let parsedTags: unknown;
-
-    expect(() => {
-      parsedTags = JSON.parse(expandedTags);
-    }).not.toThrow();
-    expect(parsedTags).toEqual([
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([
       { Key: 'Project', Value: 'FSK' },
       { Key: 'Environment', Value: 'staging' },
       { Key: 'ManagedBy', Value: 'AmplifyGen2' },
@@ -568,283 +422,43 @@ describe('Task 8 runbook executable contracts', () => {
     ]);
   });
 
-  (AWS_CLI_AVAILABLE ? it : it.skip)(
-    'passes every actual temporary tagged create through the local AWS CLI parser',
-    () => {
-      const expandedTags = expandTemporaryEc2Tags();
-      const taggedCalls = extractTemporaryEc2TagCalls();
-      const skeletonArguments: Record<string, string[]> = {
-        'allocate-address': [
-          '--domain',
-          'vpc',
-          '--query',
-          'AllocationId',
-        ],
-        'authorize-security-group-ingress': [
-          '--group-id',
-          'sg-0123456789abcdef0',
-          '--protocol',
-          'tcp',
-          '--port',
-          '5432',
-          '--source-group',
-          'sg-abcdef01234567890',
-          '--query',
-          'SecurityGroupRules[0].SecurityGroupRuleId',
-        ],
-        'create-internet-gateway': [
-          '--query',
-          'InternetGateway.InternetGatewayId',
-        ],
-        'create-nat-gateway': [
-          '--connectivity-type',
-          'public',
-          '--subnet-id',
-          'subnet-0123456789abcdef0',
-          '--allocation-id',
-          'eipalloc-0123456789abcdef0',
-          '--query',
-          'NatGateway.NatGatewayId',
-        ],
-        'create-route-table': [
-          '--vpc-id',
-          'vpc-0123456789abcdef0',
-          '--query',
-          'RouteTable.RouteTableId',
-        ],
-        'create-security-group': [
-          '--vpc-id',
-          'vpc-0123456789abcdef0',
-          '--group-name',
-          'fsk-test',
-          '--description',
-          'test',
-          '--query',
-          'GroupId',
-        ],
-        'create-subnet': [
-          '--vpc-id',
-          'vpc-0123456789abcdef0',
-          '--cidr-block',
-          '10.0.128.0/24',
-          '--availability-zone',
-          'ap-northeast-1a',
-          '--query',
-          'Subnet.SubnetId',
-        ],
-      };
-      expect(taggedCalls.map(({ operation }) => operation).sort()).toEqual(
-        Object.keys(skeletonArguments).sort(),
-      );
-
-      for (const { operation, specification } of taggedCalls) {
-        const result = spawnSync(
-          'aws',
-          [
-            'ec2',
-            operation,
-            '--generate-cli-skeleton',
-            'output',
-            '--region',
-            'ap-northeast-1',
-            ...skeletonArguments[operation],
-            '--tag-specifications',
-            specification
-              .replace('${FSK_TEMP_EC2_TAGS}', expandedTags)
-              .replaceAll('\\"', '"'),
-            '--output',
-            'text',
-          ],
-          { encoding: 'utf8' },
-        );
-        expect(result.status, `${operation}: ${result.stderr}`).toBe(0);
-      }
-    },
-  );
-
-  it.each([
-    ['real TAB', 'vpc-0123456789abcdef0\tvpc-0123456789abcdef0'],
-    ['mixed whitespace', 'vpc-0123456789abcdef0   \tvpc-0123456789abcdef0'],
-  ])(
-    'accepts exactly two application route-table VPC IDs separated by %s',
-    (_fixtureName, routeTableVpcIds) => {
-      const guard = extractRunbookRange(
-        'FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS=',
-        'FSK_PREEXISTING_APP_DEFAULT_ROUTE_COUNT=',
-      );
-      const result = spawnSync(
-        'bash',
-        [
-          '-c',
-          `set -euo pipefail
-FSK_VPC_ID=vpc-0123456789abcdef0
-FSK_APP_ROUTE_TABLE_A_ID=rtb-a
-FSK_APP_ROUTE_TABLE_B_ID=rtb-b
-fsk_run_before_temp_egress_deadline() {
-  printf '%s\\n' "$FSK_MOCK_ROUTE_TABLE_VPCS"
-}
-${guard}
-`,
-        ],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            FSK_MOCK_ROUTE_TABLE_VPCS: routeTableVpcIds,
-          },
-        },
-      );
-
-      expect(result.status, result.stderr).toBe(0);
-    },
-  );
-
-  it.each([
-    ['one ID', 'vpc-0123456789abcdef0'],
-    [
-      'three IDs',
-      'vpc-0123456789abcdef0\tvpc-0123456789abcdef0\tvpc-0123456789abcdef0',
-    ],
-    ['one foreign VPC', 'vpc-0123456789abcdef0\tvpc-foreign'],
-  ])('rejects application route-table VPC output with %s', (_name, output) => {
-    const guard = extractRunbookRange(
-      'FSK_VERIFIED_APPLICATION_ROUTE_TABLE_VPC_IDS=',
-      'FSK_PREEXISTING_APP_DEFAULT_ROUTE_COUNT=',
-    );
-    const result = spawnSync(
-      'bash',
-      [
-        '-c',
-        `set -euo pipefail
-FSK_VPC_ID=vpc-0123456789abcdef0
-FSK_APP_ROUTE_TABLE_A_ID=rtb-a
-FSK_APP_ROUTE_TABLE_B_ID=rtb-b
-fsk_run_before_temp_egress_deadline() {
-  printf '%s\\n' "$FSK_MOCK_ROUTE_TABLE_VPCS"
-}
-${guard}
-`,
-      ],
-      {
-        encoding: 'utf8',
-        env: { ...process.env, FSK_MOCK_ROUTE_TABLE_VPCS: output },
-      },
-    );
-
-    expect(result.status, result.stderr).not.toBe(0);
-  });
-
-  it('recovers only the exact owned DB ingress rule after response loss', () => {
-    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-db-ingress-'));
-    const awsLogPath = join(fixtureDirectory, 'aws.log');
-    const ownedTags = [
-      { Key: 'Project', Value: 'FSK' },
-      { Key: 'Environment', Value: 'staging' },
-      { Key: 'ManagedBy', Value: 'AmplifyGen2' },
-      { Key: 'CostCenter', Value: 'FSK' },
-      { Key: 'AccountId', Value: '444083008754' },
-      { Key: 'VpcId', Value: 'vpc-0123456789abcdef0' },
-      { Key: 'TaskId', Value: 'task-1' },
-      {
-        Key: 'OperationToken',
-        Value: '00000000-0000-4000-8000-000000000000',
-      },
-    ];
-    const rules = {
-      SecurityGroupRules: [
-        {
-          SecurityGroupRuleId: 'sgr-owned',
-          GroupId: 'sg-database',
-          GroupOwnerId: '444083008754',
-          IsEgress: false,
-          IpProtocol: 'tcp',
-          FromPort: 5432,
-          ToPort: 5432,
-          ReferencedGroupInfo: {
-            GroupId: 'sg-operations',
-            UserId: '444083008754',
-          },
-          Tags: ownedTags,
-        },
-        {
-          SecurityGroupRuleId: 'sgr-foreign-reference',
-          GroupId: 'sg-database',
-          GroupOwnerId: '444083008754',
-          IsEgress: false,
-          IpProtocol: 'tcp',
-          FromPort: 5432,
-          ToPort: 5432,
-          ReferencedGroupInfo: {
-            GroupId: 'sg-foreign',
-            UserId: '444083008754',
-          },
-          Tags: ownedTags,
-        },
-        {
-          SecurityGroupRuleId: 'sgr-wrong-port',
-          GroupId: 'sg-database',
-          GroupOwnerId: '444083008754',
-          IsEgress: false,
-          IpProtocol: 'tcp',
-          FromPort: 443,
-          ToPort: 443,
-          ReferencedGroupInfo: {
-            GroupId: 'sg-operations',
-            UserId: '444083008754',
-          },
-          Tags: ownedTags,
-        },
-        {
-          SecurityGroupRuleId: 'sgr-wrong-owner',
-          GroupId: 'sg-database',
-          GroupOwnerId: '444083008754',
-          IsEgress: false,
-          IpProtocol: 'tcp',
-          FromPort: 5432,
-          ToPort: 5432,
-          ReferencedGroupInfo: {
-            GroupId: 'sg-operations',
-            UserId: '444083008754',
-          },
-          Tags: ownedTags.map((tag) =>
-            tag.Key === 'OperationToken'
-              ? { ...tag, Value: '11111111-1111-4111-8111-111111111111' }
-              : tag,
-          ),
-        },
-      ],
-    };
-    const responseLossBlock = extractRunbookRange(
-      'if ! FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID="$(',
-      '\n\nif ! FSK_TEMP_IGW_ID=',
-    );
+  it('runs the first apply, second no-op, and verify in order without exposing the database URL', () => {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-migration-'));
+    const callLogPath = join(fixtureDirectory, 'calls.log');
+    const migrateCountPath = join(fixtureDirectory, 'migrate-count');
     const script = `set -euo pipefail
-FSK_AWS_ACCOUNT_ID=444083008754
-FSK_VPC_ID=vpc-0123456789abcdef0
-FSK_CLOUDSHELL_TASK_ID=task-1
-FSK_TASK8_OPERATION_TOKEN=00000000-0000-4000-8000-000000000000
-FSK_DB_SECURITY_GROUP_ID=sg-database
-FSK_OPS_SECURITY_GROUP_ID=sg-operations
-FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID=''
-FSK_TEMP_EC2_TAGS='[]'
-fsk_run_before_temp_egress_deadline() {
-  printf '%s\\n' "$*" >> "$FSK_MOCK_AWS_LOG"
-  case " $* " in
-    *' ec2 authorize-security-group-ingress '*) return 55 ;;
-    *' ec2 describe-security-group-rules '*)
-      case "$*" in
-        *Name=referenced-group-id*) return 65 ;;
-      esac
-      printf '%s' "$FSK_MOCK_RULES_JSON"
+fsk_assert_migration_deadline() { :; }
+fsk_build_database_url() { export DATABASE_URL='postgresql://user:super-secret@private/fsk_staging'; }
+fsk_publish_worker_status() { printf 'STATUS=%s\\n' "$1"; }
+fsk_run_before_migration_deadline() {
+  printf '%s\\n' "$*" >> "$FSK_MOCK_CALL_LOG"
+  "$@"
+}
+pnpm() {
+  case "$*" in
+    'run db:staging:migrate')
+      count=0
+      if [ -f "$FSK_MOCK_MIGRATE_COUNT" ]; then
+        count="$(cat "$FSK_MOCK_MIGRATE_COUNT")"
+      fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$FSK_MOCK_MIGRATE_COUNT"
+      if [ "$count" -eq 1 ]; then
+        printf 'MIGRATIONS_APPLIED count=1\\n'
+      else
+        printf 'MIGRATIONS_APPLIED count=0\\n'
+      fi
       ;;
-    *) return 66 ;;
+    'run db:staging:verify')
+      printf 'SCHEMA_VERIFIED business_tables=10 metadata_tables=1 migrations=1\\n'
+      ;;
+    *) return 91 ;;
   esac
 }
-fsk_persist_temp_egress_state() { :; }
-${extractBashFunction('fsk_select_owned_database_ingress_rule_ids')}
-${extractBashFunction('fsk_require_single_owned_id')}
-${responseLossBlock}
-printf 'RESULT=%s\\n' "$FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID"
+FSK_MIGRATION_SHELL_ROLE=worker
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_run_database_migration')}
+fsk_worker_run_database_migration
+test -z "\${DATABASE_URL+x}"
 `;
 
     try {
@@ -852,40 +466,107 @@ printf 'RESULT=%s\\n' "$FSK_DB_INGRESS_SECURITY_GROUP_RULE_ID"
         encoding: 'utf8',
         env: {
           ...process.env,
-          FSK_MOCK_AWS_LOG: awsLogPath,
-          FSK_MOCK_RULES_JSON: JSON.stringify(rules),
+          FSK_MOCK_CALL_LOG: callLogPath,
+          FSK_MOCK_MIGRATE_COUNT: migrateCountPath,
         },
       });
-      const awsCalls = existsSync(awsLogPath)
-        ? readFileSync(awsLogPath, 'utf8')
-        : '';
+      const calls = readFileSync(callLogPath, 'utf8').trim().split('\n');
 
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain('RESULT=sgr-owned');
-      expect(awsCalls).toContain('Name=group-id,Values=sg-database');
-      expect(awsCalls).toContain(
-        'Name=tag:OperationToken,Values=00000000-0000-4000-8000-000000000000',
-      );
-      expect(awsCalls).not.toContain('Name=referenced-group-id');
+      expect(calls).toEqual([
+        'pnpm run db:staging:migrate',
+        'pnpm run db:staging:migrate',
+        'pnpm run db:staging:verify',
+      ]);
+      expect(result.stdout).toContain('STATUS=READY_FOR_CLEANUP');
+      expect(`${result.stdout}${result.stderr}`).not.toContain('super-secret');
     } finally {
       rmSync(fixtureDirectory, { force: true, recursive: true });
     }
   });
 
-  (AWS_CLI_AVAILABLE ? it : it.skip)(
-    'uses only filter names documented by the installed security-group-rule CLI',
-    () => {
-      const result = spawnSync(
-        'aws',
-        ['ec2', 'describe-security-group-rules', 'help'],
-        { encoding: 'utf8' },
-      );
-      const help = result.stdout.replace(/.\u0008/g, '');
+  it('runs control-owned cleanup when temporary creation fails', () => {
+    const script = `set -euo pipefail
+fsk_assert_control_guard() { :; }
+fsk_discover_owned_residual_count() { printf '0\\n'; }
+fsk_create_temporary_state_parameters() { :; }
+fsk_create_temporary_access() { printf 'CREATE_FAILED\\n'; return 73; }
+fsk_start_control_watchdog() { printf 'WATCHDOG_STARTED\\n'; }
+fsk_wait_for_worker_terminal_status() { :; }
+fsk_control_cleanup_owned_resources() { printf 'CONTROL_CLEANUP\\n'; }
+fsk_delete_owned_state_parameters() { printf 'DELETE_STATE\\n'; }
+fsk_publish_control_status() { printf 'CONTROL_STATUS=%s\\n' "$1"; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_control_exit')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_control_run_migration')}
+fsk_control_run_migration
+`;
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+
+    expect(result.status).toBe(73);
+    expect(result.stdout).toContain('CREATE_FAILED');
+    expect(result.stdout).toContain('CONTROL_CLEANUP');
+    expect(result.stdout).toContain('CONTROL_STATUS=CLEANUP_PASS:EXIT_73');
+    expect(result.stdout).toContain('DELETE_STATE');
+  });
+
+  it('requires three stable zero residual observations before cleanup passes', () => {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-cleanup-'));
+    const discoveryCountPath = join(fixtureDirectory, 'discover-count');
+    const script = `set -euo pipefail
+fsk_delete_owned_temporary_resources_once() { printf 'DELETE\\n'; }
+fsk_discover_owned_residual_count() {
+  count=0
+  if [ -f "$FSK_MOCK_DISCOVERY_COUNT" ]; then
+    count="$(cat "$FSK_MOCK_DISCOVERY_COUNT")"
+  fi
+  count=$((count + 1))
+  printf '%s' "$count" > "$FSK_MOCK_DISCOVERY_COUNT"
+  case "$count" in
+    1) printf '2\\n' ;;
+    *) printf '0\\n' ;;
+  esac
+}
+FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH=$(($(date +%s) + 30))
+FSK_STABLE_ZERO_REQUIRED=3
+FSK_STABLE_ZERO_MIN_SECONDS=0
+FSK_CLEANUP_POLL_SECONDS=0
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_control_cleanup_owned_resources')}
+fsk_control_cleanup_owned_resources
+`;
+
+    try {
+      const result = spawnSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FSK_MOCK_DISCOVERY_COUNT: discoveryCountPath,
+        },
+      });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(help).toContain('group-id');
-      expect(help).toMatch(/tag\s*:<key>/);
-      expect(help).not.toContain('referenced-group-id');
-    },
-  );
+      expect(Number(readFileSync(discoveryCountPath, 'utf8'))).toBeGreaterThanOrEqual(4);
+      expect(result.stdout).toContain('STABLE_ZERO_OBSERVATIONS=3');
+    } finally {
+      rmSync(fixtureDirectory, { force: true, recursive: true });
+    }
+  });
+
+  it('recovers the uniquely owned operations security group after response loss', () => {
+    const script = `set -euo pipefail
+fsk_run_before_migration_deadline() { "$@"; }
+aws() { return 55; }
+fsk_discover_owned_operations_sg_ids() { printf 'sg-0123456789abcdef0\\n'; }
+FSK_VPC_ID=vpc-0123456789abcdef0
+FSK_MIGRATION_TASK_ID=task-1
+FSK_MIGRATION_OPERATION_TOKEN=00000000-0000-4000-8000-000000000000
+FSK_TEMP_EC2_TAGS='[]'
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_require_single_owned_id')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_create_or_recover_operations_sg')}
+fsk_create_or_recover_operations_sg
+`;
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe('sg-0123456789abcdef0');
+  });
 });
