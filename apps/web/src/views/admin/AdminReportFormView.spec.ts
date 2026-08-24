@@ -1,8 +1,84 @@
-import { describe, expect, it, vi } from 'vitest';
+// @vitest-environment jsdom
+
+import { createApp, defineComponent, h, nextTick } from 'vue';
+import { createMemoryHistory, createRouter } from 'vue-router';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CreateDailyReportCommand } from '@/data/daily-reports';
 import { DataRepositoryError } from '@/data/errors';
 import * as reportView from './AdminReportFormView.vue';
+
+const repositoryMocks = vi.hoisted(() => ({
+  getSetting: vi.fn(),
+  listShifts: vi.fn(),
+  listResponsiblePersons: vi.fn(),
+  getByReportKey: vi.fn(),
+  create: vi.fn(),
+  updateByReportKey: vi.fn(),
+}));
+
+vi.mock('@/data/master-data', () => ({
+  ownerMasterDataRepository: {
+    getSetting: repositoryMocks.getSetting,
+    listShifts: repositoryMocks.listShifts,
+    listResponsiblePersons: repositoryMocks.listResponsiblePersons,
+  },
+}));
+
+vi.mock('@/data/daily-reports', () => ({
+  dailyReportsRepository: {
+    getByReportKey: repositoryMocks.getByReportKey,
+    create: repositoryMocks.create,
+    updateByReportKey: repositoryMocks.updateByReportKey,
+  },
+}));
+
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => ({
+    user: { username: 'owner-test' },
+  }),
+}));
+
+const Passthrough = defineComponent({
+  setup(_props, { slots, attrs }) {
+    return () =>
+      h('div', attrs, [
+        slots.default?.(),
+        slots.title?.(),
+        slots.description?.(),
+        slots.footer?.(),
+      ]);
+  },
+});
+
+async function renderReportForm(): Promise<HTMLElement> {
+  const root = document.createElement('div');
+  const app = createApp(reportView.default);
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      {
+        path: '/owner/daily/new',
+        name: 'owner-report-new',
+        component: reportView.default,
+      },
+      { path: '/owner/daily', name: 'owner-daily', component: Passthrough },
+    ],
+  });
+  await router.push({
+    name: 'owner-report-new',
+    query: { businessDate: '2026-08-24', shiftId: 'day' },
+  });
+  await router.isReady();
+  app.use(router);
+  app.component('ElButton', Passthrough);
+  app.component('ElForm', Passthrough);
+  app.directive('loading', {});
+  app.mount(root);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await nextTick();
+  return root;
+}
 
 interface ReportActions {
   saveOwnerReport(
@@ -76,6 +152,13 @@ const command: CreateDailyReportCommand = {
   attachmentKeys: ['receipts/a.jpg'],
 };
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  repositoryMocks.getSetting.mockResolvedValue({ registerFloatAmount: 5_000 });
+  repositoryMocks.listShifts.mockResolvedValue([]);
+  repositoryMocks.listResponsiblePersons.mockResolvedValue([]);
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -87,6 +170,22 @@ function deferred<T>() {
 }
 
 describe('OWNER report repository actions', () => {
+  it('keeps the form and submission unavailable when AppSetting/default is missing', async () => {
+    repositoryMocks.getSetting.mockRejectedValue(
+      new DataRepositoryError('DATA_NOT_FOUND'),
+    );
+
+    const root = await renderReportForm();
+    const visible = root.textContent ?? '';
+
+    expect(visible).toContain('未找到');
+    expect(visible).not.toContain('底銭');
+    expect(visible).not.toContain('入力内容を確認');
+    expect(visible).not.toContain('老板补录を保存');
+    expect(repositoryMocks.create).not.toHaveBeenCalled();
+    expect(repositoryMocks.updateByReportKey).not.toHaveBeenCalled();
+  });
+
   it('creates a backfill through create without a client-supplied owner', async () => {
     const create = vi.fn().mockResolvedValue({ reportKey: '2026-08-24#day' });
     const updateByReportKey = vi.fn();

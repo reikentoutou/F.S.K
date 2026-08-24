@@ -3,7 +3,7 @@
 > **东京时区**业务日、班次账务、老板统计与 CSV 导出。
 > **目标交付方式**：独立 FSK Amplify Gen 2 WebApp（Hosting + Cognito + AppSync/DynamoDB + S3）。
 
-> **当前状态（2026-08-25）**：新架构已在本地实现和测试，但尚未取得 Gate A 部署批准，未创建/部署新的独立 Amplify App，也未迁移真实 SQLite、用户或 uploads。下文的 NestJS/SQLite 启动方式继续作为 legacy migration source 与本地回退使用，直到真实切换和单独退役批准完成。
+> **当前状态（2026-08-25）**：新架构已在本地实现和测试，但尚未取得 Gate A 部署批准，未创建/部署新的独立 Amplify App，也未迁移真实 SQLite、用户或 uploads。当前分支只保留 legacy API、SQLite/Prisma 数据契约和迁移工具作为迁移源；当前 `apps/web` 已改为 Amplify Web，不能作为旧 UI 回退。完整旧系统回退必须使用迁移前 recovery ref/checkout 与已备份的旧运行环境。
 
 ---
 
@@ -30,7 +30,7 @@
 | **固定班次** | 网管早班 → 白班 → 夜班 → 网管夜班；仅夜班默认承接同一业务日白班结束时间 |
 | **目标生产架构** | 独立 FSK Amplify Hosting、Cognito、Amplify Data/AppSync/DynamoDB、Storage/S3、Kitchen Context Function |
 | **当前生产状态** | `NOT_DEPLOYED`；Gate A 前只有本地实现与合成测试证据 |
-| **legacy 本地入口** | `http://localhost:5173`（仅迁移源、回退和维护） |
+| **legacy 恢复入口** | 不在当前分支提供；须从迁移前 recovery ref/checkout 启动旧 UI + API |
 
 ---
 
@@ -90,29 +90,24 @@ pnpm run build:web
 - [`docs/aws/dynamodb-cutover-runbook.md`](./docs/aws/dynamodb-cutover-runbook.md)
 - [`docs/aws/dynamodb-retirement-runbook.md`](./docs/aws/dynamodb-retirement-runbook.md)
 
-### legacy NestJS/SQLite（迁移源与本地回退）
+### legacy NestJS/SQLite（迁移源与恢复边界）
 
-在真实切换完成前，仍可在仓库根目录运行旧系统：
+当前分支保留 `apps/api`、Prisma schema、SQLite 读取能力及一次性迁移工具，供盘点、只读 dry-run 和 Gate B 迁移使用。当前 `apps/web` 已只通过 Amplify repositories 访问数据，因此在当前分支执行 `pnpm run dev` 或 `build + start/preview`，都不能还原旧 UI + NestJS 的完整账务系统。
 
-```bash
-pnpm install
-cp apps/api/.env.example apps/api/.env
-# 编辑 apps/api/.env：生产须设置 JWT_SECRET 等（见 README「5. 生产环境与安全」）
-pnpm run db:push
-pnpm run dev
-```
+需要完整旧系统回退时，必须同时具备：
 
-然后使用浏览器打开 **`http://localhost:5173`**。这些命令不会部署 Amplify，也不能替代 Gate A/B 批准。
+1. 经复审的迁移前 commit/tag/recovery ref，并从该 ref 建立独立 checkout；
+2. 与该版本匹配的 `dev.db`、`uploads`、环境变量和 Node/pnpm 运行环境备份；
+3. 按该 recovery ref 自带的运行说明启动旧 Vue REST UI 与 NestJS API。
 
-- Vite 开发服务器会将常见 API 路径代理到本机 API（见 [`apps/web/vite.config.ts`](./apps/web/vite.config.ts)），**无需额外桌面壳**。
-- **常驻运行（无 watch）**：可先 `pnpm run build`，再在同一台机器上分别运行 `pnpm --filter @finance/api start` 与 `pnpm --filter @finance/web preview`。若前端与 API **不同源**或对外网提供静态资源，构建 Web 前请设置 **`VITE_API_BASE`** 指向 API 根 URL。
+不要在唯一的真实 SQLite 或 uploads 副本上执行 `db:push`、覆盖恢复或试运行。当前分支的 legacy 代码保留并不等于可启动的旧 UI 恢复点，也不能替代 Gate A/B 批准。
 
 ### 常用脚本
 
 | 命令 | 说明 |
 |------|------|
-| `pnpm run dev` | 并行启动 API + Web（默认） |
-| `pnpm run dev:api` / `pnpm run dev:web` | 单独启动 |
+| `pnpm run dev` | 开发时并行启动保留的 API 与当前 Amplify Web；不是旧系统回退 |
+| `pnpm run dev:api` / `pnpm run dev:web` | 分别启动保留的 API / 当前 Amplify Web 开发服务 |
 | `pnpm run build` | 构建 API + Web（`dist`） |
 | `pnpm run db:push` | 将 Prisma schema 同步到 SQLite |
 | `pnpm run db:generate` | 生成 Prisma Client（`schema.prisma` 变更后必跑） |
@@ -127,19 +122,15 @@ pnpm run db:generate
 
 **编辑器（可选）**：维护 `apps/web` 建议安装 [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar)（Volar）。若在线安装失败，可下载 **`.vsix`** 后使用 **Install from VSIX**。
 
-### Windows：快捷启动（浏览器版）
+### Windows：历史开发快捷脚本
 
-在已 **`pnpm install`** 且配置好 **`.env`** 的前台机上，可用仓库内脚本一键打开 **新控制台窗口**（运行 `pnpm run dev`）并**用默认浏览器**打开前端：
+仓库内脚本会打开控制台运行当前分支的 `pnpm run dev` 并访问本地 Vite；它只用于开发检查，不能启动旧 UI 回退：
 
 | 文件 | 说明 |
 |------|------|
 | [`scripts/windows/start-finance-system-dev.bat`](./scripts/windows/start-finance-system-dev.bat) | 自动 `cd` 到仓库根 → `start cmd /k pnpm run dev` → 约 8 秒后打开 `http://127.0.0.1:5173/` |
 
-**创建桌面快捷方式**：在资源管理器中 **右键** 该 `.bat` → **发送到** → **桌面快捷方式**；或手动新建快捷方式，**目标**填该 bat 的**绝对路径**（无需再包一层 `cmd.exe`）。
-
-**注意**：关闭「FinanceSystem pnpm dev」窗口即停止 API 与 Vite；若端口被占用或启动较慢，可自行编辑 bat 中的 **`timeout /t 8`** 秒数。生产常驻建议仍用 `build` + `start` / `preview` 或进程守护，见上文。
-
-**macOS**：可用 **Automator**「运行 Shell 脚本」执行 `cd` 到仓库根后 `pnpm run dev`，再用 **打开网页** 打开 `http://127.0.0.1:5173/`，并拖到程序坞。
+完整旧系统恢复必须先切换到含旧 Vue REST UI 的迁移前 recovery checkout，再使用该版本的启动脚本和备份环境；不得把当前脚本建立为生产或灾备快捷方式。
 
 ---
 

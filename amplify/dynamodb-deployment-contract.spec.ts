@@ -187,9 +187,13 @@ function migrationCommandLines(): Record<'dryRun' | 'import' | 'verify', string>
     'bash',
   ).join('\n');
   const line = (script: string): string => {
-    const match = bash.split('\n').find((value) =>
-      value.startsWith(`pnpm run ${script} `),
-    );
+    const match = bash
+      .split('\n')
+      .find(
+        (value) =>
+          value.startsWith(`pnpm run ${script} `) ||
+          value.startsWith(`pnpm --silent run ${script} `),
+      );
     if (!match) throw new Error(`MIGRATION_COMMAND_NOT_FOUND:${script}`);
     return match;
   };
@@ -309,6 +313,48 @@ printf 'pnpm %s\\n' "$*" >> "$FAKE_COMMAND_LOG"
 if [[ " $* " == *" pipeline-deploy "* ]]; then mkdir -p apps/web/public; printf '{}\\n' > apps/web/public/amplify_outputs.json; fi
 `);
   return { bin, log };
+}
+
+function createGateBCommandBin(root: string): string {
+  const bin = join(root, 'gate-b-bin');
+  mkdirSync(bin);
+  executable(join(bin, 'aws'), `#!/usr/bin/env bash
+set -euo pipefail
+test "\${1:-}" = sts
+printf '%s\n' "$FSK_EXPECTED_AWS_ACCOUNT_ID"
+`);
+  executable(join(bin, 'git'), `#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  rev-parse) printf '%s\n' "$FSK_DEPLOY_COMMIT" ;;
+  status) ;;
+  *) exit 2 ;;
+esac
+`);
+  executable(join(bin, 'pnpm'), `#!/usr/bin/env bash
+set -euo pipefail
+silent=0
+if [ "\${1:-}" = --silent ]; then silent=1; fi
+case " $* " in
+  *" migration:dry-run "*) exit 0 ;;
+  *" migration:import "*)
+    if [ "$silent" = 0 ]; then printf '> finance-system@ migration:import\n'; fi
+    if [ -e "$FSK_MIGRATION_OUTPUT_DIR/import-checkpoint.json" ]; then
+      if [ "\${FAKE_GATE_B_BAD_SECOND_RESULT:-0}" = 1 ]; then
+        printf '{"status":"complete","created":{"records":1,"attachments":0},"unchanged":{"records":6,"attachments":2}}\n'
+      else
+        printf '{"status":"complete","created":{"records":0,"attachments":0},"unchanged":{"records":7,"attachments":2}}\n'
+      fi
+    else
+      : > "$FSK_MIGRATION_OUTPUT_DIR/import-checkpoint.json"
+      printf '{"status":"complete","created":{"records":7,"attachments":2},"unchanged":{"records":0,"attachments":0}}\n'
+    fi
+    ;;
+  *" migration:verify "*) exit 0 ;;
+  *) exit 2 ;;
+esac
+`);
+  return bin;
 }
 
 function gateEnvironment(root: string, bin: string): NodeJS.ProcessEnv {
@@ -613,6 +659,8 @@ describe('DynamoDB Hosting deployment contract', () => {
       FSK_UPLOADS_SNAPSHOT: fixture.uploadsPath,
       FSK_MIGRATION_OUTPUT_DIR: fixture.outputPath,
       FSK_TARGET_CONFIG: fixture.targetConfigPath,
+      FSK_FIRST_IMPORT_RESULT: join(fixture.root, 'import-result-first.json'),
+      FSK_SECOND_IMPORT_RESULT: join(fixture.root, 'import-result-second.json'),
     };
 
     expect(Object.values(commands).every((command) => !command.includes(' -- --'))).toBe(true);
@@ -664,6 +712,72 @@ describe('DynamoDB Hosting deployment contract', () => {
     expect(`${verifyResult.stdout}\n${verifyResult.stderr}`).not.toContain('VERIFY_ARGUMENT_UNKNOWN:--');
     expect(verifyResult.stdout).not.toContain('"status":"dry-run"');
   }, 90_000);
+
+  it('executes the documented Gate B second apply with the same checkpoint and machine-verifies a full unchanged target', () => {
+    const [script] = extractFences(read('docs/aws/dynamodb-cutover-runbook.md'), 'bash');
+    const fixture = createMigrationCliFixture();
+    mkdirSync(fixture.outputPath);
+    const bundle = {
+      shifts: [{}, {}],
+      responsiblePersons: [{}],
+      appSetting: {},
+      dailyReports: [{}, {}, {}],
+      attachments: [{}, {}],
+    };
+    const bundlePath = join(fixture.outputPath, 'migration-bundle.json');
+    writeFileSync(bundlePath, `${JSON.stringify(bundle)}\n`);
+    writeFileSync(join(fixture.outputPath, 'migration-report.json'), '{}\n');
+    writeFileSync(fixture.targetConfigPath, `${JSON.stringify({
+      accountId: '444083008754',
+      region: 'ap-northeast-1',
+      amplifyApp: { appId: 'd1234567890abc', name: 'FSK' },
+    })}\n`);
+    const bin = createGateBCommandBin(fixture.root);
+    const commit = '1234567890abcdef1234567890abcdef12345678';
+    const environment = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      FSK_GATE_B_APPROVAL_ID: 'gate-b-approved',
+      FSK_EXPECTED_AWS_ACCOUNT_ID: '444083008754',
+      FSK_EXPECTED_AWS_REGION: 'ap-northeast-1',
+      FSK_AMPLIFY_APP_ID: 'd1234567890abc',
+      FSK_AMPLIFY_BRANCH: 'production',
+      FSK_DEPLOY_COMMIT: commit,
+      FSK_SQLITE_SNAPSHOT: fixture.sqlitePath,
+      FSK_UPLOADS_SNAPSHOT: fixture.uploadsPath,
+      FSK_MIGRATION_OUTPUT_DIR: fixture.outputPath,
+      FSK_TARGET_CONFIG: fixture.targetConfigPath,
+      FSK_EXPECTED_BUNDLE_SHA256: sha256(bundlePath),
+    };
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: environment,
+      timeout: 30_000,
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(fixture.outputPath, 'import-result-second.json'),
+          'utf8',
+        ),
+      ),
+    ).toEqual({
+      status: 'complete',
+      created: { records: 0, attachments: 0 },
+      unchanged: { records: 7, attachments: 2 },
+    });
+    rmSync(join(fixture.outputPath, 'import-checkpoint.json'));
+    const rejected = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...environment, FAKE_GATE_B_BAD_SECOND_RESULT: '1' },
+      timeout: 30_000,
+    });
+    expect(rejected.status).not.toBe(0);
+  }, 30_000);
 
   it('bootstraps and reads back the exact isolated Hosting branch/rule, CAS-publishes the commit, and reaches HTTP only after a matching successful job', () => {
     const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');

@@ -1,28 +1,31 @@
 <script lang="ts">
 import { recentTokyoBusinessDateRange as recentRange } from '@/data/date-range';
-import { DataRepositoryError as RepositoryError } from '@/data/errors';
 
 export async function loadOwnerDailyReports<T>(options: {
   now?: Date;
   dates?: string[];
+  isCurrent?: () => boolean;
   listByBusinessDate(date: string): Promise<Array<T | null>>;
   getSetting(id: string): Promise<{ registerFloatAmount: number }>;
 }): Promise<{ rows: T[]; registerFloatAmount: number }> {
   const dates = options.dates ?? recentRange(90, options.now);
-  const setting = await options.getSetting('default').catch((error: unknown) => {
-    if (error instanceof RepositoryError && error.code === 'DATA_NOT_FOUND') {
-      return null;
-    }
-    throw error;
-  });
-  const dailyResults = await Promise.all(
-    dates.map((businessDate) => options.listByBusinessDate(businessDate)),
-  );
+  const setting = await options.getSetting('default');
+  const dailyResults: Array<Array<T | null>> = [];
+  for (let offset = 0; offset < dates.length; offset += 10) {
+    if (options.isCurrent && !options.isCurrent()) break;
+    dailyResults.push(
+      ...(await Promise.all(
+        dates
+          .slice(offset, offset + 10)
+          .map((businessDate) => options.listByBusinessDate(businessDate)),
+      )),
+    );
+  }
   return {
     rows: dailyResults
       .flat()
       .filter((report): report is T => report != null),
-    registerFloatAmount: setting?.registerFloatAmount ?? 0,
+    registerFloatAmount: setting.registerFloatAmount,
   };
 }
 </script>
@@ -30,7 +33,7 @@ export async function loadOwnerDailyReports<T>(options: {
 <script setup lang="ts">
 import { computeDailyReportTotals, staffMealTotalYen } from '@fsk/domain';
 import { ElMessage } from 'element-plus';
-import { computed, shallowRef } from 'vue';
+import { computed, onBeforeUnmount, shallowRef } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { businessDateRange, recentTokyoBusinessDateRange } from '@/data/date-range';
@@ -71,6 +74,8 @@ const loading = shallowRef(false);
 const rows = shallowRef<ListedReport[]>([]);
 const expanded = shallowRef<string[]>([]);
 const registerFloatAmount = shallowRef(0);
+let loadGeneration = 0;
+let isUnmounted = false;
 
 const byDate = computed(() => {
   const grouped = new Map<string, ListedReport[]>();
@@ -130,24 +135,35 @@ function formatYen(value: number): string {
 }
 
 async function load(): Promise<void> {
+  const generation = ++loadGeneration;
+  const isCurrent = (): boolean =>
+    !isUnmounted && generation === loadGeneration;
   loading.value = true;
   try {
     const dates = businessDateRange(fromDate.value, toDate.value);
     const loaded = await loadOwnerDailyReports({
       dates,
+      isCurrent,
       listByBusinessDate: (businessDate) =>
         dailyReportsRepository.listByBusinessDate(businessDate),
       getSetting: (id) => ownerMasterDataRepository.getSetting(id),
     });
+    if (!isCurrent()) return;
     registerFloatAmount.value = loaded.registerFloatAmount;
     rows.value = loaded.rows;
   } catch (error: unknown) {
+    if (!isCurrent()) return;
     rows.value = [];
     ElMessage.error(ownerDataErrorMessage(error, '日報一覧の読み込みに失敗しました'));
   } finally {
-    loading.value = false;
+    if (isCurrent()) loading.value = false;
   }
 }
+
+onBeforeUnmount(() => {
+  isUnmounted = true;
+  loadGeneration += 1;
+});
 
 const dialogOpen = shallowRef(false);
 const newForm = shallowRef({

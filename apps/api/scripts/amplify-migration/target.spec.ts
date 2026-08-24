@@ -338,7 +338,7 @@ describe('migration apply orchestration', () => {
     );
   });
 
-  it('creates each model in fixed stage order and repeats identical input as no-op', async () => {
+  it('rechecks every target stage from a completed checkpoint and reports identical input as no-op', async () => {
     const root = temporaryRoot();
     const bundle = fixtureBundle();
     addAttachment(bundle, root);
@@ -354,7 +354,6 @@ describe('migration apply orchestration', () => {
       checkpointStore: checkpoint,
     });
     const firstCalls = [...target.calls];
-    checkpoint.checkpoint = null;
     target.calls.length = 0;
     const second = await importMigrationBundle({
       mode: 'apply',
@@ -367,6 +366,7 @@ describe('migration apply orchestration', () => {
 
     expect(first.created).toEqual({ records: 4, attachments: 1 });
     expect(second.unchanged).toEqual({ records: 4, attachments: 1 });
+    expect(second.created).toEqual({ records: 0, attachments: 0 });
     expect(firstCalls).toEqual([
       'preflight',
       'ShiftDefinition:shift-day',
@@ -375,11 +375,48 @@ describe('migration apply orchestration', () => {
       'DailyReport:2026-08-24#shift-day',
       `Attachment:${bundle.attachments[0].objectKey}`,
     ]);
+    expect(target.calls).toEqual(firstCalls);
     expect(TARGET_MODEL_ORDER).toEqual([
       'ShiftDefinition',
       'ResponsiblePerson',
       'AppSetting',
       'DailyReport',
+    ]);
+  });
+
+  it('resumes only unfinished stages from an in-progress checkpoint', async () => {
+    const bundle = fixtureBundle();
+    const target = new MemoryTarget();
+    const checkpoint = new MemoryCheckpointStore();
+    await importMigrationBundle({
+      mode: 'apply',
+      approvalId: 'FSK-TASK11-SYNTHETIC-IN-PROGRESS',
+      bundle,
+      uploadsRoot: temporaryRoot(),
+      target,
+      checkpointStore: checkpoint,
+    });
+    checkpoint.checkpoint = {
+      ...checkpoint.checkpoint!,
+      status: 'in-progress',
+      completedStages: ['ShiftDefinition', 'ResponsiblePerson'],
+    };
+    target.calls.length = 0;
+
+    const resumed = await importMigrationBundle({
+      mode: 'apply',
+      approvalId: 'FSK-TASK11-SYNTHETIC-IN-PROGRESS',
+      bundle,
+      uploadsRoot: temporaryRoot(),
+      target,
+      checkpointStore: checkpoint,
+    });
+
+    expect(resumed.unchanged).toEqual({ records: 2, attachments: 0 });
+    expect(target.calls).toEqual([
+      'preflight',
+      'AppSetting:default',
+      'DailyReport:2026-08-24#shift-day',
     ]);
   });
 

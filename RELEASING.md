@@ -14,9 +14,11 @@
 
 对应手册为 [`dynamodb-deployment-runbook.md`](./docs/aws/dynamodb-deployment-runbook.md)、[`dynamodb-cutover-runbook.md`](./docs/aws/dynamodb-cutover-runbook.md) 和 [`dynamodb-retirement-runbook.md`](./docs/aws/dynamodb-retirement-runbook.md)。三个 Gate 都需要新的明确 ApprovalId，互不继承。
 
-## legacy 源码交付
+## legacy 源码交付与恢复边界
 
-NestJS/SQLite 仍是迁移源和本地回退。在 Gate B 切换完成前，前台机可获取仓库源码，执行 **`pnpm install`**、配置 **`apps/api/.env`**、运行 **`pnpm run db:push`**，再通过 **`pnpm run dev`** 或 `build + start/preview` 启动。Gate B 后旧系统只读保留，Gate C 前不得删除其代码、数据库和 uploads 备份。
+当前分支只保留 NestJS/SQLite 数据契约、legacy API 和迁移工具作为迁移源；当前 `apps/web` 已是 Amplify Web，不再包含可连接 NestJS 的旧 UI。因此当前分支的 **`pnpm run dev`** 或 `build + start/preview` 都不是完整回退方案。
+
+完整旧系统回退必须从经复审的迁移前 commit/tag/recovery ref 建立独立 checkout，并同时恢复与该版本匹配的 `dev.db`、uploads、环境变量和旧运行环境，再按该 ref 自带的说明启动旧 UI + API。Gate B 后这些恢复资产只读保留；Gate C 前不得删除 recovery ref、旧代码、数据库或 uploads 备份，也不得在唯一真实副本上运行 `db:push` 或覆盖恢复。
 
 对应运行说明见根 **[README.md](./README.md)**，版本变更见 **[CHANGELOG.md](./CHANGELOG.md)**。
 

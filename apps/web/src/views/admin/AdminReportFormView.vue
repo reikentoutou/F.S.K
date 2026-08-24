@@ -261,18 +261,8 @@ const personName = computed(
 const preview = useDailyReportPreview(form, registerFloatAmount);
 
 async function loadSettingValue(): Promise<number> {
-  try {
-    const setting = await ownerMasterDataRepository.getSetting('default');
-    return setting.registerFloatAmount;
-  } catch (error: unknown) {
-    if (
-      error instanceof DataRepositoryError &&
-      error.code === 'DATA_NOT_FOUND'
-    ) {
-      return 0;
-    }
-    throw error;
-  }
+  const setting = await ownerMasterDataRepository.getSetting('default');
+  return setting.registerFloatAmount;
 }
 
 async function readPageData(

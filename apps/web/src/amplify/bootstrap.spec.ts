@@ -12,16 +12,31 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
+function validOutputs(): Record<string, unknown> {
+  return {
+    version: '1.4',
+    auth: {
+      aws_region: 'ap-northeast-1',
+      user_pool_id: 'ap-northeast-1_example',
+      user_pool_client_id: 'client-id',
+      identity_pool_id: 'ap-northeast-1:identity-pool-id',
+    },
+    data: {
+      aws_region: 'ap-northeast-1',
+      url: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+      default_authorization_type: 'AMAZON_COGNITO_USER_POOLS',
+      model_introspection: { version: 1 },
+    },
+    storage: {
+      aws_region: 'ap-northeast-1',
+      bucket_name: 'fsk-production-storage',
+    },
+  };
+}
+
 describe('bootstrapAmplifyApp', () => {
   it('configures Amplify exactly once before mounting the Vue application', async () => {
-    const outputs = {
-      version: '1.4',
-      auth: {
-        aws_region: 'ap-northeast-1',
-        user_pool_id: 'ap-northeast-1_example',
-        user_pool_client_id: 'client-id',
-      },
-    };
+    const outputs = validOutputs();
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(outputs));
     const configure = vi.fn();
     const mount = vi.fn();
@@ -121,49 +136,69 @@ describe('bootstrapAmplifyApp', () => {
   });
 
   it.each([
-    ['aws_region', { user_pool_id: 'pool-id', user_pool_client_id: 'client-id' }],
-    ['user_pool_id', { aws_region: 'ap-northeast-1', user_pool_client_id: 'client-id' }],
-    ['user_pool_client_id', { aws_region: 'ap-northeast-1', user_pool_id: 'pool-id' }],
+    ['aws_region', 'auth', 'aws_region', undefined],
+    ['user_pool_id', 'auth', 'user_pool_id', undefined],
+    ['user_pool_client_id', 'auth', 'user_pool_client_id', undefined],
+    ['identity_pool_id', 'auth', 'identity_pool_id', undefined],
+    ['data aws_region', 'data', 'aws_region', undefined],
+    ['data url', 'data', 'url', undefined],
+    [
+      'data default_authorization_type',
+      'data',
+      'default_authorization_type',
+      undefined,
+    ],
+    ['data model_introspection', 'data', 'model_introspection', undefined],
+    ['storage aws_region', 'storage', 'aws_region', undefined],
+    ['storage bucket_name', 'storage', 'bucket_name', undefined],
     [
       'blank aws_region',
-      {
-        aws_region: '   ',
-        user_pool_id: 'pool-id',
-        user_pool_client_id: 'client-id',
-      },
+      'auth',
+      'aws_region',
+      '   ',
     ],
-  ])('rejects outputs with missing or blank %s', async (_field, auth) => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse({ version: '1.4', auth }),
-    );
-    const configure = vi.fn();
-    const mount = vi.fn();
-    const showConfigurationError = vi.fn();
+    ['blank data url', 'data', 'url', '   '],
+    ['blank storage bucket_name', 'storage', 'bucket_name', '   '],
+    [
+      'unsupported data default_authorization_type',
+      'data',
+      'default_authorization_type',
+      'API_KEY',
+    ],
+    ['empty data model_introspection', 'data', 'model_introspection', {}],
+    ['array data model_introspection', 'data', 'model_introspection', []],
+  ] as const)(
+    'rejects outputs with missing or invalid %s',
+    async (_field, section, key, replacement) => {
+      const outputs = validOutputs();
+      const record = outputs[section] as Record<string, unknown>;
+      if (replacement === undefined) delete record[key];
+      else record[key] = replacement;
+      const fetchImpl = vi.fn().mockResolvedValue(
+        jsonResponse(outputs),
+      );
+      const configure = vi.fn();
+      const mount = vi.fn();
+      const showConfigurationError = vi.fn();
 
-    const started = await bootstrapAmplifyApp({
-      fetchImpl,
-      configure,
-      mount,
-      showConfigurationError,
-    });
+      const started = await bootstrapAmplifyApp({
+        fetchImpl,
+        configure,
+        mount,
+        showConfigurationError,
+      });
 
-    expect(started).toBe(false);
-    expect(configure).not.toHaveBeenCalled();
-    expect(mount).not.toHaveBeenCalled();
-    expect(showConfigurationError.mock.calls[0]?.[0]).toMatchObject({
-      code: 'OUTPUTS_INVALID',
-    });
-  });
+      expect(started).toBe(false);
+      expect(configure).not.toHaveBeenCalled();
+      expect(mount).not.toHaveBeenCalled();
+      expect(showConfigurationError.mock.calls[0]?.[0]).toMatchObject({
+        code: 'OUTPUTS_INVALID',
+      });
+    },
+  );
 
   it('can retry after a configuration failure and only mounts after configuration succeeds', async () => {
-    const outputs = {
-      version: '1.4',
-      auth: {
-        aws_region: 'ap-northeast-1',
-        user_pool_id: 'ap-northeast-1_example',
-        user_pool_client_id: 'client-id',
-      },
-    };
+    const outputs = validOutputs();
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(new Response('', { status: 404 }))

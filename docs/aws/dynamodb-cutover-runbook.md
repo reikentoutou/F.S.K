@@ -77,7 +77,26 @@ FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGI
 pnpm run migration:dry-run --sqlite "$FSK_SQLITE_SNAPSHOT" --uploads "$FSK_UPLOADS_SNAPSHOT" --out "$FSK_MIGRATION_OUTPUT_DIR"
 test -s "$FSK_MIGRATION_OUTPUT_DIR/migration-report.json"
 test "$(shasum -a 256 "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" | awk '{print $1}')" = "$FSK_EXPECTED_BUNDLE_SHA256"
-pnpm run migration:import --apply --approval-id "$FSK_GATE_B_APPROVAL_ID" --bundle "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" --uploads-root "$FSK_UPLOADS_SNAPSHOT" --checkpoint "$FSK_MIGRATION_OUTPUT_DIR/import-checkpoint.json" --target-config "$FSK_TARGET_CONFIG"
+FSK_FIRST_IMPORT_RESULT="$FSK_MIGRATION_OUTPUT_DIR/import-result-first.json"
+FSK_SECOND_IMPORT_RESULT="$FSK_MIGRATION_OUTPUT_DIR/import-result-second.json"
+umask 077
+pnpm --silent run migration:import --apply --approval-id "$FSK_GATE_B_APPROVAL_ID" --bundle "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" --uploads-root "$FSK_UPLOADS_SNAPSHOT" --checkpoint "$FSK_MIGRATION_OUTPUT_DIR/import-checkpoint.json" --target-config "$FSK_TARGET_CONFIG" > "$FSK_FIRST_IMPORT_RESULT"
+pnpm --silent run migration:import --apply --approval-id "$FSK_GATE_B_APPROVAL_ID" --bundle "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" --uploads-root "$FSK_UPLOADS_SNAPSHOT" --checkpoint "$FSK_MIGRATION_OUTPUT_DIR/import-checkpoint.json" --target-config "$FSK_TARGET_CONFIG" > "$FSK_SECOND_IMPORT_RESULT"
+node - "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" "$FSK_SECOND_IMPORT_RESULT" <<'NODE'
+const fs = require('node:fs');
+const [bundlePath, resultPath] = process.argv.slice(2);
+const bundle = JSON.parse(fs.readFileSync(bundlePath, 'utf8'));
+const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+const expectedRecords = bundle.shifts.length + bundle.responsiblePersons.length + 1 + bundle.dailyReports.length;
+const expectedAttachments = bundle.attachments.length;
+if (
+  result.status !== 'complete' ||
+  result.created?.records !== 0 ||
+  result.created?.attachments !== 0 ||
+  result.unchanged?.records !== expectedRecords ||
+  result.unchanged?.attachments !== expectedAttachments
+) process.exit(1);
+NODE
 pnpm run migration:verify --verify --bundle "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" --target-config "$FSK_TARGET_CONFIG"
 ```
 

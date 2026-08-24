@@ -35,16 +35,42 @@ function isOutputs(value: unknown): value is Record<string, unknown> {
     return false;
   }
   const authOutputs = auth as Record<string, unknown>;
-  const requiredAuthFields = [
+  const data = outputs.data;
+  const storage = outputs.storage;
+  if (
+    data === null ||
+    typeof data !== 'object' ||
+    Array.isArray(data) ||
+    storage === null ||
+    typeof storage !== 'object' ||
+    Array.isArray(storage)
+  ) {
+    return false;
+  }
+  const dataOutputs = data as Record<string, unknown>;
+  const storageOutputs = storage as Record<string, unknown>;
+  const requiredTextFields = [
     authOutputs.aws_region,
     authOutputs.user_pool_id,
     authOutputs.user_pool_client_id,
+    authOutputs.identity_pool_id,
+    dataOutputs.aws_region,
+    dataOutputs.url,
+    storageOutputs.aws_region,
+    storageOutputs.bucket_name,
   ];
+  const modelIntrospection = dataOutputs.model_introspection;
   return (
     typeof outputs.version === 'string' &&
-    requiredAuthFields.every(
+    requiredTextFields.every(
       (field) => typeof field === 'string' && field.trim().length > 0,
-    )
+    ) &&
+    dataOutputs.default_authorization_type ===
+      'AMAZON_COGNITO_USER_POOLS' &&
+    modelIntrospection !== null &&
+    typeof modelIntrospection === 'object' &&
+    !Array.isArray(modelIntrospection) &&
+    Object.keys(modelIntrospection).length > 0
   );
 }
 

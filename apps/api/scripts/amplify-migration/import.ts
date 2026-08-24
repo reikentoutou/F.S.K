@@ -627,7 +627,8 @@ export async function importMigrationBundle(input: {
   ) {
     throw new Error('IMPORT_CHECKPOINT_INPUT_MISMATCH');
   }
-  const completedStages = previous?.completedStages ?? [];
+  const completedStages =
+    previous?.status === 'complete' ? [] : (previous?.completedStages ?? []);
   const checkpoint: ImportCheckpoint = {
     version: 1,
     bundleSha256: expectedBundleHash,

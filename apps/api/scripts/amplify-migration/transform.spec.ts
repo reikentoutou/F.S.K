@@ -1498,19 +1498,30 @@ describe('dry-run CLI', () => {
     expect(result.stderr).toContain('MIGRATION_OUTPUT_INSIDE_REPOSITORY');
   });
 
-  it('rejects output in the primary checkout that contains this linked worktree', () => {
-    const primaryCheckout = resolve(repositoryRoot, '..', '..');
-    const result = runCli([
-      '--sqlite',
-      join(primaryCheckout, 'missing-fixture.sqlite'),
-      '--uploads',
-      join(primaryCheckout, 'missing-uploads'),
-      '--out',
-      join(primaryCheckout, 'forbidden-migration-output'),
-    ]);
+  it('rejects output in a synthetic primary checkout containing a linked worktree', async () => {
+    const fixture = createFixture();
+    const primaryCheckout = temporaryRoot();
+    const linkedCheckout = join(primaryCheckout, '.worktrees', 'linked');
+    mkdirSync(join(primaryCheckout, '.git'));
+    mkdirSync(linkedCheckout, { recursive: true });
+    writeFileSync(
+      join(linkedCheckout, '.git'),
+      'gitdir: ../../.git/worktrees/linked\n',
+    );
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('MIGRATION_OUTPUT_INSIDE_REPOSITORY');
+    await expect(
+      runDryRunCli(
+        [
+          '--sqlite',
+          fixture.sqlitePath,
+          '--uploads',
+          fixture.uploadsPath,
+          '--out',
+          join(primaryCheckout, 'forbidden-migration-output'),
+        ],
+        linkedCheckout,
+      ),
+    ).rejects.toThrow('MIGRATION_OUTPUT_INSIDE_REPOSITORY');
   });
 
   it.each([
