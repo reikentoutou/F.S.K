@@ -1354,7 +1354,7 @@ fsk_control_run_migration() {
 
 1. control 安装 EXIT/HUP/INT/TERM trap，证明初始残留为 0，再创建临时参数和网络；任何 response loss 走 full-tuple recovery。
 2. control 启动 watchdog 后保持 tab 打开；记录 watchdog PID、operation/cleanup deadline 和 CleanupOwner timer。
-3. 创建 exact VPC worker environment；worker detached checkout exact foundation commit，安装 trap，再安装依赖。
+3. 创建 exact VPC worker environment；worker detached checkout exact approved migration source commit，安装 trap，再安装依赖。
 4. worker 第一次执行 migration，必须得到 `MIGRATIONS_APPLIED count=1`；第二次必须得到 `count=0`；verify 必须得到 `SCHEMA_VERIFIED`。
 5. worker 清除 `DATABASE_URL`、发布 READY，操作者删除 exact worker environment；失败、timeout 或 tab 丢失由 status/deadline 触发 control cleanup。
 6. control 反复 discovery → delete → discovery；每个 AWS 调用都受单命令上限和 cleanup 剩余时间共同约束。应用 route table 必须属于 exact VPC，且默认路由当前 target 必须等于唯一 full-tuple-owned NAT 才允许删除；缺失或 foreign target 保持不动并进入 `CLEANUP_BLOCKED`。任何一次 mutation/discovery 失败都会留下 sticky failure evidence；后续 retry 仍可清除资源，但本 operation 永远不得转为 PASS。

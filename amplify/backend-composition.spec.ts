@@ -726,8 +726,12 @@ describe('staging migration runbook executable contracts', () => {
         '-c',
         `set -euo pipefail
 git() {
-  test "$1" = ls-remote
-  printf '%s\trefs/fixed\n' "$FSK_MIGRATION_SOURCE_COMMIT"
+  case "$*" in
+    'ls-remote --tags https://github.com/reikentoutou/F.S.K.git refs/tags/fsk-staging-data-api-migration-v2^{}'|'ls-remote --heads https://github.com/reikentoutou/F.S.K.git refs/heads/staging')
+      printf '%s\trefs/fixed\n' "$FSK_MIGRATION_SOURCE_COMMIT"
+      ;;
+    *) return 91 ;;
+  esac
 }
 unset FSK_FOUNDATION_COMMIT FSK_FOUNDATION_TAG
 ${sourceGate}
@@ -760,8 +764,7 @@ printf '%s/%s' "$FSK_MIGRATION_SOURCE_COMMIT" "$FSK_MIGRATION_SOURCE_TAG"
         '-c',
         `set -euo pipefail
 git() {
-  test "$1" = ls-remote
-  printf '%s\trefs/fixed\n' "$FSK_MIGRATION_SOURCE_COMMIT"
+  return 91
 }
 unset FSK_MIGRATION_SOURCE_TAG
 ${sourceGate}
@@ -797,7 +800,7 @@ ${sourceGate}
     const script = `set -euo pipefail
 git() {
   case "$*" in
-    'rev-parse HEAD') printf '%s\\n' "$FSK_FOUNDATION_COMMIT" ;;
+    'rev-parse HEAD') printf '%s\\n' "$FSK_MIGRATION_SOURCE_COMMIT" ;;
     'status --short') : ;;
     *) return 91 ;;
   esac
@@ -825,7 +828,6 @@ fsk_worker_exit() { exit "$1"; }
 ${prepareTrust}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_run')}
 FSK_MIGRATION_SHELL_ROLE=worker
-FSK_FOUNDATION_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
 FSK_MIGRATION_SOURCE_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
 FSK_RDS_CA_IDENTIFIER=rds-ca-rsa2048-g1
 FSK_RDS_CA_BUNDLE_PATH="$FSK_EXPECTED_CA_PATH"
@@ -900,7 +902,6 @@ fsk_worker_exit() { exit "$1"; }
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_prepare_rds_ca_trust')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_run')}
 FSK_MIGRATION_SHELL_ROLE=worker
-FSK_FOUNDATION_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
 FSK_MIGRATION_SOURCE_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
 FSK_RDS_CA_IDENTIFIER="$FSK_TEST_CA_IDENTIFIER"
 FSK_RDS_CA_BUNDLE_PATH="$FSK_TEST_CA_PATH"
