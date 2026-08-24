@@ -115,7 +115,14 @@ export async function loadOwnerAnalytics(
 
 <script setup lang="ts">
 import { ElMessage } from 'element-plus';
-import { computed, nextTick, shallowRef, useTemplateRef, watch } from 'vue';
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  shallowRef,
+  useTemplateRef,
+  watch,
+} from 'vue';
 
 import { actualSalesBarData } from '@/analytics/report-analytics';
 import { useEchartsBarChart } from '@/composables/useEchartsBarChart';
@@ -131,6 +138,12 @@ const range = shallowRef<{ start: string; end: string } | null>(null);
 const analytics = shallowRef<ReportAnalytics | null>(null);
 const loadedSelection = shallowRef<LoadedAnalyticsSelection | null>(null);
 let loadGeneration = 0;
+let disposed = false;
+
+onBeforeUnmount(() => {
+  disposed = true;
+  loadGeneration += 1;
+});
 
 const chartEl = useTemplateRef<HTMLDivElement>('chartEl');
 const { setBarData } = useEchartsBarChart(chartEl);
@@ -165,6 +178,7 @@ function renderChart(value: ReportAnalytics): void {
 
 async function load(): Promise<void> {
   const generation = ++loadGeneration;
+  const isCurrent = () => !disposed && generation === loadGeneration;
   const requestedPeriod = period.value;
   const requestedAnchorDate = anchorDate.value;
   loadedSelection.value = null;
@@ -179,9 +193,9 @@ async function load(): Promise<void> {
         ) as Promise<Array<AnalyticsReport | null>>,
       getSetting: (id) => ownerMasterDataRepository.getSetting(id),
       listShifts: () => ownerMasterDataRepository.listShifts(),
-      isCurrent: () => generation === loadGeneration,
+      isCurrent,
     });
-    if (generation !== loadGeneration) return;
+    if (!isCurrent()) return;
     range.value = loaded.range;
     analytics.value = loaded.analytics;
     loadedSelection.value = {
@@ -189,15 +203,15 @@ async function load(): Promise<void> {
       range: loaded.range,
     };
     await nextTick();
-    if (generation === loadGeneration) renderChart(loaded.analytics);
+    if (isCurrent()) renderChart(loaded.analytics);
   } catch (error: unknown) {
-    if (generation !== loadGeneration) return;
+    if (!isCurrent()) return;
     range.value = null;
     analytics.value = null;
     loadedSelection.value = null;
     ElMessage.error(ownerAnalyticsErrorMessage(error));
   } finally {
-    if (generation === loadGeneration) loading.value = false;
+    if (isCurrent()) loading.value = false;
   }
 }
 

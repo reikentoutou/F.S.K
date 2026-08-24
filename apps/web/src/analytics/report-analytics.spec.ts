@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { createApp, defineComponent, h, nextTick } from 'vue';
+import { createApp, defineComponent, h, nextTick, type App } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -25,6 +25,14 @@ const downloadMocks = vi.hoisted(() => ({
   downloadCsvFile: vi.fn(),
 }));
 
+const chartMocks = vi.hoisted(() => ({
+  setBarData: vi.fn(),
+}));
+
+const messageMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+}));
+
 vi.mock('@/data/daily-reports', () => ({
   dailyReportsRepository: {
     listByBusinessDate: repositoryMocks.listByBusinessDate,
@@ -40,12 +48,14 @@ vi.mock('@/data/master-data', () => ({
 
 vi.mock('@/composables/useEchartsBarChart', () => ({
   useEchartsBarChart: () => ({
-    setBarData: vi.fn(),
+    setBarData: chartMocks.setBarData,
     resize: vi.fn(),
   }),
 }));
 
 vi.mock('@/export/report-csv', () => downloadMocks);
+
+vi.mock('element-plus', () => ({ ElMessage: messageMocks }));
 
 interface AnalyticsLoader {
   loadOwnerAnalytics(options: {
@@ -99,6 +109,8 @@ const ButtonStub = defineComponent({
   },
 });
 
+let nextPeriod: 'day' | 'week' | 'month' | 'quarter' | 'year' = 'day';
+
 const PeriodSelectStub = defineComponent({
   emits: ['update:modelValue'],
   setup(_props, { emit }) {
@@ -107,14 +119,17 @@ const PeriodSelectStub = defineComponent({
         'button',
         {
           'data-testid': 'period-change',
-          onClick: () => emit('update:modelValue', 'day'),
+          onClick: () => emit('update:modelValue', nextPeriod),
         },
         '期間変更',
       );
   },
 });
 
-async function renderAnalyticsView(): Promise<HTMLElement> {
+async function mountAnalyticsView(): Promise<{
+  app: App;
+  root: HTMLElement;
+}> {
   const root = document.createElement('div');
   const app = createApp(analyticsView.default);
   for (const name of [
@@ -134,7 +149,11 @@ async function renderAnalyticsView(): Promise<HTMLElement> {
   app.mount(root);
   await new Promise((resolve) => setTimeout(resolve, 0));
   await nextTick();
-  return root;
+  return { app, root };
+}
+
+async function renderAnalyticsView(): Promise<HTMLElement> {
+  return (await mountAnalyticsView()).root;
 }
 
 function report(
@@ -378,6 +397,7 @@ describe('Tokyo period boundaries', () => {
 describe('OWNER analytics page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    nextPeriod = 'day';
     repositoryMocks.getSetting.mockResolvedValue({
       registerFloatAmount: 5_000,
     });
@@ -598,6 +618,52 @@ describe('OWNER analytics page', () => {
       message: 'ANALYTICS_LOAD_ABORTED',
     });
     expect(listByBusinessDate).not.toHaveBeenCalled();
+  });
+
+  it('stops the production year load after unmount without starting another batch or writing UI', async () => {
+    repositoryMocks.listByBusinessDate.mockResolvedValue([]);
+    const { app, root } = await mountAnalyticsView();
+    repositoryMocks.listByBusinessDate.mockClear();
+    chartMocks.setBarData.mockClear();
+    messageMocks.error.mockClear();
+    nextPeriod = 'year';
+    let releaseFirstBatch!: (rows: AnalyticsReport[]) => void;
+    const firstBatch = new Promise<AnalyticsReport[]>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+    repositoryMocks.listByBusinessDate.mockImplementation(() => firstBatch);
+
+    root.querySelector<HTMLButtonElement>('[data-testid="period-change"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(repositoryMocks.listByBusinessDate).toHaveBeenCalledTimes(10);
+
+    app.unmount();
+    releaseFirstBatch([]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(repositoryMocks.listByBusinessDate).toHaveBeenCalledTimes(10);
+    expect(chartMocks.setBarData).not.toHaveBeenCalled();
+    expect(messageMocks.error).not.toHaveBeenCalled();
+    expect(root.textContent).toBe('');
+  });
+
+  it('does not show a repository error that arrives after the production view unmounts', async () => {
+    repositoryMocks.listByBusinessDate.mockResolvedValue([]);
+    const { app, root } = await mountAnalyticsView();
+    messageMocks.error.mockClear();
+    let rejectRead!: (error: unknown) => void;
+    const pendingRead = new Promise<AnalyticsReport[]>((_resolve, reject) => {
+      rejectRead = reject;
+    });
+    repositoryMocks.listByBusinessDate.mockImplementation(() => pendingRead);
+
+    root.querySelector<HTMLButtonElement>('[data-testid="period-change"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    app.unmount();
+    rejectRead(new DataRepositoryError('DATA_NETWORK_ERROR'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(messageMocks.error).not.toHaveBeenCalled();
   });
 
   it.each([
