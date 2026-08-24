@@ -390,29 +390,84 @@ describe('active DynamoDB backend composition', () => {
     process.stdout.write(${JSON.stringify(marker)} + JSON.stringify({ hasBackend: false }) + '\\n');
     return;
   }
-  const { Template } = await import('aws-cdk-lib/assertions');
-  active.backend.stack.node.root.synth({ errorOnDuplicateSynth: false });
-  const templates = [
-    Template.fromStack(active.backend.stack).toJSON(),
-    Template.fromStack(active.backend.auth.stack).toJSON(),
-    Template.fromStack(active.backend.data.stack).toJSON(),
-    Template.fromStack(active.backend.storage.stack).toJSON(),
-    ...Object.values(active.backend.data.resources.nestedStacks).map((stack) =>
-      Template.fromStack(stack).toJSON(),
-    ),
-  ];
-  const resources = templates.flatMap((template) => Object.values(template.Resources ?? {}));
-  const resourceTypes = resources.map((resource) => resource.Type);
-  const [api] = resources.filter((resource) => resource.Type === 'AWS::AppSync::GraphQLApi');
-  const [identityPool] = resources.filter((resource) => resource.Type === 'AWS::Cognito::IdentityPool');
+  const { readFileSync, readdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const assembly = active.backend.stack.node.root.synth({ errorOnDuplicateSynth: false });
+  const emittedTemplatePaths = [...new Set([
+    ...readdirSync(assembly.directory, { recursive: true })
+      .map(String)
+      .filter((path) => path.endsWith('.template.json'))
+      .map((path) => join(assembly.directory, path)),
+    ...assembly.stacksRecursively.map((stack) => stack.templateFullPath),
+  ])].sort();
+  const templates = emittedTemplatePaths.map((path) => ({
+    path,
+    template: JSON.parse(readFileSync(path, 'utf8')),
+  }));
+  const resources = templates.flatMap(({ path, template }) =>
+    Object.entries(template.Resources ?? {}).map(([logicalId, resource]) => ({
+      logicalId,
+      path,
+      resource,
+    })),
+  );
+  const resourceTypes = resources.map(({ resource }) => resource.Type);
+  const [api] = resources
+    .map(({ resource }) => resource)
+    .filter((resource) => resource.Type === 'AWS::AppSync::GraphQLApi');
+  const [identityPool] = resources
+    .map(({ resource }) => resource)
+    .filter((resource) => resource.Type === 'AWS::Cognito::IdentityPool');
   const dynamoTableTypes = resourceTypes.filter(
     (type) => type === 'AWS::DynamoDB::Table' || type === 'Custom::AmplifyDynamoDBTable',
   );
-  const lambdaEvidence = JSON.stringify(
-    resources.filter((resource) => resource.Type === 'AWS::Lambda::Function'),
-  ).toLowerCase();
+  const lambdaInventory = resources
+    .filter(({ resource }) => resource.Type === 'AWS::Lambda::Function')
+    .map(({ logicalId, resource }) => ({
+      logicalId: logicalId.replace(/[A-F0-9]{8}$/, ''),
+      handler: resource.Properties?.Handler,
+      runtime: resource.Properties?.Runtime,
+    }))
+    .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  const environmentVariableNames = resources
+    .filter(({ resource }) => resource.Type === 'AWS::Lambda::Function')
+    .flatMap(({ resource }) =>
+      Object.keys(resource.Properties?.Environment?.Variables ?? {}),
+    )
+    .sort();
+  const actions = [];
+  const servicePrincipals = [];
+  const collectCapabilities = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(collectCapabilities);
+      return;
+    }
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+    for (const [key, nested] of Object.entries(value)) {
+      if (key === 'Action') {
+        actions.push(...(Array.isArray(nested) ? nested : [nested]).filter((item) => typeof item === 'string'));
+      }
+      if (key === 'Service') {
+        servicePrincipals.push(...(Array.isArray(nested) ? nested : [nested]).filter((item) => typeof item === 'string'));
+      }
+      collectCapabilities(nested);
+    }
+  };
+  templates.forEach(({ template }) => collectCapabilities(template));
+  const forbiddenActionPrefixes = ['ec2:', 'rds:', 'rds-data:', 'secretsmanager:'];
+  const forbiddenServicePrincipals = [
+    'ec2.amazonaws.com',
+    'rds.amazonaws.com',
+    'secretsmanager.amazonaws.com',
+  ];
   process.stdout.write(${JSON.stringify(marker)} + JSON.stringify({
     hasBackend: true,
+    stackArtifactIds: assembly.stacksRecursively.map((stack) => stack.id).sort(),
+    stackNames: assembly.stacksRecursively.map((stack) => stack.stackName).sort(),
+    templateCount: templates.length,
+    nestedStackCount: resourceTypes.filter((type) => type === 'AWS::CloudFormation::Stack').length,
     appSyncCount: resourceTypes.filter((type) => type === 'AWS::AppSync::GraphQLApi').length,
     tableCount: dynamoTableTypes.length,
     dynamoTableTypes,
@@ -421,9 +476,20 @@ describe('active DynamoDB backend composition', () => {
     allowUnauthenticatedIdentities: identityPool?.Properties?.AllowUnauthenticatedIdentities,
     ec2Types: resourceTypes.filter((type) => type.startsWith('AWS::EC2::')),
     rdsTypes: resourceTypes.filter((type) => type.startsWith('AWS::RDS::')),
-    secretCount: resourceTypes.filter((type) => type === 'AWS::SecretsManager::Secret').length,
-    hasRdsData: JSON.stringify(templates).toLowerCase().includes('rds-data'),
-    hasPostgresFunction: lambdaEvidence.includes('postgres'),
+    secretTypes: resourceTypes.filter((type) =>
+      type.startsWith('AWS::SecretsManager::'),
+    ),
+    lambdaInventory,
+    environmentVariableNames,
+    forbiddenActions: [...new Set(actions.filter((action) =>
+      forbiddenActionPrefixes.some((prefix) => action.toLowerCase().startsWith(prefix)),
+    ))].sort(),
+    forbiddenServicePrincipals: [...new Set(servicePrincipals.filter((principal) =>
+      forbiddenServicePrincipals.includes(principal.toLowerCase()),
+    ))].sort(),
+    forbiddenEnvironmentVariables: environmentVariableNames.filter((name) =>
+      /^(?:DATABASE_URL|DB_|PG|POSTGRES|RDS|SECRET)/i.test(name),
+    ),
   }) + '\\n');
 })().catch((error) => {
   console.error(error);
@@ -451,6 +517,10 @@ describe('active DynamoDB backend composition', () => {
     expect(evidenceLine, result.stdout).toBeDefined();
     expect(JSON.parse(evidenceLine?.slice(marker.length) ?? '{}')).toEqual({
       hasBackend: true,
+      stackArtifactIds: ['amplify-testappid-production-branch-bd754b1915'],
+      stackNames: ['amplify-testappid-production-branch-bd754b1915'],
+      templateCount: 9,
+      nestedStackCount: 8,
       appSyncCount: 1,
       tableCount: 4,
       dynamoTableTypes: [
@@ -466,9 +536,48 @@ describe('active DynamoDB backend composition', () => {
       allowUnauthenticatedIdentities: false,
       ec2Types: [],
       rdsTypes: [],
-      secretCount: 0,
-      hasRdsData: false,
-      hasPostgresFunction: false,
+      secretTypes: [],
+      lambdaInventory: [
+        {
+          logicalId: 'AmplifyBranchLinkerCustomResourceLambda',
+          handler: 'index.handler',
+          runtime: 'nodejs22.x',
+        },
+        {
+          logicalId: 'AmplifyBranchLinkerCustomResourceProviderframeworkonEvent',
+          handler: 'framework.onEvent',
+          runtime: 'nodejs24.x',
+        },
+        {
+          logicalId:
+            'CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C1536MiB',
+          handler: 'index.handler',
+          runtime: 'python3.13',
+        },
+        {
+          logicalId: 'CustomS3AutoDeleteObjectsCustomResourceProviderHandler',
+          handler: 'index.handler',
+          runtime: 'nodejs24.x',
+        },
+        {
+          logicalId: 'TableManagerCustomProviderframeworkisComplete',
+          handler: 'amplify-table-manager-handler.isComplete',
+          runtime: 'nodejs24.x',
+        },
+        {
+          logicalId: 'TableManagerCustomProviderframeworkonEvent',
+          handler: 'amplify-table-manager-handler.onEvent',
+          runtime: 'nodejs24.x',
+        },
+      ],
+      environmentVariableNames: [
+        'AWS_CA_BUNDLE',
+        'USER_ON_EVENT_FUNCTION_ARN',
+        'WAITER_STATE_MACHINE_ARN',
+      ],
+      forbiddenActions: [],
+      forbiddenServicePrincipals: [],
+      forbiddenEnvironmentVariables: [],
     });
   });
 });
