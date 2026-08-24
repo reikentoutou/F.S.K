@@ -362,19 +362,23 @@ function gateEnvironment(root: string, bin: string): NodeJS.ProcessEnv {
   const serviceRoleArn = 'arn:aws:iam::444083008754:role/service-role/FSKAmplifyGen2ServiceRole';
   const serviceRoleEvidencePath = join(root, 'service-role-policy-evidence.json');
   writeFileSync(serviceRoleEvidencePath, `${JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     roleArn: serviceRoleArn,
     accountId: '444083008754',
     region: 'ap-northeast-1',
     project: 'FSK',
     trustPrincipal: 'amplify.amazonaws.com',
-    resourceScope: 'FSK_ONLY',
-    gameListAccess: 'DENY',
+    trustSourceAccount: '444083008754',
+    trustSourceArn: 'arn:aws:amplify:ap-northeast-1:444083008754:apps/d1234567890abc/branches/fsk-release',
+    permissionModel: 'AWS_MANAGED_ADMINISTRATOR_ACCESS_AMPLIFY',
+    attachedPolicyArn: 'arn:aws:iam::aws:policy/AdministratorAccess-Amplify',
+    resourcePermissions: 'BROAD_AWS_MANAGED_POLICY',
+    otherAmplifyAppsCanAssume: false,
     policyDocumentsSha256: 'a'.repeat(64),
-    leastPrivilegeReview: {
+    broadPolicyRiskAcceptance: {
       approved: true,
-      reviewer: 'security-owner',
-      reviewedAt: '2026-08-25T00:00:00.000Z',
+      approver: 'security-owner',
+      approvedAt: '2026-08-25T00:00:00.000Z',
     },
   }, null, 2)}\n`);
   return {
@@ -411,6 +415,21 @@ function gateEnvironment(root: string, bin: string): NodeJS.ProcessEnv {
     AWS_COMMIT_ID: commit,
     AWS_REGION: 'ap-northeast-1',
     AWS_DEFAULT_REGION: 'ap-northeast-1',
+  };
+}
+
+function mutateServiceRoleEvidence(
+  environment: NodeJS.ProcessEnv,
+  mutate: (evidence: Record<string, unknown>) => void,
+): NodeJS.ProcessEnv {
+  const evidencePath = environment.FSK_AMPLIFY_SERVICE_ROLE_POLICY_EVIDENCE;
+  if (!evidencePath) throw new Error('SERVICE_ROLE_EVIDENCE_PATH_REQUIRED');
+  const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as Record<string, unknown>;
+  mutate(evidence);
+  writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+  return {
+    ...environment,
+    FSK_AMPLIFY_SERVICE_ROLE_POLICY_EVIDENCE_SHA256: sha256(evidencePath),
   };
 }
 
@@ -910,6 +929,33 @@ describe('DynamoDB Hosting deployment contract', () => {
       cwd: repoRoot,
       encoding: 'utf8',
       env: { ...gateEnvironment(root, bin), ...extraEnvironment },
+      timeout: 30_000,
+    });
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(log, 'utf8')).not.toMatch(
+      /amplify (?:create-branch|update-branch|update-app|start-job)|git push |curl /,
+    );
+  });
+
+  it.each([
+    ['an old FSK App trust source', (evidence: Record<string, unknown>) => {
+      evidence.trustSourceArn = 'arn:aws:amplify:ap-northeast-1:444083008754:apps/d2ztmb4nlq3clr/branches/staging';
+    }],
+    ['a GameList App trust source', (evidence: Record<string, unknown>) => {
+      evidence.trustSourceArn = 'arn:aws:amplify:ap-northeast-1:444083008754:apps/dxj0lyv8i48bf/branches/main';
+    }],
+    ['a hidden broad-policy fact', (evidence: Record<string, unknown>) => {
+      evidence.resourcePermissions = 'FSK_ONLY';
+    }],
+  ])('rejects service-role evidence with %s', (_name, mutate) => {
+    const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');
+    const root = temporaryRoot('fsk-task12-gate-a-role-evidence-negative-');
+    const { bin, log } = createFakeCommandBin(root);
+    const environment = mutateServiceRoleEvidence(gateEnvironment(root, bin), mutate);
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: environment,
       timeout: 30_000,
     });
     expect(result.status).not.toBe(0);

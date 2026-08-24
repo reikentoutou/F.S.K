@@ -379,6 +379,28 @@ exit "$status"
 };
 
 describe('active DynamoDB backend composition', () => {
+  it('keeps active backend local imports resolvable by the Amplify cloud assembly', () => {
+    const activeBackendFiles = [
+      'amplify/backend.ts',
+      'amplify/auth/resource.ts',
+      'amplify/data/resource.ts',
+      'amplify/storage/resource.ts',
+      'amplify/functions/kitchen-context/resource.ts',
+      'amplify/infrastructure/application-config.ts',
+    ];
+
+    const unresolvedJavaScriptSpecifiers = activeBackendFiles.flatMap(
+      (relativePath) => {
+        const source = readFileSync(join(process.cwd(), relativePath), 'utf8');
+        return [...source.matchAll(/(?:from\s+|import\()\s*['"](\.[^'"]+\.js)['"]/g)].map(
+          ([, specifier]) => `${relativePath}:${specifier}`,
+        );
+      },
+    );
+
+    expect(unresolvedJavaScriptSpecifiers).toEqual([]);
+  });
+
   it('isolates synth from caller CDK_OUTDIR while validating the active DynamoDB composition', () => {
     const backendUrl = pathToFileURL(
       join(process.cwd(), 'amplify/backend.ts'),

@@ -1,6 +1,6 @@
 import { a, defineData, type ClientSchema } from '@aws-amplify/backend';
 
-import { kitchenContext } from '../functions/kitchen-context/resource.js';
+import { kitchenContext } from '../functions/kitchen-context/resource';
 
 const DailyReport = a
   .model({

@@ -39,7 +39,7 @@ Gate A 只允许把经复审的精确 commit 部署到一个独立 FSK Amplify G
 | Hosting branch / domain / job ID | `PENDING_GATE_A` |
 | GameList App/Auth/API/tables/bucket/stacks IDs | `PENDING_GATE_A_READ_ONLY_INVENTORY` |
 
-App 名称必须明确含 FSK 标识且不得等于或包含已登记的 GameList App ID/名称。部署角色只能写入审批元组所列 FSK App；发现 outputs、IAM policy 或 CloudFormation resource 引用 GameList ARN 时立即停止。
+App 名称必须明确含 FSK 标识且不得等于或包含已登记的 GameList App ID/名称。部署角色使用 AWS 官方 `AdministratorAccess-Amplify` 广权限策略；这里的隔离边界是该角色只能由审批元组中新 FSK App 的精确 branch ARN 假设，而不是资源级最小权限。旧 FSK App、GameList App 或其他 branch 均不得假设该角色。发现 outputs 或 CloudFormation resource 引用 GameList ARN 时立即停止。
 
 ## 2. Hosting 构建契约
 
@@ -68,7 +68,7 @@ App 名称必须明确含 FSK 标识且不得等于或包含已登记的 GameLis
 
 只有 Gate A 获得新的明确批准后，才可在干净的 detached exact commit 和目标账号会话中运行。首次连接 repository 所需的 Git provider 授权必须由批准人在 Amplify Console 人工完成。紧邻 Console 的 Create App 确认前必须重新确认批准截止时间仍未到：创建**全新的**名为 `FSK`、静态 Hosting platform=`WEB`（不是 `WEB_COMPUTE`）的 App，选择审批记录中的 exact repository，绑定 `arn:aws:iam::444083008754:role/service-role/FSKAmplifyGen2ServiceRole`，并设置四个 tags。Console 返回的 App ID 必须写入审批记录和 `FSK_AMPLIFY_APP_ID`；脚本不会搜索或猜测 App，也不会复用 GameList。
 
-service role 在创建 App 前单独完成最小权限复审。证据包必须保存完整 `get-role` readback、permissions boundary、inline/attached policy documents；其中的审批摘要 JSON 必须记录这些 policy documents 的聚合 SHA-256、`amplify.amazonaws.com` trust、FSK-only resource/tag scope、GameList deny/no-access 结论、reviewer 和 UTC review time。原始 readback 与 policy document 不得省略，摘要文件自身的 SHA-256 与固定 role ARN 一起写入 Gate A 批准元组。需要 `Resource: "*"` 的不可资源化只读动作必须逐项解释，不能把通配写权限称为“最小权限”。下面脚本只验证经人工批准的摘要契约和 hash，不生成、放宽或猜测 IAM policy。
+service role 在创建 App 前单独完成广权限风险复审。证据包必须保存完整 `get-role` readback、permissions boundary、inline/attached policy documents；其中的审批摘要 JSON 必须记录这些 policy documents 的聚合 SHA-256、`amplify.amazonaws.com` principal、精确 `SourceAccount`、新 FSK App 的精确 branch `SourceArn`、AWS 官方 `AdministratorAccess-Amplify` policy ARN、广权限事实、其他 Amplify App 不可假设的结论、approver 和 UTC approval time。原始 readback 与 policy document 不得省略，摘要文件自身的 SHA-256 与固定 role ARN 一起写入 Gate A 批准元组。该模型只收紧“谁能假设角色”，不把官方策略的通配写权限称为资源级最小权限。下面脚本只验证经人工批准的摘要契约和 hash，不生成、放宽或猜测 IAM policy。
 
 所有变量由审批记录逐字填入；不得写入 shell history、仓库或日志中的凭据。下面脚本随后做 App readback、受控 branch bootstrap、build environment、supported `customRules`、remote CAS、RELEASE job 和 HTTP 验收。任何未知既有 rewrite、App/repository/platform/tag/env 漂移或 job commit 漂移都会在发布验收前停止：
 
@@ -168,11 +168,12 @@ const buffer = fs.readFileSync(process.argv[2]);
 if (createHash('sha256').update(buffer).digest('hex') !== process.env.FSK_AMPLIFY_SERVICE_ROLE_POLICY_EVIDENCE_SHA256) process.exit(1);
 const evidence = JSON.parse(buffer.toString('utf8'));
 const exactKeys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join() === [...expected].sort().join();
-const reviewKeys = ['approved', 'reviewer', 'reviewedAt'];
-const keys = ['schemaVersion', 'roleArn', 'accountId', 'region', 'project', 'trustPrincipal', 'resourceScope', 'gameListAccess', 'policyDocumentsSha256', 'leastPrivilegeReview'];
-const review = evidence.leastPrivilegeReview;
-const reviewedAt = typeof review?.reviewedAt === 'string' ? new Date(review.reviewedAt) : null;
-if (!exactKeys(evidence, keys) || !exactKeys(review, reviewKeys) || evidence.schemaVersion !== 1 || evidence.roleArn !== process.env.FSK_AMPLIFY_SERVICE_ROLE_ARN || evidence.accountId !== process.env.FSK_EXPECTED_AWS_ACCOUNT_ID || evidence.region !== process.env.FSK_EXPECTED_AWS_REGION || evidence.project !== 'FSK' || evidence.trustPrincipal !== 'amplify.amazonaws.com' || evidence.resourceScope !== 'FSK_ONLY' || evidence.gameListAccess !== 'DENY' || !/^[0-9a-f]{64}$/.test(evidence.policyDocumentsSha256) || review.approved !== true || typeof review.reviewer !== 'string' || !review.reviewer || !reviewedAt || Number.isNaN(reviewedAt.valueOf()) || reviewedAt.toISOString() !== review.reviewedAt) process.exit(1);
+const acceptanceKeys = ['approved', 'approver', 'approvedAt'];
+const keys = ['schemaVersion', 'roleArn', 'accountId', 'region', 'project', 'trustPrincipal', 'trustSourceAccount', 'trustSourceArn', 'permissionModel', 'attachedPolicyArn', 'resourcePermissions', 'otherAmplifyAppsCanAssume', 'policyDocumentsSha256', 'broadPolicyRiskAcceptance'];
+const acceptance = evidence.broadPolicyRiskAcceptance;
+const approvedAt = typeof acceptance?.approvedAt === 'string' ? new Date(acceptance.approvedAt) : null;
+const expectedSourceArn = `arn:aws:amplify:${process.env.FSK_EXPECTED_AWS_REGION}:${process.env.FSK_EXPECTED_AWS_ACCOUNT_ID}:apps/${process.env.FSK_AMPLIFY_APP_ID}/branches/${process.env.FSK_AMPLIFY_BRANCH}`;
+if (!exactKeys(evidence, keys) || !exactKeys(acceptance, acceptanceKeys) || evidence.schemaVersion !== 2 || evidence.roleArn !== process.env.FSK_AMPLIFY_SERVICE_ROLE_ARN || evidence.accountId !== process.env.FSK_EXPECTED_AWS_ACCOUNT_ID || evidence.region !== process.env.FSK_EXPECTED_AWS_REGION || evidence.project !== 'FSK' || evidence.trustPrincipal !== 'amplify.amazonaws.com' || evidence.trustSourceAccount !== process.env.FSK_EXPECTED_AWS_ACCOUNT_ID || evidence.trustSourceArn !== expectedSourceArn || evidence.permissionModel !== 'AWS_MANAGED_ADMINISTRATOR_ACCESS_AMPLIFY' || evidence.attachedPolicyArn !== 'arn:aws:iam::aws:policy/AdministratorAccess-Amplify' || evidence.resourcePermissions !== 'BROAD_AWS_MANAGED_POLICY' || evidence.otherAmplifyAppsCanAssume !== false || !/^[0-9a-f]{64}$/.test(evidence.policyDocumentsSha256) || acceptance.approved !== true || typeof acceptance.approver !== 'string' || !acceptance.approver || !approvedAt || Number.isNaN(approvedAt.valueOf()) || approvedAt.toISOString() !== acceptance.approvedAt) process.exit(1);
 NODE
 node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1],JSON.stringify([{source:"</^[^.]+$/>",target:"/index.html",status:"200"}]))' "$FSK_TMP_DIR/custom-rules.json"
 FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_AMPLIFY_APP_NAME="$FSK_AMPLIFY_APP_NAME" FSK_GIT_REMOTE_URL="$FSK_GIT_REMOTE_URL" aws amplify get-app --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" > "$FSK_TMP_DIR/app-before.json"

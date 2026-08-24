@@ -2,15 +2,15 @@ import { defineBackend } from '@aws-amplify/backend';
 import { CfnParameter, Tags } from 'aws-cdk-lib';
 import { Policy, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 
-import { applyProductionAuthOverrides } from './auth/overrides.js';
-import { auth } from './auth/resource.js';
-import { data } from './data/resource.js';
-import { kitchenContext } from './functions/kitchen-context/resource.js';
-import { APPLICATION_TAGS } from './infrastructure/application-config.js';
+import { applyProductionAuthOverrides } from './auth/overrides';
+import { auth } from './auth/resource';
+import { data } from './data/resource';
+import { kitchenContext } from './functions/kitchen-context/resource';
+import { APPLICATION_TAGS } from './infrastructure/application-config';
 import {
   applyProductionStorageBucketOverrides,
   storage,
-} from './storage/resource.js';
+} from './storage/resource';
 
 export const backend = defineBackend({
   auth,
