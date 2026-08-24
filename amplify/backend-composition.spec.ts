@@ -385,37 +385,55 @@ describe('active DynamoDB backend composition', () => {
     ).href;
     const marker = 'ACTIVE_BACKEND_SYNTH=';
     const script = `(async () => {
-  const { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const { isAbsolute, join, relative, resolve, sep } = await import('node:path');
+  const { existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } = await import('node:fs');
+  const { isAbsolute, join, relative, sep } = await import('node:path');
   const callerOutdir = process.env.CDK_OUTDIR;
-  const isolatedOutdir = mkdtempSync(join(tmpdir(), 'fsk-active-backend-synth-'));
+  const isolatedOutdir = process.env.FSK_SYNTH_OUTDIR;
+  if (!isolatedOutdir) {
+    throw new Error('Missing parent-owned synth outdir');
+  }
+  process.env.CDK_OUTDIR = isolatedOutdir;
+  if (process.env.FSK_SYNTH_OUTDIR_MARKER) {
+    writeFileSync(process.env.FSK_SYNTH_OUTDIR_MARKER, isolatedOutdir);
+  }
+  if (process.env.FSK_TERMINATE_ACTIVE_SYNTH === 'SIGTERM') {
+    process.kill(process.pid, 'SIGTERM');
+  }
   let evidence;
   try {
-    process.env.CDK_OUTDIR = isolatedOutdir;
     const active = await import(${JSON.stringify(backendUrl)});
     if (!active.backend) {
       evidence = { hasBackend: false };
       return;
     }
     const assembly = active.backend.stack.node.root.synth({ errorOnDuplicateSynth: false });
-    if (resolve(assembly.directory) !== resolve(isolatedOutdir)) {
+    const realIsolatedOutdir = realpathSync(isolatedOutdir);
+    if (realpathSync(assembly.directory) !== realIsolatedOutdir) {
       throw new Error('Active backend synthesized outside its isolated CDK outdir');
     }
-    const escapedStackTemplates = assembly.stacksRecursively
-      .map((stack) => resolve(stack.templateFullPath))
-      .filter((path) => {
-        const pathFromOutdir = relative(resolve(isolatedOutdir), path);
-        return pathFromOutdir === '..' || pathFromOutdir.startsWith('..' + sep) || isAbsolute(pathFromOutdir);
-      });
-    if (escapedStackTemplates.length > 0) {
-      throw new Error('Stack templates escaped the isolated CDK outdir');
-    }
-    const emittedTemplatePaths = readdirSync(isolatedOutdir, { recursive: true })
+    const resolveContainedTemplatePath = (path) => {
+      const realTemplatePath = realpathSync(path);
+      const pathFromOutdir = relative(realIsolatedOutdir, realTemplatePath);
+      if (
+        pathFromOutdir === '..' ||
+        pathFromOutdir.startsWith('..' + sep) ||
+        isAbsolute(pathFromOutdir)
+      ) {
+        throw new Error('Template path escapes isolated synth outdir');
+      }
+      return realTemplatePath;
+    };
+    const discoveredTemplatePaths = readdirSync(isolatedOutdir, { recursive: true })
       .map(String)
       .filter((path) => path.endsWith('.template.json'))
       .map((path) => join(isolatedOutdir, path))
-      .sort();
+      .map(resolveContainedTemplatePath);
+    const stackTemplatePaths = assembly.stacksRecursively.map((stack) =>
+      resolveContainedTemplatePath(stack.templateFullPath),
+    );
+    const emittedTemplatePaths = [
+      ...new Set([...discoveredTemplatePaths, ...stackTemplatePaths]),
+    ].sort();
     const templates = emittedTemplatePaths.map((path) => ({
     path,
     template: JSON.parse(readFileSync(path, 'utf8')),
@@ -536,24 +554,87 @@ describe('active DynamoDB backend composition', () => {
         },
       }),
     );
+    const externalFixtureDirectory = mkdtempSync(
+      join(tmpdir(), 'fsk-external-template-'),
+    );
+    const externalTemplatePath = join(
+      externalFixtureDirectory,
+      'outside.template.json',
+    );
+    writeFileSync(
+      externalTemplatePath,
+      JSON.stringify({
+        Resources: {
+          ExternalAurora: { Type: 'AWS::RDS::DBCluster' },
+        },
+      }),
+    );
+    const signalMarkerDirectory = mkdtempSync(
+      join(tmpdir(), 'fsk-synth-signal-marker-'),
+    );
+    const signalMarkerPath = join(signalMarkerDirectory, 'outdir.txt');
+    const spawnActiveBackend = (
+      environment: Record<string, string> = {},
+      prepareSynthOutdir?: (synthOutdir: string) => void,
+    ) => {
+      const synthOutdir = mkdtempSync(
+        join(tmpdir(), 'fsk-active-backend-synth-'),
+      );
+      try {
+        prepareSynthOutdir?.(synthOutdir);
+        return {
+          result: spawnSync('pnpm', ['exec', 'tsx', '--eval', script], {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              ...environment,
+              AWS_DEFAULT_REGION: 'ap-northeast-1',
+              AWS_REGION: 'ap-northeast-1',
+              CDK_CONTEXT_JSON: JSON.stringify({
+                'amplify-backend-name': 'production',
+                'amplify-backend-namespace': 'test-app-id',
+                'amplify-backend-type': 'branch',
+              }),
+              CDK_OUTDIR: callerOutdir,
+              FSK_SYNTH_OUTDIR: synthOutdir,
+            },
+            timeout: 60_000,
+          }),
+          synthOutdir,
+        };
+      } finally {
+        rmSync(synthOutdir, { force: true, recursive: true });
+      }
+    };
 
     try {
-      const result = spawnSync('pnpm', ['exec', 'tsx', '--eval', script], {
-        cwd: process.cwd(),
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          AWS_DEFAULT_REGION: 'ap-northeast-1',
-          AWS_REGION: 'ap-northeast-1',
-          CDK_CONTEXT_JSON: JSON.stringify({
-            'amplify-backend-name': 'production',
-            'amplify-backend-namespace': 'test-app-id',
-            'amplify-backend-type': 'branch',
-          }),
-          CDK_OUTDIR: callerOutdir,
-        },
-        timeout: 60_000,
+      const symlinkExecution = spawnActiveBackend({}, (synthOutdir) =>
+        symlinkSync(
+          externalTemplatePath,
+          join(synthOutdir, 'external.template.json'),
+        ),
+      );
+      const { result: symlinkResult } = symlinkExecution;
+      expect(symlinkResult.status, symlinkResult.stdout).toBe(1);
+      expect(symlinkResult.stderr).toContain(
+        'Template path escapes isolated synth outdir',
+      );
+      expect(existsSync(symlinkExecution.synthOutdir)).toBe(false);
+      expect(existsSync(externalTemplatePath)).toBe(true);
+
+      const signalExecution = spawnActiveBackend({
+        FSK_SYNTH_OUTDIR_MARKER: signalMarkerPath,
+        FSK_TERMINATE_ACTIVE_SYNTH: 'SIGTERM',
       });
+      const { result: signalResult } = signalExecution;
+      expect(signalResult.status).toBe(143);
+      expect(signalResult.signal).toBeNull();
+      const signaledChildOutdir = readFileSync(signalMarkerPath, 'utf8');
+      expect(signaledChildOutdir).toBe(signalExecution.synthOutdir);
+      expect(existsSync(signaledChildOutdir)).toBe(false);
+
+      const { result } = spawnActiveBackend();
       expect(result.status, result.stderr).toBe(0);
       const evidenceLine = result.stdout
         .split('\n')
@@ -627,9 +708,11 @@ describe('active DynamoDB backend composition', () => {
       });
       expect(existsSync(staleTemplatePath)).toBe(true);
     } finally {
+      rmSync(signalMarkerDirectory, { force: true, recursive: true });
+      rmSync(externalFixtureDirectory, { force: true, recursive: true });
       rmSync(callerOutdir, { force: true, recursive: true });
     }
-  });
+  }, 15_000);
 });
 
 describe('foundation backend composition', () => {
