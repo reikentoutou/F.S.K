@@ -8,6 +8,7 @@ import type {
   AttachmentManifestEntry,
   DailyReportRecord,
   MigrationSummary,
+  MigrationConflict,
   MigrationWarning,
 } from './contracts';
 
@@ -80,6 +81,7 @@ export function buildMigrationSummary(input: {
   reports: DailyReportRecord[];
   attachments: AttachmentManifestEntry[];
   warnings: MigrationWarning[];
+  conflicts: MigrationConflict[];
 }): MigrationSummary {
   const global = { raw: zeroRawAmounts(), derived: zeroDerivedAmounts() };
   const byBusinessDate: MigrationSummary['amounts']['byBusinessDate'] = {};
@@ -129,7 +131,7 @@ export function buildMigrationSummary(input: {
       })),
     },
     warnings: input.warnings,
-    conflicts: [],
+    conflicts: input.conflicts,
     orphans: input.attachments
       .filter((entry) => entry.orphan)
       .map((entry) => entry.objectKey),
