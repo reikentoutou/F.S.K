@@ -42,5 +42,20 @@ describe('daily report calc with staff meals', () => {
     expect(actualSalesYen(8_000, 20_000, 5_000)).toBe(23_000);
     expect(staffMealTotalYen(0, 0)).toBe(0);
     expect(deviationYen(23_000, 1_000, 22_000)).toBe(2_000);
+    expect(
+      computeDailyReportTotals({
+        previousImosBalanceYen: 10_000,
+        currentImosBalanceYen: 32_000,
+        newageYen: 8_000,
+        cashTotalYen: 20_000,
+        expenseYen: 1_000,
+        registerFloatYen: 5_000,
+      }),
+    ).toEqual({
+      imosSalesYen: 22_000,
+      totalSalesYen: 23_000,
+      cashDepositYen: 15_000,
+      deviationYen: 2_000,
+    });
   });
 });

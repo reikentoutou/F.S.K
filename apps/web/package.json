@@ -14,6 +14,7 @@
     "ui:detect:json": "impeccable detect --json src"
   },
   "dependencies": {
+    "@fsk/domain": "workspace:*",
     "@element-plus/icons-vue": "^2.3.1",
     "aws-amplify": "^6.20.0",
     "axios": "^1.7.9",
