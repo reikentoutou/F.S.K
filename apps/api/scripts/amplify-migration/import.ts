@@ -23,6 +23,7 @@ import type { MigrationBundle } from './contracts';
 import { buildMigrationSummary } from './report';
 import {
   TARGET_MODEL_ORDER,
+  amplifyDataTargetRecord,
   assertExplicitTargetConfiguration,
   createAwsMigrationTarget,
   targetConfigurationFingerprint,
@@ -540,10 +541,22 @@ function resolveAttachmentSource(uploadsRoot: string, relativeKey: string): stri
 
 function recordsByStage(bundle: MigrationBundle): Record<MigrationModelName, Array<[string, Record<string, unknown>]>> {
   return {
-    ShiftDefinition: bundle.shifts.map((record) => [record.id, { ...record }]),
-    ResponsiblePerson: bundle.responsiblePersons.map((record) => [record.id, { ...record }]),
-    AppSetting: [[bundle.appSetting.id, { ...bundle.appSetting }]],
-    DailyReport: bundle.dailyReports.map((record) => [record.reportKey, { ...record }]),
+    ShiftDefinition: bundle.shifts.map((record) => [
+      record.id,
+      amplifyDataTargetRecord('ShiftDefinition', { ...record }),
+    ]),
+    ResponsiblePerson: bundle.responsiblePersons.map((record) => [
+      record.id,
+      amplifyDataTargetRecord('ResponsiblePerson', { ...record }),
+    ]),
+    AppSetting: [[
+      bundle.appSetting.id,
+      amplifyDataTargetRecord('AppSetting', { ...bundle.appSetting }),
+    ]],
+    DailyReport: bundle.dailyReports.map((record) => [
+      record.reportKey,
+      amplifyDataTargetRecord('DailyReport', { ...record }),
+    ]),
   };
 }
 
@@ -630,6 +643,7 @@ export async function importMigrationBundle(input: {
           const outcome = await input.target.putAttachment(
             entry,
             resolveAttachmentSource(input.uploadsRoot, entry.sourceRelativeKey),
+            input.uploadsRoot,
           );
           counts[outcome === 'created' ? 'created' : 'unchanged'].attachments += 1;
         }
@@ -686,6 +700,7 @@ export async function runImportCli(argv: string[]): Promise<unknown> {
       async putRecord() { throw new Error('DRY_RUN_TARGET_CALLED'); },
       async putAttachment() { throw new Error('DRY_RUN_TARGET_CALLED'); },
       async listRecords() { throw new Error('DRY_RUN_TARGET_CALLED'); },
+      async listAttachmentObjectKeys() { throw new Error('DRY_RUN_TARGET_CALLED'); },
       async readAttachment() { throw new Error('DRY_RUN_TARGET_CALLED'); },
     };
     return importMigrationBundle({

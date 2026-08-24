@@ -178,6 +178,12 @@ export function parseProvisionUsersCliOptions(argv: string[]): ProvisionUsersCli
 
 type ProvisionOutcome = 'created' | 'group-added' | 'unchanged' | 'planned';
 
+export interface ProvisionedCognitoUserOutcome {
+  username: string;
+  group: 'OWNER' | 'KITCHEN';
+  outcome: ProvisionOutcome;
+}
+
 export class CognitoProvisionPartialError extends Error {
   readonly code = 'COGNITO_PROVISION_PARTIAL_FAILURE';
   constructor(
@@ -185,6 +191,7 @@ export class CognitoProvisionPartialError extends Error {
     readonly userCreation: 'not-needed' | 'not-attempted' | 'confirmed' | 'unknown',
     readonly groupMembership: 'not-attempted' | 'confirmed' | 'unknown',
     readonly failureCode: string,
+    readonly completedUsers: readonly ProvisionedCognitoUserOutcome[] = [],
   ) {
     super('COGNITO_PROVISION_PARTIAL_FAILURE');
   }
@@ -194,6 +201,7 @@ export function formatProvisionUsersCliError(error: unknown): Record<string, unk
   if (error instanceof CognitoProvisionPartialError) {
     return {
       code: error.code,
+      completedUsers: error.completedUsers,
       username: error.username,
       userCreation: error.userCreation,
       groupMembership: error.groupMembership,
@@ -287,11 +295,7 @@ export async function provisionCognitoUsers(input: {
     }
   });
 
-  const users: Array<{
-    username: string;
-    group: 'OWNER' | 'KITCHEN';
-    outcome: ProvisionOutcome;
-  }> = [];
+  const users: ProvisionedCognitoUserOutcome[] = [];
   for (let index = 0; index < requested.length; index += 1) {
     const { username, group } = requested[index];
     const user = existing[index];
@@ -324,6 +328,7 @@ export async function provisionCognitoUsers(input: {
         userCreation,
         groupMembership,
         sanitizedFailureCode(error),
+        users.map((completed) => ({ ...completed })),
       );
     }
   }

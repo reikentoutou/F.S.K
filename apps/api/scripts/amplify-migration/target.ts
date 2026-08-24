@@ -1,6 +1,15 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  type BigIntStats,
+} from 'node:fs';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import {
   AmplifyClient,
   GetAppCommand,
@@ -30,6 +39,7 @@ import {
   GetBucketTaggingCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -45,6 +55,36 @@ export const TARGET_MODEL_ORDER = [
 
 export type MigrationModelName = (typeof TARGET_MODEL_ORDER)[number];
 
+export const AMPLIFY_MIGRATION_TECHNICAL_TIMESTAMP =
+  '1970-01-01T00:00:00.000Z';
+
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const epochMilliseconds = Date.parse(value);
+  return (
+    !Number.isNaN(epochMilliseconds) &&
+    new Date(epochMilliseconds).toISOString() === value
+  );
+}
+
+export function amplifyDataTargetRecord(
+  model: MigrationModelName,
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const timestamp =
+    model === 'DailyReport'
+      ? record.submittedAt
+      : AMPLIFY_MIGRATION_TECHNICAL_TIMESTAMP;
+  if (!isCanonicalTimestamp(timestamp)) {
+    throw new Error(`TARGET_RECORD_TIMESTAMP_INVALID:${model}`);
+  }
+  return {
+    ...record,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
 export interface MigrationTarget {
   assertSafeTarget(): Promise<void>;
   putRecord(
@@ -55,8 +95,10 @@ export interface MigrationTarget {
   putAttachment(
     entry: AttachmentManifestEntry,
     sourcePath: string,
+    uploadsRoot: string,
   ): Promise<'created' | 'unchanged'>;
   listRecords(model: MigrationModelName): Promise<Record<string, unknown>[]>;
+  listAttachmentObjectKeys(): Promise<string[]>;
   readAttachment(objectKey: string): Promise<{ byteSize: number; sha256: string }>;
 }
 
@@ -98,6 +140,11 @@ const REQUIRED_TAGS = {
   ManagedBy: 'AmplifyGen2',
   CostCenter: 'FSK',
 } as const;
+const ACTIVE_STACK_STATUSES = new Set([
+  'CREATE_COMPLETE',
+  'UPDATE_COMPLETE',
+  'IMPORT_COMPLETE',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -344,18 +391,187 @@ function assertAttachmentContract(entry: AttachmentManifestEntry): void {
   }
 }
 
-function inspectFile(path: string): { bytes: Buffer; sha256: string; signature: string } {
-  const declared = resolve(path);
-  const stat = lstatSync(declared, { bigint: true });
-  if (!stat.isFile() || stat.isSymbolicLink()) {
+function sameFileState(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.isFile() &&
+    right.isFile() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function readHeldFile(fd: number, expectedSize: bigint): Buffer {
+  if (expectedSize > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
   }
-  const bytes = readFileSync(declared);
-  return {
-    bytes,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    signature: [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':'),
-  };
+  const output = Buffer.alloc(Number(expectedSize));
+  let offset = 0;
+  while (offset < output.length) {
+    const bytesRead = readSync(
+      fd,
+      output,
+      offset,
+      output.length - offset,
+      offset,
+    );
+    if (bytesRead === 0) throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
+    offset += bytesRead;
+  }
+  const extra = Buffer.alloc(1);
+  if (readSync(fd, extra, 0, 1, offset) !== 0) {
+    throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
+  }
+  return output;
+}
+
+function pathOutside(root: string, candidate: string): boolean {
+  const pathFromRoot = relative(root, candidate);
+  return (
+    pathFromRoot === '..' ||
+    pathFromRoot.startsWith(`..${sep}`) ||
+    isAbsolute(pathFromRoot)
+  );
+}
+
+interface HeldAttachmentSource {
+  bytes: Buffer;
+  sha256: string;
+  assertStable(): void;
+  close(): void;
+}
+
+function bindAttachmentSource(
+  entry: AttachmentManifestEntry,
+  sourcePath: string,
+  uploadsRoot: string,
+): HeldAttachmentSource {
+  let fd: number | undefined;
+  try {
+    if (!isAbsolute(uploadsRoot) || !isAbsolute(sourcePath)) {
+      throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+    }
+    const rootStat = lstatSync(uploadsRoot, { bigint: true });
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+      throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+    }
+    const canonicalRoot = realpathSync(uploadsRoot);
+    const segments = entry.sourceRelativeKey.split('/');
+    if (
+      segments.length === 0 ||
+      segments.some(
+        (segment) =>
+          segment.length === 0 ||
+          segment === '.' ||
+          segment === '..' ||
+          segment.includes('\\'),
+      )
+    ) {
+      throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+    }
+    const expectedPath = resolve(canonicalRoot, ...segments);
+    if (
+      realpathSync(sourcePath) !== expectedPath ||
+      pathOutside(canonicalRoot, expectedPath)
+    ) {
+      throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+    }
+    const directories = [canonicalRoot];
+    let current = canonicalRoot;
+    for (const segment of segments.slice(0, -1)) {
+      current = resolve(current, segment);
+      directories.push(current);
+    }
+    const directoryStates = directories.map((path) => {
+      const stat = lstatSync(path, { bigint: true });
+      if (
+        !stat.isDirectory() ||
+        stat.isSymbolicLink() ||
+        realpathSync(path) !== path ||
+        pathOutside(canonicalRoot, path)
+      ) {
+        throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+      }
+      return { path, dev: stat.dev, ino: stat.ino };
+    });
+    const initialPathStat = lstatSync(expectedPath, { bigint: true });
+    const canonicalFile = realpathSync(expectedPath);
+    if (
+      !initialPathStat.isFile() ||
+      initialPathStat.isSymbolicLink() ||
+      canonicalFile !== expectedPath ||
+      pathOutside(canonicalRoot, canonicalFile)
+    ) {
+      throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+    }
+    fd = openSync(expectedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const initialFdStat = fstatSync(fd, { bigint: true });
+    if (!sameFileState(initialPathStat, initialFdStat)) {
+      throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+    }
+    const bytes = readHeldFile(fd, initialFdStat.size);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const assertStable = (): void => {
+      try {
+        const currentFdStat = fstatSync(fd!, { bigint: true });
+        const currentPathStat = lstatSync(expectedPath, { bigint: true });
+        if (
+          !sameFileState(initialFdStat, currentFdStat) ||
+          !sameFileState(initialFdStat, currentPathStat) ||
+          realpathSync(expectedPath) !== canonicalFile ||
+          directoryStates.some(({ path, dev, ino }) => {
+            const stat = lstatSync(path, { bigint: true });
+            return (
+              !stat.isDirectory() ||
+              stat.isSymbolicLink() ||
+              stat.dev !== dev ||
+              stat.ino !== ino ||
+              realpathSync(path) !== path
+            );
+          })
+        ) {
+          throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
+        }
+        const afterBytes = readHeldFile(fd!, currentFdStat.size);
+        if (
+          afterBytes.length !== bytes.length ||
+          createHash('sha256').update(afterBytes).digest('hex') !== sha256
+        ) {
+          throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
+        }
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'TARGET_ATTACHMENT_SOURCE_CHANGED'
+        ) {
+          throw error;
+        }
+        throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
+      }
+    };
+    return {
+      bytes,
+      sha256,
+      assertStable,
+      close: () => {
+        if (fd !== undefined) {
+          closeSync(fd);
+          fd = undefined;
+        }
+      },
+    };
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd);
+    if (
+      error instanceof Error &&
+      error.message.startsWith('TARGET_ATTACHMENT_SOURCE_')
+    ) {
+      throw error;
+    }
+    throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
+  }
 }
 
 export class AwsMigrationTarget implements MigrationTarget {
@@ -392,13 +608,16 @@ export class AwsMigrationTarget implements MigrationTarget {
     for (const stack of Object.values(this.config.stacks)) {
       const described = (await this.clients.cloudFormation.send(
         new DescribeStacksCommand({ StackName: stack.name }) as unknown as { input?: Record<string, unknown> },
-      )) as { Stacks?: Array<{ StackName?: string; StackId?: string; Tags?: unknown }> };
+      )) as { Stacks?: Array<{ StackName?: string; StackId?: string; StackStatus?: string; Tags?: unknown }> };
       if (
         described.Stacks?.length !== 1 ||
         described.Stacks[0].StackName !== stack.name ||
         described.Stacks[0].StackId !== stack.arn
       ) {
         throw new Error(`TARGET_STACK_MISMATCH:${stack.name}`);
+      }
+      if (!ACTIVE_STACK_STATUSES.has(described.Stacks[0].StackStatus ?? '')) {
+        throw new Error(`TARGET_STACK_STATUS_INVALID:${stack.name}`);
       }
       assertRequiredTags(described.Stacks[0].Tags, `Stack:${stack.name}`);
       const resources: Array<{ PhysicalResourceId?: string; ResourceType?: string }> = [];
@@ -416,9 +635,12 @@ export class AwsMigrationTarget implements MigrationTarget {
     for (const [model, table] of Object.entries(this.config.tables) as Array<[MigrationModelName, NamedResource]>) {
       const described = (await this.clients.dynamo.send(
         new DescribeTableCommand({ TableName: table.name }) as unknown as { input?: Record<string, unknown> },
-      )) as { Table?: { TableName?: string; TableArn?: string } };
+      )) as { Table?: { TableName?: string; TableArn?: string; TableStatus?: string } };
       if (described.Table?.TableName !== table.name || described.Table.TableArn !== table.arn) {
         throw new Error(`TARGET_TABLE_MISMATCH:${model}`);
+      }
+      if (described.Table.TableStatus !== 'ACTIVE') {
+        throw new Error(`TARGET_TABLE_STATUS_INVALID:${model}`);
       }
       const tagged = (await this.clients.dynamo.send(
         new ListDynamoTagsCommand({ ResourceArn: table.arn }) as unknown as { input?: Record<string, unknown> },
@@ -508,6 +730,12 @@ export class AwsMigrationTarget implements MigrationTarget {
     this.requireSafe();
     const primaryKey = model === 'DailyReport' ? 'reportKey' : 'id';
     if (record[primaryKey] !== key) throw new Error(`TARGET_RECORD_KEY_MISMATCH:${model}`);
+    if (
+      !isCanonicalTimestamp(record.createdAt) ||
+      !isCanonicalTimestamp(record.updatedAt)
+    ) {
+      throw new Error(`TARGET_RECORD_TIMESTAMP_INVALID:${model}`);
+    }
     const normalized = canonicalize(record) as Record<string, unknown>;
     const table = this.config.tables[model];
     try {
@@ -540,55 +768,65 @@ export class AwsMigrationTarget implements MigrationTarget {
   async putAttachment(
     entry: AttachmentManifestEntry,
     sourcePath: string,
+    uploadsRoot: string,
   ): Promise<'created' | 'unchanged'> {
     this.requireSafe();
     assertAttachmentContract(entry);
-    const before = inspectFile(sourcePath);
-    if (before.bytes.length !== entry.byteSize || before.sha256 !== entry.sha256) {
-      throw new Error(`TARGET_ATTACHMENT_SOURCE_MISMATCH:${entry.objectKey}`);
-    }
-    const existing = await this.headAttachment(entry.objectKey, true);
-    if (existing) {
-      this.assertHeadMatches(entry, existing);
-      const after = inspectFile(sourcePath);
+    let source: HeldAttachmentSource;
+    try {
+      source = bindAttachmentSource(entry, sourcePath, uploadsRoot);
+    } catch (error) {
       if (
-        after.signature !== before.signature ||
-        after.bytes.length !== before.bytes.length ||
-        after.sha256 !== before.sha256
+        error instanceof Error &&
+        error.message === 'TARGET_ATTACHMENT_SOURCE_CHANGED'
       ) {
         throw new Error(`TARGET_ATTACHMENT_SOURCE_CHANGED:${entry.objectKey}`);
       }
-      return 'unchanged';
+      throw error;
     }
-    let created = true;
     try {
-      await this.clients.s3.send(
-        new PutObjectCommand({
-          Bucket: this.config.bucket.name,
-          Key: entry.objectKey,
-          Body: before.bytes,
-          IfNoneMatch: '*',
-          Metadata: { sha256: entry.sha256, 'byte-size': String(entry.byteSize) },
-        }) as unknown as { input?: Record<string, unknown> },
-      );
-    } catch (error) {
-      if (!['PreconditionFailed', 'ConditionalRequestConflict'].includes(errorName(error))) {
-        throw error;
+      if (source.bytes.length !== entry.byteSize || source.sha256 !== entry.sha256) {
+        throw new Error(`TARGET_ATTACHMENT_SOURCE_MISMATCH:${entry.objectKey}`);
       }
-      created = false;
+      const existing = await this.headAttachment(entry.objectKey, true);
+      if (existing) {
+        this.assertHeadMatches(entry, existing);
+        try {
+          source.assertStable();
+        } catch {
+          throw new Error(`TARGET_ATTACHMENT_SOURCE_CHANGED:${entry.objectKey}`);
+        }
+        return 'unchanged';
+      }
+      let created = true;
+      try {
+        await this.clients.s3.send(
+          new PutObjectCommand({
+            Bucket: this.config.bucket.name,
+            Key: entry.objectKey,
+            Body: source.bytes,
+            IfNoneMatch: '*',
+            Metadata: { sha256: entry.sha256, 'byte-size': String(entry.byteSize) },
+          }) as unknown as { input?: Record<string, unknown> },
+        );
+      } catch (error) {
+        if (!['PreconditionFailed', 'ConditionalRequestConflict'].includes(errorName(error))) {
+          throw error;
+        }
+        created = false;
+      }
+      try {
+        source.assertStable();
+      } catch {
+        throw new Error(`TARGET_ATTACHMENT_SOURCE_CHANGED:${entry.objectKey}`);
+      }
+      const head = await this.headAttachment(entry.objectKey, false);
+      if (!head) throw new Error(`TARGET_ATTACHMENT_UPLOAD_UNVERIFIED:${entry.objectKey}`);
+      this.assertHeadMatches(entry, head);
+      return created ? 'created' : 'unchanged';
+    } finally {
+      source.close();
     }
-    const after = inspectFile(sourcePath);
-    if (
-      after.signature !== before.signature ||
-      after.bytes.length !== before.bytes.length ||
-      after.sha256 !== before.sha256
-    ) {
-      throw new Error(`TARGET_ATTACHMENT_SOURCE_CHANGED:${entry.objectKey}`);
-    }
-    const head = await this.headAttachment(entry.objectKey, false);
-    if (!head) throw new Error(`TARGET_ATTACHMENT_UPLOAD_UNVERIFIED:${entry.objectKey}`);
-    this.assertHeadMatches(entry, head);
-    return created ? 'created' : 'unchanged';
   }
 
   private async headAttachment(
@@ -640,6 +878,62 @@ export class AwsMigrationTarget implements MigrationTarget {
       }
     } while (exclusiveStartKey);
     return records;
+  }
+
+  async listAttachmentObjectKeys(): Promise<string[]> {
+    this.requireSafe();
+    const prefix = 'migration/daily-reports/';
+    const keys: string[] = [];
+    const seenKeys = new Set<string>();
+    const seenTokens = new Set<string>();
+    let continuationToken: string | undefined;
+    do {
+      const page = (await this.clients.s3.send(
+        new ListObjectsV2Command({
+          Bucket: this.config.bucket.name,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }) as unknown as { input?: Record<string, unknown> },
+      )) as {
+        Contents?: Array<{ Key?: string }>;
+        IsTruncated?: boolean;
+        NextContinuationToken?: string;
+      };
+      if (!Array.isArray(page.Contents ?? []) || typeof page.IsTruncated !== 'boolean') {
+        throw new Error('TARGET_ATTACHMENT_LIST_INVALID');
+      }
+      for (const object of page.Contents ?? []) {
+        if (
+          !isRecord(object) ||
+          typeof object.Key !== 'string' ||
+          object.Key.length <= prefix.length ||
+          !object.Key.startsWith(prefix)
+        ) {
+          throw new Error('TARGET_ATTACHMENT_LIST_INVALID');
+        }
+        if (seenKeys.has(object.Key)) {
+          throw new Error('TARGET_ATTACHMENT_LIST_DUPLICATE');
+        }
+        seenKeys.add(object.Key);
+        keys.push(object.Key);
+      }
+      const nextToken = page.NextContinuationToken;
+      if (
+        (page.IsTruncated &&
+          (typeof nextToken !== 'string' || nextToken.length === 0)) ||
+        (!page.IsTruncated && nextToken !== undefined)
+      ) {
+        throw new Error('TARGET_ATTACHMENT_LIST_INVALID');
+      }
+      continuationToken = page.IsTruncated ? nextToken : undefined;
+      if (continuationToken) {
+        if (seenTokens.has(continuationToken)) {
+          throw new Error('TARGET_ATTACHMENT_LIST_PAGINATION_CYCLE');
+        }
+        seenTokens.add(continuationToken);
+      }
+    } while (continuationToken);
+    return keys.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
   }
 
   async readAttachment(objectKey: string): Promise<{ byteSize: number; sha256: string }> {

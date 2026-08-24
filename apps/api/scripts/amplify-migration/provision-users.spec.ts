@@ -216,6 +216,39 @@ describe('Cognito OWNER/KITCHEN provisioning', () => {
     });
     expect(JSON.stringify(caught)).not.toMatch(/Temporary-Secret|password/i);
   });
+
+  it('preserves every completed user outcome when the second user has an ambiguous AWS result', async () => {
+    const directory = new MemoryUserDirectory();
+    directory.failAddFor = 'fsk-kitchen';
+    let caught: unknown;
+    try {
+      await provisionCognitoUsers({
+        mode: 'apply',
+        approvalId: 'FSK-TASK11-SYNTHETIC-USERS-COMPLETED',
+        ownerUsername: 'fsk-owner',
+        kitchenUsername: 'fsk-kitchen',
+        environment: {
+          FSK_OWNER_TEMP_PASSWORD: 'Owner-Temporary-Secret1!',
+          FSK_KITCHEN_TEMP_PASSWORD: 'Kitchen-Temporary-Secret1!',
+        },
+        safety: new FakeSafety(),
+        directory,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      code: 'COGNITO_PROVISION_PARTIAL_FAILURE',
+      completedUsers: [
+        { username: 'fsk-owner', group: 'OWNER', outcome: 'created' },
+      ],
+      username: 'fsk-kitchen',
+      userCreation: 'confirmed',
+      groupMembership: 'unknown',
+      failureCode: 'SYNTHETIC_GROUP_FAILURE',
+    });
+    expect(JSON.stringify(caught)).not.toMatch(/Temporary-Secret|password/i);
+  });
 });
 
 describe('Cognito AWS adapter and CLI', () => {
@@ -228,6 +261,7 @@ describe('Cognito AWS adapter and CLI', () => {
     );
     expect(formatProvisionUsersCliError(error)).toEqual({
       code: 'COGNITO_PROVISION_PARTIAL_FAILURE',
+      completedUsers: [],
       username: 'fsk-owner',
       userCreation: 'unknown',
       groupMembership: 'not-attempted',

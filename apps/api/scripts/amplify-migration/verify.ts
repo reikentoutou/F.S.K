@@ -13,6 +13,7 @@ import type {
 } from './contracts';
 import {
   assertExplicitTargetConfiguration,
+  amplifyDataTargetRecord,
   createAwsMigrationTarget,
   type MigrationModelName,
   type MigrationTarget,
@@ -172,18 +173,33 @@ export async function verifyMigrationTarget(input: {
   attachments: MigrationSummary['targetAttachmentSummary'];
 }> {
   await input.target.assertSafeTarget();
-  const [shifts, persons, settings, reports] = await Promise.all([
+  const [shifts, persons, settings, reports, attachmentObjectKeys] = await Promise.all([
     input.target.listRecords('ShiftDefinition'),
     input.target.listRecords('ResponsiblePerson'),
     input.target.listRecords('AppSetting'),
     input.target.listRecords('DailyReport'),
+    input.target.listAttachmentObjectKeys(),
   ]);
+  const expectedAttachmentObjectKeys = input.bundle.attachments
+    .map((entry) => entry.objectKey);
+  const expectedAttachmentObjectKeySet = new Set(expectedAttachmentObjectKeys);
+  const attachmentObjectKeySet = new Set(attachmentObjectKeys);
+  if (
+    expectedAttachmentObjectKeySet.size !== expectedAttachmentObjectKeys.length ||
+    attachmentObjectKeySet.size !== attachmentObjectKeys.length ||
+    expectedAttachmentObjectKeySet.size !== attachmentObjectKeySet.size ||
+    expectedAttachmentObjectKeys.some(
+      (objectKey) => !attachmentObjectKeySet.has(objectKey),
+    )
+  ) {
+    throw new Error('TARGET_VERIFICATION_MISMATCH:attachmentKeys');
+  }
   const modelCounts = {
     shifts: shifts.length,
     responsiblePersons: persons.length,
     appSettings: settings.length,
     dailyReports: reports.length,
-    attachments: input.bundle.attachments.length,
+    attachments: attachmentObjectKeys.length,
   };
   if (!same(modelCounts, input.bundle.sourceSummary.modelCounts)) {
     throw new Error('TARGET_VERIFICATION_MISMATCH:modelCounts');
@@ -200,13 +216,29 @@ export async function verifyMigrationTarget(input: {
     throw new Error('TARGET_VERIFICATION_MISMATCH:amounts');
   }
 
-  assertExactRecords('ShiftDefinition', shifts, input.bundle.shifts.map((record) => ({ ...record })));
-  assertExactRecords('ResponsiblePerson', persons, input.bundle.responsiblePersons.map((record) => ({ ...record })));
-  assertExactRecords('AppSetting', settings, [{ ...input.bundle.appSetting }]);
+  assertExactRecords(
+    'ShiftDefinition',
+    shifts,
+    input.bundle.shifts.map((record) =>
+      amplifyDataTargetRecord('ShiftDefinition', { ...record }),
+    ),
+  );
+  assertExactRecords(
+    'ResponsiblePerson',
+    persons,
+    input.bundle.responsiblePersons.map((record) =>
+      amplifyDataTargetRecord('ResponsiblePerson', { ...record }),
+    ),
+  );
+  assertExactRecords('AppSetting', settings, [
+    amplifyDataTargetRecord('AppSetting', { ...input.bundle.appSetting }),
+  ]);
   assertExactRecords(
     'DailyReport',
     reports,
-    input.bundle.dailyReports.map((record: DailyReportRecord) => ({ ...record })),
+    input.bundle.dailyReports.map((record: DailyReportRecord) =>
+      amplifyDataTargetRecord('DailyReport', { ...record }),
+    ),
   );
 
   const hashes: Array<{ objectKey: string; sha256: string }> = [];

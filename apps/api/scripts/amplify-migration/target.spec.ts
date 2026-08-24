@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,6 +25,7 @@ import {
 import {
   AwsMigrationTarget,
   TARGET_MODEL_ORDER,
+  amplifyDataTargetRecord,
   assertExplicitTargetConfiguration,
   type AwsMigrationClients,
   type MigrationModelName,
@@ -176,6 +185,7 @@ class MemoryTarget implements MigrationTarget {
   async putAttachment(
     entry: MigrationBundle['attachments'][number],
     sourcePath: string,
+    _uploadsRoot: string,
   ): Promise<'created' | 'unchanged'> {
     this.calls.push(`Attachment:${entry.objectKey}`);
     this.mutatingCalls += 1;
@@ -195,6 +205,10 @@ class MemoryTarget implements MigrationTarget {
     return [...this.records.entries()]
       .filter(([key]) => key.startsWith(`${model}:`))
       .map(([, value]) => value as Record<string, unknown>);
+  }
+
+  async listAttachmentObjectKeys(): Promise<string[]> {
+    return [...this.attachments.keys()].sort();
   }
 
   async readAttachment(objectKey: string): Promise<{ byteSize: number; sha256: string }> {
@@ -242,6 +256,40 @@ function addAttachment(bundle: MigrationBundle, uploadsRoot: string): void {
 }
 
 describe('migration apply orchestration', () => {
+  it('materializes deterministic Amplify Data createdAt and updatedAt fields for every target model', async () => {
+    const bundle = fixtureBundle();
+    const target = new MemoryTarget();
+    await importMigrationBundle({
+      mode: 'apply',
+      approvalId: 'FSK-TASK11-SYNTHETIC-TIMESTAMPS',
+      bundle,
+      uploadsRoot: temporaryRoot(),
+      target,
+      checkpointStore: new MemoryCheckpointStore(),
+    });
+
+    const technicalSentinel = '1970-01-01T00:00:00.000Z';
+    for (const key of [
+      'ShiftDefinition:shift-day',
+      'ResponsiblePerson:person-1',
+      'AppSetting:default',
+    ]) {
+      expect(target.records.get(key)).toMatchObject({
+        createdAt: technicalSentinel,
+        updatedAt: technicalSentinel,
+      });
+    }
+    expect(
+      target.records.get('DailyReport:2026-08-24#shift-day'),
+    ).toMatchObject({
+      createdAt: bundle.dailyReports[0].submittedAt,
+      updatedAt: bundle.dailyReports[0].submittedAt,
+    });
+    expect(JSON.stringify([...target.records.values()])).not.toMatch(
+      /__typename|_version/,
+    );
+  });
+
   it('creates each model in fixed stage order and repeats identical input as no-op', async () => {
     const root = temporaryRoot();
     const bundle = fixtureBundle();
@@ -734,12 +782,12 @@ function fakeAwsClients(config = targetConfiguration()): AwsMigrationClients & {
       const expected = Object.values(config.stacks).find(
         (stack) => stack.name === stackName,
       );
-      return { Stacks: [{ StackName: stackName, StackId: expected?.arn, Tags: Object.entries(requiredTags).map(([Key, Value]) => ({ Key, Value })) }] };
+      return { Stacks: [{ StackName: stackName, StackId: expected?.arn, StackStatus: 'CREATE_COMPLETE', Tags: Object.entries(requiredTags).map(([Key, Value]) => ({ Key, Value })) }] };
     }
     if (service === 'dynamo') {
       if (commandName === 'DescribeTableCommand') {
         const table = Object.values(config.tables).find((value) => value.name === input.TableName);
-        return { Table: { TableName: table?.name, TableArn: table?.arn } };
+        return { Table: { TableName: table?.name, TableArn: table?.arn, TableStatus: 'ACTIVE' } };
       }
       if (commandName === 'ListTagsOfResourceCommand') {
         return { Tags: Object.entries(requiredTags).map(([Key, Value]) => ({ Key, Value })) };
@@ -846,9 +894,13 @@ describe('AWS target safety and DynamoDB adapter', () => {
     const clients = fakeAwsClients(config);
     const target = new AwsMigrationTarget(config, clients);
     await target.assertSafeTarget();
-    await target.putRecord('ShiftDefinition', 'shift-day', {
-      id: 'shift-day', name: '白班', sortOrder: 10, active: true,
-    });
+    await target.putRecord(
+      'ShiftDefinition',
+      'shift-day',
+      amplifyDataTargetRecord('ShiftDefinition', {
+        id: 'shift-day', name: '白班', sortOrder: 10, active: true,
+      }),
+    );
     const servicesBeforeWrite = clients.calls
       .slice(0, clients.calls.findIndex((call) => 'ConditionExpression' in call.input))
       .map((call) => call.service);
@@ -865,7 +917,9 @@ describe('AWS target safety and DynamoDB adapter', () => {
     const clients = fakeAwsClients(config);
     const target = new AwsMigrationTarget(config, clients);
     await target.assertSafeTarget();
-    const record = { id: 'shift-day', name: '白班', sortOrder: 10, active: true };
+    const record = amplifyDataTargetRecord('ShiftDefinition', {
+      id: 'shift-day', name: '白班', sortOrder: 10, active: true,
+    });
     expect(await target.putRecord('ShiftDefinition', 'shift-day', record)).toBe('created');
     expect(await target.putRecord('ShiftDefinition', 'shift-day', { ...record })).toBe('unchanged');
     await expect(
@@ -925,18 +979,271 @@ describe('AWS target safety and DynamoDB adapter', () => {
     );
     expect(clients.calls.some((call) => 'ConditionExpression' in call.input)).toBe(false);
   });
+
+  it.each([
+    'UPDATE_IN_PROGRESS',
+    'UPDATE_ROLLBACK_COMPLETE',
+    'DELETE_COMPLETE',
+    'SYNTHETIC_UNKNOWN',
+  ])('rejects non-active CloudFormation stack status %s before writes', async (status) => {
+    const config = targetConfiguration();
+    const clients = fakeAwsClients(config);
+    const originalSend = clients.cloudFormation.send.bind(clients.cloudFormation);
+    clients.cloudFormation.send = async (command) => {
+      const result = await originalSend(command) as {
+        Stacks?: Array<Record<string, unknown>>;
+      };
+      if (command.constructor?.name === 'DescribeStacksCommand') {
+        return {
+          ...result,
+          Stacks: result.Stacks?.map((stack) => ({
+            ...stack,
+            StackStatus: status,
+          })),
+        };
+      }
+      return result;
+    };
+    const target = new AwsMigrationTarget(config, clients);
+    await expect(target.assertSafeTarget()).rejects.toThrow(
+      'TARGET_STACK_STATUS_INVALID',
+    );
+    expect(
+      clients.calls.some(
+        (call) =>
+          'ConditionExpression' in call.input || 'IfNoneMatch' in call.input,
+      ),
+    ).toBe(false);
+  });
+
+  it.each(['CREATING', 'UPDATING', 'DELETING', 'SYNTHETIC_UNKNOWN'])(
+    'rejects non-ACTIVE DynamoDB table status %s before writes',
+    async (status) => {
+      const config = targetConfiguration();
+      const clients = fakeAwsClients(config);
+      const originalSend = clients.dynamo.send.bind(clients.dynamo);
+      clients.dynamo.send = async (command) => {
+        const result = await originalSend(command) as {
+          Table?: Record<string, unknown>;
+        };
+        if (command.constructor?.name === 'DescribeTableCommand') {
+          return {
+            ...result,
+            Table: { ...result.Table, TableStatus: status },
+          };
+        }
+        return result;
+      };
+      const target = new AwsMigrationTarget(config, clients);
+      await expect(target.assertSafeTarget()).rejects.toThrow(
+        'TARGET_TABLE_STATUS_INVALID',
+      );
+      expect(
+        clients.calls.some(
+          (call) =>
+            'ConditionExpression' in call.input || 'IfNoneMatch' in call.input,
+        ),
+      ).toBe(false);
+    },
+  );
 });
 
 describe('attachment import and independent verification', () => {
+  it('paginates the exact migration prefix and returns every unique object key', async () => {
+    const clients = fakeAwsClients();
+    const originalSend = clients.s3.send.bind(clients.s3);
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name === 'ListObjectsV2Command') {
+        clients.calls.push({ service: 's3', input: command.input ?? {} });
+        if (command.input?.ContinuationToken === undefined) {
+          return {
+            Contents: [{ Key: 'migration/daily-reports/report-a/a.txt' }],
+            IsTruncated: true,
+            NextContinuationToken: 'page-2',
+          };
+        }
+        return {
+          Contents: [{ Key: 'migration/daily-reports/report-b/b.txt' }],
+          IsTruncated: false,
+        };
+      }
+      return originalSend(command);
+    };
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    await expect(
+      (target as unknown as {
+        listAttachmentObjectKeys(): Promise<string[]>;
+      }).listAttachmentObjectKeys(),
+    ).resolves.toEqual([
+      'migration/daily-reports/report-a/a.txt',
+      'migration/daily-reports/report-b/b.txt',
+    ]);
+    const listCalls = clients.calls.filter(
+      (call) => call.input.Prefix === 'migration/daily-reports/',
+    );
+    expect(listCalls).toHaveLength(2);
+  });
+
+  it('rejects duplicate S3 keys and a continuation-token cycle', async () => {
+    for (const mode of ['duplicate', 'cycle'] as const) {
+      const clients = fakeAwsClients();
+      const originalSend = clients.s3.send.bind(clients.s3);
+      clients.s3.send = async (command) => {
+        if (command.constructor?.name !== 'ListObjectsV2Command') {
+          return originalSend(command);
+        }
+        const token = command.input?.ContinuationToken;
+        if (token === undefined) {
+          return {
+            Contents: [{ Key: 'migration/daily-reports/report-a/a.txt' }],
+            IsTruncated: true,
+            NextContinuationToken: 'page-2',
+          };
+        }
+        return mode === 'duplicate'
+          ? {
+              Contents: [{ Key: 'migration/daily-reports/report-a/a.txt' }],
+              IsTruncated: false,
+            }
+          : {
+              Contents: [{ Key: 'migration/daily-reports/report-b/b.txt' }],
+              IsTruncated: true,
+              NextContinuationToken: 'page-2',
+            };
+      };
+      const target = new AwsMigrationTarget(targetConfiguration(), clients);
+      await target.assertSafeTarget();
+      await expect(
+        (target as unknown as {
+          listAttachmentObjectKeys(): Promise<string[]>;
+        }).listAttachmentObjectKeys(),
+      ).rejects.toThrow(
+        mode === 'duplicate'
+          ? 'TARGET_ATTACHMENT_LIST_DUPLICATE'
+          : 'TARGET_ATTACHMENT_LIST_PAGINATION_CYCLE',
+      );
+    }
+  });
+
+  it('rejects malformed or out-of-prefix S3 inventory pages', async () => {
+    for (const page of [
+      { Contents: [{}], IsTruncated: false },
+      {
+        Contents: [{ Key: 'unexpected-prefix/report-a/a.txt' }],
+        IsTruncated: false,
+      },
+      {
+        Contents: [],
+        IsTruncated: true,
+      },
+      {
+        Contents: [],
+        IsTruncated: false,
+        NextContinuationToken: 'unexpected-token',
+      },
+    ]) {
+      const clients = fakeAwsClients();
+      const originalSend = clients.s3.send.bind(clients.s3);
+      clients.s3.send = async (command) =>
+        command.constructor?.name === 'ListObjectsV2Command'
+          ? page
+          : originalSend(command);
+      const target = new AwsMigrationTarget(targetConfiguration(), clients);
+      await target.assertSafeTarget();
+      await expect(
+        (target as unknown as {
+          listAttachmentObjectKeys(): Promise<string[]>;
+        }).listAttachmentObjectKeys(),
+      ).rejects.toThrow('TARGET_ATTACHMENT_LIST_INVALID');
+    }
+  });
+
+  it('independent verification rejects an extra object under the migration prefix', async () => {
+    const root = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    const target = new MemoryTarget();
+    await importMigrationBundle({
+      mode: 'apply',
+      approvalId: 'FSK-TASK11-SYNTHETIC-EXTRA-OBJECT',
+      bundle,
+      uploadsRoot: root,
+      target,
+      checkpointStore: new MemoryCheckpointStore(),
+    });
+    target.attachments.set(
+      'migration/daily-reports/unexpected/extra.txt',
+      { bytes: Buffer.from('extra'), sha256: sha256('extra') },
+    );
+    await expect(verifyMigrationTarget({ bundle, target })).rejects.toThrow(
+      'TARGET_VERIFICATION_MISMATCH:attachmentKeys',
+    );
+  });
+
+  it('independent verification rejects a missing expected object', async () => {
+    const root = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    const target = new MemoryTarget();
+    await importMigrationBundle({
+      mode: 'apply',
+      approvalId: 'FSK-TASK11-SYNTHETIC-MISSING-OBJECT',
+      bundle,
+      uploadsRoot: root,
+      target,
+      checkpointStore: new MemoryCheckpointStore(),
+    });
+    target.attachments.delete(bundle.attachments[0].objectKey);
+    await expect(verifyMigrationTarget({ bundle, target })).rejects.toThrow(
+      'TARGET_VERIFICATION_MISMATCH:attachmentKeys',
+    );
+  });
+
   it('reads only the explicit source path, validates pre/post hash, and verifies HeadObject metadata', async () => {
     const root = temporaryRoot();
     const bundle = fixtureBundle();
     addAttachment(bundle, root);
     const entry = bundle.attachments[0];
     const target = new MemoryTarget();
-    expect(await target.putAttachment(entry, join(root, entry.sourceRelativeKey))).toBe('created');
-    expect(await target.putAttachment(entry, join(root, entry.sourceRelativeKey))).toBe('unchanged');
+    expect(await target.putAttachment(entry, join(root, entry.sourceRelativeKey), root)).toBe('created');
+    expect(await target.putAttachment(entry, join(root, entry.sourceRelativeKey), root)).toBe('unchanged');
     expect(basename(entry.objectKey)).toBe(`${entry.sha256}-receipt.txt`);
+  });
+
+  it('rejects an attachment reached through an intermediate symlink outside the canonical uploads root', async () => {
+    const root = temporaryRoot();
+    const outside = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    const entry = bundle.attachments[0];
+    rmSync(join(root, 'legacy-report-1'), { recursive: true });
+    mkdirSync(join(outside, 'legacy-report-1'));
+    writeFileSync(
+      join(outside, entry.sourceRelativeKey),
+      'receipt-one',
+    );
+    symlinkSync(
+      join(outside, 'legacy-report-1'),
+      join(root, 'legacy-report-1'),
+      'dir',
+    );
+    const target = new AwsMigrationTarget(
+      targetConfiguration(),
+      fakeAwsClients(),
+    );
+    await target.assertSafeTarget();
+    await expect(
+      (target.putAttachment as unknown as (
+        attachment: typeof entry,
+        sourcePath: string,
+        uploadsRoot: string,
+      ) => Promise<unknown>)(
+        entry,
+        join(root, entry.sourceRelativeKey),
+        root,
+      ),
+    ).rejects.toThrow('TARGET_ATTACHMENT_SOURCE_INVALID');
   });
 
   it('uses one conditional S3 key, verifies metadata, and repeats as HeadObject no-op', async () => {
@@ -948,8 +1255,8 @@ describe('attachment import and independent verification', () => {
     const target = new AwsMigrationTarget(targetConfiguration(), clients);
     await target.assertSafeTarget();
     const sourcePath = join(root, entry.sourceRelativeKey);
-    expect(await target.putAttachment(entry, sourcePath)).toBe('created');
-    expect(await target.putAttachment(entry, sourcePath)).toBe('unchanged');
+    expect(await target.putAttachment(entry, sourcePath, root)).toBe('created');
+    expect(await target.putAttachment(entry, sourcePath, root)).toBe('unchanged');
     const puts = clients.calls.filter(
       (call) => 'IfNoneMatch' in call.input,
     );
@@ -986,10 +1293,44 @@ describe('attachment import and independent verification', () => {
     };
     const target = new AwsMigrationTarget(targetConfiguration(), clients);
     await target.assertSafeTarget();
-    await expect(target.putAttachment(entry, sourcePath)).rejects.toThrow(
+    await expect(target.putAttachment(entry, sourcePath, root)).rejects.toThrow(
       `TARGET_ATTACHMENT_SOURCE_CHANGED:${entry.objectKey}`,
     );
   });
+
+  it.each(['directory', 'file'] as const)(
+    'fails closed if the source %s is replaced while S3 upload is in flight',
+    async (replacement) => {
+      const root = temporaryRoot();
+      const bundle = fixtureBundle();
+      addAttachment(bundle, root);
+      const entry = bundle.attachments[0];
+      const sourcePath = join(root, entry.sourceRelativeKey);
+      const sourceDirectory = join(root, 'legacy-report-1');
+      const clients = fakeAwsClients();
+      const originalSend = clients.s3.send.bind(clients.s3);
+      clients.s3.send = async (command) => {
+        const result = await originalSend(command);
+        if (command.constructor?.name === 'PutObjectCommand') {
+          if (replacement === 'directory') {
+            renameSync(sourceDirectory, join(root, 'replaced-directory'));
+            mkdirSync(sourceDirectory);
+          } else {
+            renameSync(sourcePath, `${sourcePath}.replaced`);
+          }
+          writeFileSync(sourcePath, 'receipt-one');
+        }
+        return result;
+      };
+      const target = new AwsMigrationTarget(targetConfiguration(), clients);
+      await target.assertSafeTarget();
+      await expect(
+        target.putAttachment(entry, sourcePath, root),
+      ).rejects.toThrow(
+        `TARGET_ATTACHMENT_SOURCE_CHANGED:${entry.objectKey}`,
+      );
+    },
+  );
 
   it('re-reads target records and objects and recomputes all raw, five derived, and two meal totals', async () => {
     const root = temporaryRoot();
