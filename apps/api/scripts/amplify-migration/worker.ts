@@ -38,9 +38,34 @@ interface WorkerMessage {
   files?: OutputFileRequest[];
 }
 
-function send(message: Record<string, unknown>): void {
-  if (!process.send) throw new Error('MIGRATION_WORKER_IPC_REQUIRED');
-  process.send(message);
+let workerAbortError: Error | undefined;
+const workerAbortListeners = new Set<(error: Error) => void>();
+
+function abortWorker(signal: NodeJS.Signals): void {
+  if (workerAbortError) return;
+  workerAbortError = new Error(`MIGRATION_WORKER_ABORTED:${signal}`);
+  for (const listener of workerAbortListeners) listener(workerAbortError);
+}
+
+function throwIfWorkerAborted(): void {
+  if (workerAbortError) throw workerAbortError;
+}
+
+function send(message: Record<string, unknown>): Promise<void> {
+  return new Promise((resolveSend, rejectSend) => {
+    if (!process.send || !process.connected) {
+      rejectSend(new Error('MIGRATION_WORKER_IPC_REQUIRED'));
+      return;
+    }
+    try {
+      process.send(message, (error) => {
+        if (error) rejectSend(new Error('MIGRATION_WORKER_SEND_FAILED'));
+        else resolveSend();
+      });
+    } catch {
+      rejectSend(new Error('MIGRATION_WORKER_SEND_FAILED'));
+    }
+  });
 }
 
 function waitForMessage(type: string): Promise<WorkerMessage> {
@@ -49,6 +74,10 @@ function waitForMessage(type: string): Promise<WorkerMessage> {
 
 function waitForOneOf(types: string[]): Promise<WorkerMessage> {
   return new Promise((resolveMessage, rejectMessage) => {
+    if (workerAbortError) {
+      rejectMessage(workerAbortError);
+      return;
+    }
     const onMessage = (message: WorkerMessage) => {
       if (!types.includes(message.type)) return;
       cleanup();
@@ -58,17 +87,27 @@ function waitForOneOf(types: string[]): Promise<WorkerMessage> {
       cleanup();
       rejectMessage(new Error('MIGRATION_WORKER_DISCONNECTED'));
     };
+    const onAbort = (error: Error) => {
+      cleanup();
+      rejectMessage(error);
+    };
     const cleanup = () => {
       process.off('message', onMessage);
       process.off('disconnect', onDisconnect);
+      workerAbortListeners.delete(onAbort);
     };
     process.on('message', onMessage);
     process.on('disconnect', onDisconnect);
+    workerAbortListeners.add(onAbort);
   });
 }
 
 function waitForDecision(): Promise<'accept' | 'cleanup'> {
   return new Promise((resolveDecision, rejectDecision) => {
+    if (workerAbortError) {
+      rejectDecision(workerAbortError);
+      return;
+    }
     const onMessage = (message: WorkerMessage) => {
       if (message.type !== 'accept' && message.type !== 'cleanup') return;
       cleanup();
@@ -78,12 +117,18 @@ function waitForDecision(): Promise<'accept' | 'cleanup'> {
       cleanup();
       rejectDecision(new Error('MIGRATION_WORKER_DISCONNECTED'));
     };
+    const onAbort = (error: Error) => {
+      cleanup();
+      rejectDecision(error);
+    };
     const cleanup = () => {
       process.off('message', onMessage);
       process.off('disconnect', onDisconnect);
+      workerAbortListeners.delete(onAbort);
     };
     process.on('message', onMessage);
     process.on('disconnect', onDisconnect);
+    workerAbortListeners.add(onAbort);
   });
 }
 
@@ -108,6 +153,23 @@ function assertHeldRegularFile(
     (expectedSize !== undefined && stat.size !== expectedSize)
   ) {
     throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+  }
+}
+
+function assertRequestedHeldFiles(
+  heldFiles: Map<OutputFileKind, HeldOutputFile>,
+  files: OutputFileRequest[],
+): void {
+  for (const file of files) {
+    const held = heldFiles.get(file.kind);
+    if (!held || held.name !== file.name || held.closed) {
+      throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+    }
+    assertHeldRegularFile(
+      held.fd,
+      held.identity,
+      BigInt(Buffer.byteLength(file.content, 'utf8')),
+    );
   }
 }
 
@@ -139,7 +201,7 @@ async function inventoryWorker(): Promise<void> {
   ) {
     throw new Error('UPLOAD_ROOT_IDENTITY_CHANGED');
   }
-  send({
+  await send({
     type: 'ready',
     device: root.dev.toString(),
     inode: root.ino.toString(),
@@ -148,6 +210,7 @@ async function inventoryWorker(): Promise<void> {
   const inventory = await inventoryUploadsFromAnchoredCwd(
     request.reportHints ?? [],
   );
+  throwIfWorkerAborted();
   const finalRoot = lstatSync('.', { bigint: true });
   if (
     !finalRoot.isDirectory() ||
@@ -156,7 +219,27 @@ async function inventoryWorker(): Promise<void> {
   ) {
     throw new Error('UPLOAD_ROOT_IDENTITY_CHANGED');
   }
-  send({ type: 'inventory', inventory });
+  await send({ type: 'inventory', inventory });
+}
+
+function removeOutputDirectory(
+  directoryName: string,
+  directoryIdentity: { dev: bigint; ino: bigint },
+  files: OutputFileRequest[],
+): void {
+  if (!pathMatchesDirectory(directoryName, directoryIdentity)) return;
+  for (const file of files) {
+    try {
+      unlinkSync(join(directoryName, file.name));
+    } catch {
+      // Keep an isolated directory if a child name no longer matches.
+    }
+  }
+  try {
+    rmdirSync(directoryName);
+  } catch {
+    // Never follow or recursively remove a changed output directory.
+  }
 }
 
 async function outputWorker(): Promise<void> {
@@ -175,6 +258,8 @@ async function outputWorker(): Promise<void> {
     throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
   }
   let materialized = false;
+  let accepted = false;
+  let requestedFiles: OutputFileRequest[] = [];
   const heldFiles = new Map<OutputFileKind, HeldOutputFile>();
   try {
     for (const [kind, name] of [
@@ -210,11 +295,15 @@ async function outputWorker(): Promise<void> {
       assertHeldRegularFile(fd, held.identity, 0n);
       heldFiles.set(kind, held);
     }
-    send({ type: 'ready', stageName });
+    await send({ type: 'ready', stageName });
     const request = await waitForOneOf(['write', 'cleanup']);
-    if (request.type === 'cleanup') return;
+    if (request.type === 'cleanup') {
+      await send({ type: 'cleaned' });
+      return;
+    }
+    requestedFiles = request.files ?? [];
     const requestedKinds = new Set<OutputFileKind>();
-    for (const file of request.files ?? []) {
+    for (const file of requestedFiles) {
       const held = heldFiles.get(file.kind);
       if (
         !held ||
@@ -225,7 +314,7 @@ async function outputWorker(): Promise<void> {
       }
       requestedKinds.add(file.kind);
       assertHeldRegularFile(held.fd, held.identity, 0n);
-      send({
+      await send({
         type: 'beforeWrite',
         fileKind: file.kind,
         stageName,
@@ -235,7 +324,7 @@ async function outputWorker(): Promise<void> {
       assertHeldRegularFile(held.fd, held.identity, 0n);
       writeFileSync(held.fd, file.content, { encoding: 'utf8' });
       fsyncSync(held.fd);
-      send({
+      await send({
         type: 'afterWrite',
         fileKind: file.kind,
         stageName,
@@ -251,10 +340,12 @@ async function outputWorker(): Promise<void> {
     if (!pathMatchesDirectory(stageName, stageStat)) {
       throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
     }
+    assertRequestedHeldFiles(heldFiles, requestedFiles);
     for (const held of heldFiles.values()) {
+      if (requestedKinds.has(held.kind)) continue;
       closeSync(held.fd);
       held.closed = true;
-      if (!requestedKinds.has(held.kind)) unlinkSync(held.relativePath);
+      unlinkSync(held.relativePath);
     }
     fsyncSync(stageFd);
     assertDirectoryIdentity(expectedDevice, expectedInode);
@@ -278,8 +369,15 @@ async function outputWorker(): Promise<void> {
     ) {
       throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
     }
+    assertRequestedHeldFiles(heldFiles, requestedFiles);
     renameSync(stageName, outputName);
     materialized = true;
+    assertRequestedHeldFiles(heldFiles, requestedFiles);
+    for (const file of requestedFiles) {
+      const held = heldFiles.get(file.kind)!;
+      closeSync(held.fd);
+      held.closed = true;
+    }
     const parentFd = openSync('.', constants.O_RDONLY | constants.O_DIRECTORY);
     try {
       fsyncSync(parentFd);
@@ -294,18 +392,19 @@ async function outputWorker(): Promise<void> {
     ) {
       throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
     }
-    send({
+    await send({
       type: 'materialized',
       device: published.dev.toString(),
       inode: published.ino.toString(),
     });
     const decision = await waitForDecision();
-    if (decision === 'cleanup') {
-      if (!pathMatchesDirectory(outputName, stageStat)) return;
-      for (const file of request.files ?? []) {
-        unlinkSync(join(outputName, file.name));
-      }
-      rmdirSync(outputName);
+    if (decision === 'accept') {
+      await send({ type: 'accepted' });
+      throwIfWorkerAborted();
+      accepted = true;
+    } else {
+      removeOutputDirectory(outputName, stageStat, requestedFiles);
+      await send({ type: 'cleaned' });
     }
   } finally {
     for (const held of heldFiles.values()) {
@@ -318,7 +417,9 @@ async function outputWorker(): Promise<void> {
       }
     }
     closeSync(stageFd);
-    if (!materialized && pathMatchesDirectory(stageName, stageStat)) {
+    if (materialized && !accepted) {
+      removeOutputDirectory(outputName, stageStat, requestedFiles);
+    } else if (!materialized && pathMatchesDirectory(stageName, stageStat)) {
       for (const held of [...heldFiles.values()].reverse()) {
         try {
           unlinkSync(held.relativePath);
@@ -341,12 +442,31 @@ async function main(): Promise<void> {
   else throw new Error('MIGRATION_WORKER_MODE_INVALID');
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error: unknown) => {
-    send({
-      type: 'error',
-      errorCode: error instanceof Error ? error.message : 'MIGRATION_WORKER_FAILED',
-    });
-    process.exit(1);
-  });
+async function runWorker(): Promise<void> {
+  const onSigint = () => abortWorker('SIGINT');
+  const onSigterm = () => abortWorker('SIGTERM');
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+  let exitCode = 0;
+  try {
+    await main();
+  } catch (error: unknown) {
+    exitCode = 1;
+    try {
+      await send({
+        type: 'error',
+        errorCode:
+          error instanceof Error ? error.message : 'MIGRATION_WORKER_FAILED',
+      });
+    } catch {
+      // The transport is already unavailable; cleanup remains authoritative.
+    }
+  } finally {
+    process.off('SIGINT', onSigint);
+    process.off('SIGTERM', onSigterm);
+    process.exitCode = exitCode;
+    if (process.connected) process.disconnect();
+  }
+}
+
+void runWorker();

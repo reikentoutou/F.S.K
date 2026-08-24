@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import {
   chmodSync,
+  existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -14,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { spawnSync } from 'node:child_process';
+import { fork, spawnSync, type ChildProcess } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -24,6 +28,11 @@ import {
   serializeMigrationBundle,
 } from './transform';
 import { inventoryUploads } from './inventory';
+import {
+  createWorkerClient,
+  spawnWorkerClient,
+  type WorkerClientProcess,
+} from './worker-client';
 
 const repositoryRoot = resolve(__dirname, '../../../..');
 const temporaryRoots: string[] = [];
@@ -314,6 +323,365 @@ afterEach(() => {
   while (temporaryRoots.length > 0) {
     rmSync(temporaryRoots.pop()!, { recursive: true, force: true });
   }
+});
+
+class FakeWorkerProcess extends EventEmitter implements WorkerClientProcess {
+  autoExitOnKill = true;
+  connected = true;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  readonly killSignals: Array<NodeJS.Signals | undefined> = [];
+  sendBehavior: (
+    message: Record<string, unknown>,
+    callback: (error: Error | null) => void,
+  ) => void = (_message, callback) => queueMicrotask(() => callback(null));
+
+  send(
+    message: Record<string, unknown>,
+    callback: (error: Error | null) => void,
+  ): boolean {
+    this.sendBehavior(message, callback);
+    return true;
+  }
+
+  kill(signal?: NodeJS.Signals): boolean {
+    this.killSignals.push(signal);
+    if (
+      this.autoExitOnKill &&
+      this.exitCode === null &&
+      this.signalCode === null
+    ) {
+      queueMicrotask(() => this.finish(null, signal ?? 'SIGTERM'));
+    }
+    return true;
+  }
+
+  disconnectUnexpectedly(): void {
+    this.connected = false;
+    this.emit('disconnect');
+  }
+
+  finish(code: number | null, signal: NodeJS.Signals | null = null): void {
+    if (this.exitCode !== null || this.signalCode !== null) return;
+    this.connected = false;
+    this.exitCode = code;
+    this.signalCode = signal;
+    this.emit('exit', code, signal);
+  }
+
+  closeWithoutExit(code: number | null): void {
+    this.connected = false;
+    this.emit('close', code, null);
+  }
+}
+
+describe('worker IPC client lifecycle', () => {
+  const clientOptions = { timeoutMs: 20, terminateGraceMs: 20 };
+
+  it('times out a worker that never responds and reaps it', async () => {
+    const child = new FakeWorkerProcess();
+    const client = createWorkerClient(child, clientOptions);
+
+    await expect(client.waitFor(['ready'])).rejects.toThrow(
+      'MIGRATION_WORKER_TIMEOUT',
+    );
+    expect(child.signalCode).toBe('SIGTERM');
+  });
+
+  it('fails closed on disconnect and reaps the worker once', async () => {
+    const child = new FakeWorkerProcess();
+    const client = createWorkerClient(child, clientOptions);
+    const result = client.waitFor(['ready']);
+    queueMicrotask(() => child.disconnectUnexpectedly());
+
+    await expect(result).rejects.toThrow('MIGRATION_WORKER_DISCONNECTED');
+    expect(child.signalCode).toBe('SIGTERM');
+    expect(child.killSignals).toEqual(['SIGTERM']);
+  });
+
+  it('maps a synchronous spawn error to a controlled code', () => {
+    expect(() =>
+      spawnWorkerClient(() => {
+        throw new Error('EACCES: synthetic spawn failure');
+      }, clientOptions),
+    ).toThrow('MIGRATION_WORKER_SPAWN_FAILED');
+  });
+
+  it('maps a child error event to a controlled code and reaps it', async () => {
+    const child = new FakeWorkerProcess();
+    child.autoExitOnKill = false;
+    const client = createWorkerClient(child, clientOptions);
+    const result = client.waitFor(['ready']);
+    queueMicrotask(() => {
+      child.emit('error', new Error('synthetic spawn error'));
+      queueMicrotask(() => child.closeWithoutExit(-2));
+    });
+
+    await expect(result).rejects.toThrow('MIGRATION_WORKER_SPAWN_FAILED');
+    expect(child.killSignals).toEqual(['SIGTERM']);
+  });
+
+  it('rejects a failed send callback without waiting for a response', async () => {
+    const child = new FakeWorkerProcess();
+    child.sendBehavior = (_message, callback) =>
+      queueMicrotask(() => callback(new Error('synthetic send failure')));
+    const client = createWorkerClient(child, clientOptions);
+
+    await expect(
+      client.request({ type: 'inventory' }, ['inventory']),
+    ).rejects.toThrow('MIGRATION_WORKER_SEND_FAILED');
+    expect(child.signalCode).toBe('SIGTERM');
+  });
+
+  it('does not settle a one-way send before its callback acknowledges the flush', async () => {
+    const child = new FakeWorkerProcess();
+    let acknowledge: ((error: Error | null) => void) | undefined;
+    child.sendBehavior = (_message, callback) => {
+      acknowledge = callback;
+    };
+    const client = createWorkerClient(child, clientOptions);
+    let settled = false;
+
+    const sending = client.send({ type: 'accept' }).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    acknowledge?.(null);
+    await sending;
+    expect(settled).toBe(true);
+    await client.terminateAndReap();
+  });
+
+  it('rejects an early worker exit with a controlled code', async () => {
+    const child = new FakeWorkerProcess();
+    const client = createWorkerClient(child, clientOptions);
+    const result = client.waitFor(['ready']);
+    queueMicrotask(() => child.finish(7));
+
+    await expect(result).rejects.toThrow('MIGRATION_WORKER_EXITED');
+  });
+
+  it('settles once and safely ignores late messages and errors', async () => {
+    const child = new FakeWorkerProcess();
+    const client = createWorkerClient(child, clientOptions);
+
+    await expect(client.waitFor(['ready'])).rejects.toThrow(
+      'MIGRATION_WORKER_TIMEOUT',
+    );
+    expect(() => {
+      child.emit('message', { type: 'ready' });
+      child.emit('error', new Error('late synthetic error'));
+    }).not.toThrow();
+    await expect(client.waitFor(['ready'])).rejects.toThrow(
+      'MIGRATION_WORKER_CLOSED',
+    );
+    expect(child.killSignals).toEqual(['SIGTERM']);
+  });
+
+  it('rejects an unbounded timeout configuration', () => {
+    const child = new FakeWorkerProcess();
+
+    expect(() =>
+      createWorkerClient(child, {
+        timeoutMs: 60 * 60 * 1_000,
+        terminateGraceMs: 20,
+      }),
+    ).toThrow('MIGRATION_WORKER_TIMEOUT_INVALID');
+  });
+});
+
+function forkMigrationWorker(
+  mode: string,
+  args: string[],
+  cwd: string,
+): ChildProcess {
+  return fork(
+    resolve(repositoryRoot, 'apps/api/scripts/amplify-migration/worker.ts'),
+    [mode, ...args],
+    {
+      cwd,
+      execArgv: ['--import', require.resolve('tsx')],
+      stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+    },
+  );
+}
+
+function waitForChildMessage(
+  child: ChildProcess,
+  type: string,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolveMessage, rejectMessage) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      rejectMessage(new Error(`TEST_WORKER_MESSAGE_TIMEOUT:${type}`));
+    }, 2_000);
+    const onMessage = (message: unknown) => {
+      if (
+        typeof message !== 'object' ||
+        message === null ||
+        !('type' in message) ||
+        message.type !== type
+      ) {
+        return;
+      }
+      cleanup();
+      resolveMessage(message as Record<string, unknown>);
+    };
+    const onExit = () => {
+      cleanup();
+      rejectMessage(new Error(`TEST_WORKER_EXIT_BEFORE_MESSAGE:${type}`));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      rejectMessage(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off('message', onMessage);
+      child.off('exit', onExit);
+      child.off('error', onError);
+    };
+    child.on('message', onMessage);
+    child.on('exit', onExit);
+    child.on('error', onError);
+  });
+}
+
+function sendChildMessage(
+  child: ChildProcess,
+  message: Record<string, unknown>,
+): Promise<void> {
+  return new Promise((resolveSend, rejectSend) => {
+    child.send(message, (error) => {
+      if (error) rejectSend(error);
+      else resolveSend();
+    });
+  });
+}
+
+function waitForChildExit(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolveExit, rejectExit) => {
+    child.once('error', rejectExit);
+    child.once('exit', (code, signal) => resolveExit({ code, signal }));
+  });
+}
+
+describe('worker IPC flush and signal cleanup', () => {
+  function startOutputWorker(outputName: string) {
+    const outputParent = temporaryRoot();
+    const parent = lstatSync(outputParent, { bigint: true });
+    const child = forkMigrationWorker(
+      'output',
+      [outputName, parent.dev.toString(), parent.ino.toString()],
+      outputParent,
+    );
+    return { child, outputParent };
+  }
+
+  it('flushes the accepted result before a natural successful exit', async () => {
+    const { child, outputParent } = startOutputWorker('accepted-output');
+    const ready = await waitForChildMessage(child, 'ready');
+    const beforeWrite = waitForChildMessage(child, 'beforeWrite');
+    await sendChildMessage(child, {
+      type: 'write',
+      files: [
+        {
+          kind: 'status',
+          name: 'migration-status.json',
+          content: '{"status":"complete","errorCode":null}\n',
+        },
+      ],
+    });
+    await beforeWrite;
+    const afterWrite = waitForChildMessage(child, 'afterWrite');
+    await sendChildMessage(child, { type: 'continue' });
+    await afterWrite;
+    const materialized = waitForChildMessage(child, 'materialized');
+    await sendChildMessage(child, { type: 'continue' });
+    await materialized;
+
+    const accepted = waitForChildMessage(child, 'accepted');
+    const exited = waitForChildExit(child);
+    await sendChildMessage(child, { type: 'accept' });
+
+    await expect(accepted).resolves.toEqual({ type: 'accepted' });
+    await expect(exited).resolves.toEqual({ code: 0, signal: null });
+    expect(typeof ready.stageName).toBe('string');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(outputParent, 'accepted-output', 'migration-status.json'),
+          'utf8',
+        ),
+      ),
+    ).toEqual({ status: 'complete', errorCode: null });
+  });
+
+  it.each(['SIGINT', 'SIGTERM'] as const)(
+    'cleans private staging and exposes no payload after %s',
+    async (signal) => {
+      const outputName = `signal-${signal.toLowerCase()}-output`;
+      const { child, outputParent } = startOutputWorker(outputName);
+      const ready = await waitForChildMessage(child, 'ready');
+      const stageName = ready.stageName;
+      if (typeof stageName !== 'string') throw new Error('TEST_STAGE_NAME_MISSING');
+
+      const beforeWrite = waitForChildMessage(child, 'beforeWrite');
+      await sendChildMessage(child, {
+        type: 'write',
+        files: [
+          {
+            kind: 'bundle',
+            name: 'migration-bundle.json',
+            content: '{"synthetic":true}\n',
+          },
+          {
+            kind: 'status',
+            name: 'migration-status.json',
+            content: '{"status":"complete","errorCode":null}\n',
+          },
+        ],
+      });
+      await beforeWrite;
+      const afterWrite = waitForChildMessage(child, 'afterWrite');
+      await sendChildMessage(child, { type: 'continue' });
+      await afterWrite;
+      const errorMessage = waitForChildMessage(child, 'error');
+      const exited = waitForChildExit(child);
+
+      child.kill(signal);
+
+      await expect(errorMessage).resolves.toMatchObject({
+        type: 'error',
+        errorCode: `MIGRATION_WORKER_ABORTED:${signal}`,
+      });
+      await expect(exited).resolves.toMatchObject({ code: 1, signal: null });
+      expect(existsSync(join(outputParent, stageName))).toBe(false);
+      expect(existsSync(join(outputParent, outputName))).toBe(false);
+    },
+  );
+
+  it('flushes a controlled error before natural failure exit', async () => {
+    const root = temporaryRoot();
+    const child = forkMigrationWorker('invalid-mode', [], root);
+    const events: string[] = [];
+    child.on('message', (message: { type?: string }) => {
+      events.push(message.type ?? 'unknown');
+    });
+    child.on('exit', () => events.push('exit'));
+    const errorMessage = waitForChildMessage(child, 'error');
+    const exited = waitForChildExit(child);
+
+    await expect(errorMessage).resolves.toEqual({
+      type: 'error',
+      errorCode: 'MIGRATION_WORKER_MODE_INVALID',
+    });
+    await expect(exited).resolves.toEqual({ code: 1, signal: null });
+    expect(events).toEqual(['error', 'exit']);
+  });
 });
 
 describe('SQLite migration transform', () => {
@@ -1504,6 +1872,36 @@ describe('dry-run CLI', () => {
       expect(() => readFileSync(join(outputPath, 'migration-status.json'))).toThrow();
     },
   );
+
+  it('revalidates the complete held file set after status finalization before publication', async () => {
+    const fixture = createFixture();
+    const outputPath = join(fixture.root, 'late-bundle-hardlink-output');
+    const evidencePath = join(fixture.root, 'late-bundle-hardlink-evidence');
+    let bundleStagingPath: string | undefined;
+
+    await expect(
+      runDryRunCli(
+        ['--sqlite', fixture.sqlitePath, '--uploads', fixture.uploadsPath, '--out', outputPath],
+        repositoryRoot,
+        {
+          afterWorkerFileWrite: ({ fileKind, stagingFilePath }) => {
+            if (fileKind === 'bundle') bundleStagingPath = stagingFilePath;
+            if (fileKind === 'status') {
+              if (!bundleStagingPath) throw new Error('TEST_BUNDLE_PATH_MISSING');
+              linkSync(bundleStagingPath, evidencePath);
+            }
+          },
+        },
+      ),
+    ).rejects.toThrow('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+    expect(readFileSync(evidencePath).byteLength).toBeGreaterThan(0);
+    expect(() => readFileSync(join(outputPath, 'migration-status.json'))).toThrow();
+    expect(
+      readdirSync(fixture.root).filter((name) =>
+        name.startsWith('.fsk-migration-output-'),
+      ),
+    ).toEqual([]);
+  });
 
   it('publishes a valid aborted status when source validation fails', async () => {
     const fixture = createFixture();

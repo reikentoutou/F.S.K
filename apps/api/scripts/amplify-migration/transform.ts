@@ -1,5 +1,5 @@
 import { lstatSync, realpathSync } from 'node:fs';
-import { fork, type ChildProcess } from 'node:child_process';
+import { fork } from 'node:child_process';
 import {
   dirname,
   isAbsolute,
@@ -25,6 +25,13 @@ import type {
   UploadInventory,
 } from './contracts';
 import { buildMigrationSummary, serializeMigrationReport } from './report';
+import {
+  spawnWorkerClient,
+  type WorkerClient,
+  type WorkerClientOptions,
+  type WorkerClientProcess,
+  type WorkerEnvelope,
+} from './worker-client';
 
 interface LegacyDailyReportRow {
   id: unknown;
@@ -457,6 +464,7 @@ function bundleFromSource(
 export async function createMigrationBundle(
   sqlitePath: string,
   uploadsPath: string,
+  workerOptions: Partial<WorkerClientOptions> = {},
 ): Promise<MigrationBundle> {
   const sqliteSource = pathIdentity(sqlitePath, 'file');
   const uploadsSource = pathIdentity(uploadsPath, 'directory');
@@ -467,6 +475,7 @@ export async function createMigrationBundle(
       legacyReportId: report.sourceId,
       reportKey: report.record.reportKey,
     })),
+    resolveWorkerOptions(workerOptions),
   );
   try {
     const uploadInventory = await session.collect();
@@ -483,7 +492,7 @@ export async function createMigrationBundle(
     }
     return bundleFromSource(source, uploadInventory);
   } finally {
-    if (session.child.connected) session.child.kill();
+    await session.close();
   }
 }
 
@@ -690,8 +699,7 @@ function createOutputSafetyContext(
 
 type OutputFileKind = 'bundle' | 'report' | 'status';
 
-interface WorkerEnvelope {
-  type: string;
+interface MigrationWorkerEnvelope extends WorkerEnvelope {
   errorCode?: string;
   stageName?: string;
   fileName?: string;
@@ -702,12 +710,11 @@ interface WorkerEnvelope {
 }
 
 interface InventoryWorkerSession {
-  child: ChildProcess;
   collect(): Promise<UploadInventory>;
+  close(): Promise<void>;
 }
 
 interface OutputWorkerSession {
-  child: ChildProcess;
   stageName: string;
   write(
     files: Array<{ kind: OutputFileKind; name: string; content: string }>,
@@ -725,117 +732,92 @@ function spawnWorker(
   mode: 'inventory' | 'output',
   cwd: string,
   args: string[],
-): ChildProcess {
-  return fork(workerScriptPath(), [mode, ...args], {
-    cwd,
-    execArgv: ['--import', require.resolve('tsx')],
-    stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
-  });
+  options: WorkerClientOptions,
+): WorkerClient {
+  return spawnWorkerClient(
+    () =>
+      fork(workerScriptPath(), [mode, ...args], {
+        cwd,
+        execArgv: ['--import', require.resolve('tsx')],
+        stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+      }) as WorkerClientProcess,
+    options,
+  );
 }
 
-function waitForWorkerMessage(
-  child: ChildProcess,
-  acceptedTypes: string[],
-): Promise<WorkerEnvelope> {
-  return new Promise((resolveMessage, rejectMessage) => {
-    const onMessage = (message: WorkerEnvelope) => {
-      if (message.type === 'error') {
-        cleanup();
-        rejectMessage(new Error(message.errorCode ?? 'MIGRATION_WORKER_FAILED'));
-      } else if (acceptedTypes.includes(message.type)) {
-        cleanup();
-        resolveMessage(message);
-      }
-    };
-    const onExit = (code: number | null) => {
-      cleanup();
-      rejectMessage(new Error(`MIGRATION_WORKER_EXIT:${code ?? 'signal'}`));
-    };
-    const cleanup = () => {
-      child.off('message', onMessage);
-      child.off('exit', onExit);
-    };
-    child.on('message', onMessage);
-    child.on('exit', onExit);
-  });
-}
+const DEFAULT_WORKER_OPTIONS: WorkerClientOptions = {
+  timeoutMs: 15 * 60 * 1_000,
+  terminateGraceMs: 2_000,
+};
 
-function sendWorkerMessage(
-  child: ChildProcess,
-  message: Record<string, unknown>,
-): void {
-  if (!child.connected) throw new Error('MIGRATION_WORKER_DISCONNECTED');
-  child.send(message);
+function resolveWorkerOptions(
+  options: Partial<WorkerClientOptions>,
+): WorkerClientOptions {
+  return { ...DEFAULT_WORKER_OPTIONS, ...options };
 }
 
 async function startInventoryWorker(
   uploadsSource: PathIdentity,
   reportHints: Array<{ legacyReportId: string; reportKey: string }>,
+  options: WorkerClientOptions,
 ): Promise<InventoryWorkerSession> {
-  const child = spawnWorker('inventory', uploadsSource.canonicalPath, [
+  const client = spawnWorker('inventory', uploadsSource.canonicalPath, [
     uploadsSource.device.toString(),
     uploadsSource.inode.toString(),
-  ]);
+  ], options);
   try {
-    await waitForWorkerMessage(child, ['ready']);
+    await client.waitFor(['ready']);
   } catch (error) {
-    child.kill();
+    await client.terminateAndReap();
     throw error;
   }
   return {
-    child,
     async collect() {
-      const response = waitForWorkerMessage(child, ['inventory']);
-      sendWorkerMessage(child, { type: 'inventory', reportHints });
-      const message = await response;
+      const message = (await client.request(
+        { type: 'inventory', reportHints },
+        ['inventory'],
+      )) as MigrationWorkerEnvelope;
       if (!message.inventory) throw new Error('MIGRATION_WORKER_RESULT_INVALID');
       return message.inventory;
     },
+    close: () => client.terminateAndReap(),
   };
 }
 
 async function startOutputWorker(
   context: OutputSafetyContext,
+  options: WorkerClientOptions,
 ): Promise<OutputWorkerSession> {
   const outputName = context.outputPath.slice(
     dirname(context.outputPath).length + 1,
   );
-  const child = spawnWorker('output', context.outputParent.canonicalPath, [
+  const client = spawnWorker('output', context.outputParent.canonicalPath, [
     outputName,
     context.outputParent.device.toString(),
     context.outputParent.inode.toString(),
-  ]);
-  let ready: WorkerEnvelope;
+  ], options);
+  let ready: MigrationWorkerEnvelope;
   try {
-    ready = await waitForWorkerMessage(child, ['ready']);
+    ready = (await client.waitFor(['ready'])) as MigrationWorkerEnvelope;
   } catch (error) {
-    child.kill();
+    await client.terminateAndReap();
     throw error;
   }
   if (!ready.stageName) {
-    child.kill();
+    await client.terminateAndReap();
     throw new Error('MIGRATION_WORKER_RESULT_INVALID');
   }
   let materialized = false;
   let writeStarted = false;
-  const waitForExit = () =>
-    new Promise<void>((resolveExit) => {
-      if (child.exitCode !== null) resolveExit();
-      else child.once('exit', () => resolveExit());
-    });
   return {
-    child,
     stageName: ready.stageName,
     async write(files, hooks) {
       writeStarted = true;
-      let next = waitForWorkerMessage(child, [
-        'beforeWrite',
-        'afterWrite',
-        'materialized',
-      ]);
-      sendWorkerMessage(child, { type: 'write', files });
+      let message = (await client.request(
+        { type: 'write', files },
+        ['beforeWrite', 'afterWrite', 'materialized'],
+      )) as MigrationWorkerEnvelope;
       while (true) {
-        const message = await next;
         if (message.type === 'materialized') {
           if (!message.device || !message.inode) {
             throw new Error('MIGRATION_WORKER_RESULT_INVALID');
@@ -866,27 +848,27 @@ async function startOutputWorker(
             stagingFilePath,
           });
         }
-        next = waitForWorkerMessage(child, [
-          'beforeWrite',
-          'afterWrite',
-          'materialized',
-        ]);
-        sendWorkerMessage(child, { type: 'continue' });
+        message = (await client.request(
+          { type: 'continue' },
+          ['beforeWrite', 'afterWrite', 'materialized'],
+        )) as MigrationWorkerEnvelope;
       }
     },
     async accept() {
-      const exited = waitForExit();
-      sendWorkerMessage(child, { type: 'accept' });
-      await exited;
+      await client.request({ type: 'accept' }, ['accepted']);
+      await client.waitForExit();
     },
     async cleanup() {
-      const exited = waitForExit();
-      if ((materialized || !writeStarted) && child.connected) {
-        sendWorkerMessage(child, { type: 'cleanup' });
-      } else {
-        child.kill();
+      try {
+        if (materialized || !writeStarted) {
+          await client.request({ type: 'cleanup' }, ['cleaned']);
+          await client.waitForExit();
+          return;
+        }
+      } catch {
+        // A failed transport is reaped below; the worker owns safe cleanup.
       }
-      await exited;
+      await client.terminateAndReap();
     },
   };
 }
@@ -937,6 +919,7 @@ export async function runDryRunCli(
   args: string[],
   repositoryRoot = resolve(__dirname, '../../../..'),
   hooks: DryRunSafetyHooks = {},
+  workerOptions: Partial<WorkerClientOptions> = {},
 ): Promise<void> {
   const parsed = parseCliArguments(args);
   const safety = createOutputSafetyContext(parsed, repositoryRoot);
@@ -954,9 +937,16 @@ export async function runDryRunCli(
       reportKey: report.record.reportKey,
     })) ?? [];
   const inventorySessionPromise = source
-    ? startInventoryWorker(safety.uploadsSource, reportHints)
+    ? startInventoryWorker(
+        safety.uploadsSource,
+        reportHints,
+        resolveWorkerOptions(workerOptions),
+      )
     : undefined;
-  const outputSessionPromise = startOutputWorker(safety);
+  const outputSessionPromise = startOutputWorker(
+    safety,
+    resolveWorkerOptions(workerOptions),
+  );
   let inventorySession: InventoryWorkerSession | undefined;
   let outputSession: OutputWorkerSession | undefined;
   let outputAccepted = false;
@@ -1056,7 +1046,7 @@ export async function runDryRunCli(
     await outputSession.accept();
     outputAccepted = true;
   } finally {
-    if (inventorySession?.child.connected) inventorySession.child.kill();
+    if (inventorySession) await inventorySession.close();
     if (outputSession && !outputAccepted) await outputSession.cleanup();
   }
   if (terminalError) throw terminalError;
