@@ -143,6 +143,23 @@ export function responsiblePersonSnapshot(
   }
   return selectedMasterName;
 }
+
+export function ownerReportPersonName(
+  existing: {
+    responsiblePersonId: string;
+    responsiblePersonSnapshot: string;
+  } | null,
+  selectedId: string,
+  persons: Array<{ id: string; name: string }>,
+): string {
+  const selected = persons.find((person) => person.id === selectedId);
+  if (!selected) {
+    return existing?.responsiblePersonId === selectedId
+      ? existing.responsiblePersonSnapshot
+      : '—';
+  }
+  return responsiblePersonSnapshot(existing, selectedId, selected.name);
+}
 </script>
 
 <script setup lang="ts">
@@ -235,10 +252,11 @@ const shiftName = computed(
 );
 const personName = computed(
   () =>
-    persons.value.find((person) => person.id === form.responsiblePersonId)
-      ?.name ??
-    existingReport.value?.responsiblePersonSnapshot ??
-    '—',
+    ownerReportPersonName(
+      existingReport.value,
+      form.responsiblePersonId,
+      persons.value,
+    ),
 );
 const preview = useDailyReportPreview(form, registerFloatAmount);
 
@@ -450,10 +468,10 @@ function buildCommand(): CreateDailyReportCommand {
     shiftNameSnapshot:
       existingReport.value?.shiftNameSnapshot ?? selectedShift.name,
     responsiblePersonId: payload.responsiblePersonId,
-    responsiblePersonSnapshot: responsiblePersonSnapshot(
+    responsiblePersonSnapshot: ownerReportPersonName(
       existingReport.value,
       payload.responsiblePersonId,
-      selectedPerson.name,
+      persons.value,
     ),
     startMinuteOfDay: payload.startMinuteOfDay,
     endMinuteOfDay: payload.endMinuteOfDay,

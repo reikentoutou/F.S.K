@@ -45,6 +45,14 @@ interface ReportActions {
     selectedId: string,
     selectedMasterName: string,
   ): string;
+  ownerReportPersonName(
+    existing: {
+      responsiblePersonId: string;
+      responsiblePersonSnapshot: string;
+    } | null,
+    selectedId: string,
+    persons: Array<{ id: string; name: string }>,
+  ): string;
 }
 
 const actions = reportView as unknown as ReportActions;
@@ -319,5 +327,23 @@ describe('OWNER report repository actions', () => {
       actions.responsiblePersonSnapshot(existing, 'p2', '李四'),
     ).toBe('李四');
     expect(actions.responsiblePersonSnapshot(null, 'p1', '张三')).toBe('张三');
+  });
+
+  it('uses the command snapshot resolver for the responsible person shown on confirmation', () => {
+    const existing = {
+      responsiblePersonId: 'p1',
+      responsiblePersonSnapshot: '历史姓名',
+    };
+    const persons = [
+      { id: 'p1', name: '主数据新姓名' },
+      { id: 'p2', name: '李四' },
+    ];
+
+    expect(actions.ownerReportPersonName(existing, 'p1', persons)).toBe(
+      '历史姓名',
+    );
+    expect(actions.ownerReportPersonName(existing, 'p2', persons)).toBe(
+      '李四',
+    );
   });
 });
