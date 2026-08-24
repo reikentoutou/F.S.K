@@ -1911,6 +1911,67 @@ printf '%s' "$FSK_RULE_RESPONSE" | fsk_select_exact_owned_db_ingress_ids
     expect(result.stdout).toBe('sgr-orphan\n');
   });
 
+  it('waits for every operations security-group ENI to disappear before deleting the group', () => {
+    let waitForEnis = '';
+    try {
+      waitForEnis = extractBashFunction(
+        MIGRATION_RUNBOOK,
+        'fsk_wait_for_operations_sg_enis_released',
+      );
+    } catch {
+      // RED: without the wait function the delete runs before ENI release.
+    }
+    const script = `set -euo pipefail
+fsk_delete_owned_application_routes() { :; }
+fsk_discover_owned_db_ingress_ids() { :; }
+fsk_discover_owned_nat_ids() { :; }
+fsk_discover_owned_eip_ids() { :; }
+fsk_discover_owned_route_table_ids() { :; }
+fsk_discover_owned_public_subnet_ids() { :; }
+fsk_discover_owned_igw_ids() { :; }
+fsk_discover_owned_operations_sg_ids() { printf 'sg-operations\\n'; }
+fsk_run_before_cleanup_deadline() { "$@"; }
+fsk_sleep_before_cleanup_deadline() { :; }
+FSK_CLEANUP_POLL_SECONDS=0
+${waitForEnis}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_owned_temporary_resources_once')}
+fsk_delete_owned_temporary_resources_once
+`;
+    const result = runWithMockAws(
+      script,
+      `case " $* " in
+  *' ec2 describe-network-interfaces '*)
+    count=0
+    if [ -f "$FSK_MOCK_AWS_LOG.eni-count" ]; then
+      count="$(cat "$FSK_MOCK_AWS_LOG.eni-count")"
+    fi
+    count=$((count + 1))
+    printf '%s' "$count" > "$FSK_MOCK_AWS_LOG.eni-count"
+    if [ "$count" -lt 3 ]; then
+      printf '{"NetworkInterfaces":[{"NetworkInterfaceId":"eni-worker","Groups":[{"GroupId":"sg-operations"}]}]}'
+    else
+      printf '{"NetworkInterfaces":[]}'
+    fi
+    ;;
+  *' ec2 delete-security-group '*)
+    test "$(cat "$FSK_MOCK_AWS_LOG.eni-count")" -ge 3
+    ;;
+  *) exit 64 ;;
+esac`,
+      OWNERSHIP_ENVIRONMENT,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      result.awsCalls.filter((call) =>
+        call.includes('describe-network-interfaces'),
+      ),
+    ).toHaveLength(3);
+    expect(
+      result.awsCalls.filter((call) => call.includes('delete-security-group')),
+    ).toHaveLength(1);
+  });
+
   it.each([
     ['deadline timeout', 'timeout'],
     ['describe failure', 'failure'],
@@ -1985,6 +2046,7 @@ ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_residual_count')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_describe_default_route_target')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_owned_application_routes')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_count_owned_application_route_residuals')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_wait_for_operations_sg_enis_released')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_delete_owned_temporary_resources_once')}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_control_cleanup_owned_resources')}
 fsk_control_cleanup_owned_resources
@@ -2008,6 +2070,7 @@ fsk_control_cleanup_owned_resources
   *' ec2 describe-addresses '*) printf '{"Addresses":[]}' ;;
   *' ec2 describe-subnets '*) printf '{"Subnets":[]}' ;;
   *' ec2 describe-internet-gateways '*) printf '{"InternetGateways":[]}' ;;
+  *' ec2 describe-network-interfaces '*) printf '{"NetworkInterfaces":[]}' ;;
   *' ec2 describe-security-groups '*)
     if [ -f "$FSK_MOCK_AWS_LOG.deleted" ]; then
       printf '{"SecurityGroups":[]}'

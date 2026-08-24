@@ -1046,6 +1046,36 @@ fsk_wait_for_owned_nat_deleted() {
   done
 }
 
+fsk_wait_for_operations_sg_enis_released() {
+  local operations_sg_id="${1:?operations security group ID required}"
+  local response eni_count
+  while :; do
+    response="$(fsk_run_before_cleanup_deadline \
+      aws ec2 describe-network-interfaces --region ap-northeast-1 \
+        --filters "Name=group-id,Values=${operations_sg_id}" \
+        --output json)" || return 1
+    eni_count="$(FSK_ENI_RESPONSE="$response" \
+      FSK_EXPECTED_OPERATIONS_SG_ID="$operations_sg_id" node -e '
+        const input = JSON.parse(process.env.FSK_ENI_RESPONSE ?? "");
+        if (!Object.hasOwn(input, "NetworkInterfaces") ||
+            !Array.isArray(input.NetworkInterfaces)) process.exit(2);
+        for (const eni of input.NetworkInterfaces) {
+          if (!eni || typeof eni !== "object" ||
+              typeof eni.NetworkInterfaceId !== "string" ||
+              !Array.isArray(eni.Groups) ||
+              !eni.Groups.some((group) => group?.GroupId ===
+                process.env.FSK_EXPECTED_OPERATIONS_SG_ID)) process.exit(2);
+        }
+        process.stdout.write(String(input.NetworkInterfaces.length));
+      ')" || return 1
+    case "$eni_count" in
+      0) return 0 ;;
+      *[!0-9]*|'') echo 'OPERATIONS_SG_ENI_COUNT_INVALID_BLOCKED' >&2; return 1 ;;
+      *) fsk_sleep_before_cleanup_deadline "$FSK_CLEANUP_POLL_SECONDS" || return 1 ;;
+    esac
+  done
+}
+
 fsk_delete_owned_temporary_resources_once() {
   local id association ids attachment_vpc
   FSK_MIGRATION_PHASE=cleanup
@@ -1120,6 +1150,7 @@ fsk_delete_owned_temporary_resources_once() {
   ids="$(fsk_discover_owned_operations_sg_ids)" || return 1
   while read -r id; do
     [ -n "$id" ] || continue
+    fsk_wait_for_operations_sg_enis_released "$id" || return 1
     fsk_run_before_cleanup_deadline aws ec2 delete-security-group \
       --region ap-northeast-1 --group-id "$id" >/dev/null || return 1
   done <<< "$ids"
