@@ -2,7 +2,7 @@ export type DataRepositoryErrorCode =
   | 'REPORT_ALREADY_EXISTS'
   | 'SUBMISSION_RESULT_UNKNOWN'
   | 'DATA_UNAUTHORIZED'
-  | 'REPORT_NOT_FOUND'
+  | 'DATA_NOT_FOUND'
   | 'DATA_CONFLICT'
   | 'DATA_PAGINATION_FAILED'
   | 'DATA_NETWORK_ERROR'
@@ -70,7 +70,7 @@ export function classifyDataFailure(cause?: unknown): DataRepositoryError {
       'resourcenotfoundexception',
     ])
   ) {
-    return new DataRepositoryError('REPORT_NOT_FOUND', { cause });
+    return new DataRepositoryError('DATA_NOT_FOUND', { cause });
   }
   if (
     hasTrustedStatus(cause, [409]) ||
@@ -90,8 +90,8 @@ export function dataPaginationFailed(cause?: unknown): DataRepositoryError {
   return new DataRepositoryError('DATA_PAGINATION_FAILED', { cause });
 }
 
-export function reportNotFound(cause?: unknown): DataRepositoryError {
-  return new DataRepositoryError('REPORT_NOT_FOUND', { cause });
+export function dataNotFound(cause?: unknown): DataRepositoryError {
+  return new DataRepositoryError('DATA_NOT_FOUND', { cause });
 }
 
 function trustedRecords(value: unknown): Record<string, unknown>[] {

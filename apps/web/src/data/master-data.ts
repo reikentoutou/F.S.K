@@ -4,6 +4,7 @@ import { getDataClient, type FskDataClient } from './client';
 import {
   DataRepositoryError,
   classifyDataFailure,
+  dataNotFound,
   dataOperationFailed,
   dataPaginationFailed,
   hasDataErrors,
@@ -58,13 +59,16 @@ function assertSetting(value: AppSettingInput): void {
 
 async function dataResult<T>(
   load: () => Promise<{ data: T | null; errors?: readonly unknown[] }>,
+  nullResult: 'NOT_FOUND' | 'OPERATION_FAILED' = 'OPERATION_FAILED',
 ): Promise<T> {
   try {
     const result = await load();
     if (hasDataErrors(result.errors)) {
       throw classifyDataFailure(result.errors);
     }
-    if (result.data === null) throw dataOperationFailed();
+    if (result.data === null) {
+      throw nullResult === 'NOT_FOUND' ? dataNotFound() : dataOperationFailed();
+    }
     return result.data;
   } catch (cause) {
     if (cause instanceof DataRepositoryError) throw cause;
@@ -144,7 +148,10 @@ export function createOwnerMasterDataRepository(
       return dataResult(() => resolveClient().models.AppSetting.delete({ id }));
     },
     async getSetting(id: string) {
-      return dataResult(() => resolveClient().models.AppSetting.get({ id }));
+      return dataResult(
+        () => resolveClient().models.AppSetting.get({ id }),
+        'NOT_FOUND',
+      );
     },
   };
 }

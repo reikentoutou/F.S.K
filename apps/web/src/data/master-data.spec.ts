@@ -299,4 +299,23 @@ describe('master data repositories', () => {
     expect(error.code).toBe('DATA_NETWORK_ERROR');
     expect(error.cause).toBe(cause);
   });
+
+  it('maps an empty getSetting result to DATA_NOT_FOUND', async () => {
+    const setting = successfulModel();
+    setting.get.mockResolvedValue({ data: null, errors: [] });
+    const repository = loadedModule().createOwnerMasterDataRepository({
+      models: {
+        ShiftDefinition: successfulModel(),
+        ResponsiblePerson: successfulModel(),
+        AppSetting: setting,
+      },
+    });
+
+    const error = caughtError(
+      await repository.getSetting!('default' as never).catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_NOT_FOUND');
+    expect(error.message).toBe('DATA_NOT_FOUND');
+  });
 });

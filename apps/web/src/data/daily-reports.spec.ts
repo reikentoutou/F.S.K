@@ -194,8 +194,33 @@ describe('daily reports repository', () => {
     expect(error.cause).toBe(cause);
   });
 
-  it('treats non-conflict GraphQL errors and an empty successful result as unknown submission outcomes', async () => {
-    const graphQLErrors = [{ errorType: 'Unauthorized', message: 'denied secret=payload' }];
+  it('maps a resolved structured authorization failure to DATA_UNAUTHORIZED', async () => {
+    const errors = [
+      { errorType: 'UnauthorizedException', message: 'denied secret=payload' },
+    ];
+    const repository = loadedModule().createDailyReportsRepository({
+      models: {
+        DailyReport: {
+          create: vi.fn().mockResolvedValue({ data: createdReport, errors }),
+          dailyReportsByBusinessDate: vi.fn(),
+        },
+      },
+    });
+
+    const error = caughtError(
+      await repository.create(command).catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_UNAUTHORIZED');
+    expect(error.message).toBe('DATA_UNAUTHORIZED');
+    expect(error.message).not.toContain('payload');
+    expect(error.cause).toBe(errors);
+  });
+
+  it('treats unclassified GraphQL errors and an empty successful result as unknown submission outcomes', async () => {
+    const graphQLErrors = [
+      { errorType: 'ResolverError', message: 'denied secret=payload' },
+    ];
     const create = vi
       .fn()
       .mockResolvedValueOnce({ data: createdReport, errors: graphQLErrors })
@@ -371,7 +396,7 @@ describe('daily reports repository', () => {
   it.each([
     ['get', [{ errorType: 'UnauthorizedException', message: 'denied' }], 'DATA_UNAUTHORIZED'],
     ['update', [{ extensions: { code: 'ConflictException' }, message: 'version conflict' }], 'DATA_CONFLICT'],
-    ['get', [{ name: 'NotFoundException', message: 'missing' }], 'REPORT_NOT_FOUND'],
+    ['get', [{ name: 'NotFoundException', message: 'missing' }], 'DATA_NOT_FOUND'],
     ['update', [{ message: 'generic conflict duplicate text' }], 'DATA_OPERATION_FAILED'],
   ])('maps structured %s failures to the expected stable code', async (operation, errors, expectedCode) => {
     const get = vi.fn().mockResolvedValue({ data: createdReport, errors: [] });
@@ -477,7 +502,7 @@ describe('daily reports repository', () => {
     const error = caughtError(result);
 
     expect(error.code).toBe(
-      operation === 'get' ? 'REPORT_NOT_FOUND' : 'DATA_OPERATION_FAILED',
+      operation === 'get' ? 'DATA_NOT_FOUND' : 'DATA_OPERATION_FAILED',
     );
   });
 

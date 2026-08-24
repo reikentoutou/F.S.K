@@ -4,11 +4,11 @@ import { getDataClient, type FskDataClient } from './client';
 import {
   DataRepositoryError,
   classifyDataFailure,
+  dataNotFound,
   dataOperationFailed,
   dataPaginationFailed,
   hasDataErrors,
   isDuplicateDataFailure,
-  reportNotFound,
 } from './errors';
 
 export interface CreateDailyReportCommand {
@@ -51,7 +51,7 @@ async function ownerResult<T>(
     }
     if (result.data === null) {
       throw nullResult === 'NOT_FOUND'
-        ? reportNotFound()
+        ? dataNotFound()
         : dataOperationFailed();
     }
     return result.data;
@@ -95,14 +95,7 @@ export function createDailyReportsRepository(
       try {
         const result = await resolveClient().models.DailyReport.create(input);
         if (hasDataErrors(result.errors)) {
-          if (isDuplicateDataFailure(result.errors)) {
-            throw new DataRepositoryError('REPORT_ALREADY_EXISTS', {
-              cause: result.errors,
-            });
-          }
-          throw new DataRepositoryError('SUBMISSION_RESULT_UNKNOWN', {
-            cause: result.errors,
-          });
+          throw submissionFailure(result.errors);
         }
         if (result.data === null) {
           throw new DataRepositoryError('SUBMISSION_RESULT_UNKNOWN');
@@ -110,10 +103,7 @@ export function createDailyReportsRepository(
         return result.data;
       } catch (cause) {
         if (cause instanceof DataRepositoryError) throw cause;
-        if (isDuplicateDataFailure(cause)) {
-          throw new DataRepositoryError('REPORT_ALREADY_EXISTS', { cause });
-        }
-        throw new DataRepositoryError('SUBMISSION_RESULT_UNKNOWN', { cause });
+        throw submissionFailure(cause);
       }
     },
     async getByReportKey(reportKey: string) {
@@ -188,3 +178,12 @@ export function createDailyReportsRepository(
 }
 
 export const dailyReportsRepository = createDailyReportsRepository();
+
+function submissionFailure(cause: unknown): DataRepositoryError {
+  if (isDuplicateDataFailure(cause)) {
+    return new DataRepositoryError('REPORT_ALREADY_EXISTS', { cause });
+  }
+  const classified = classifyDataFailure(cause);
+  if (classified.code === 'DATA_UNAUTHORIZED') return classified;
+  return new DataRepositoryError('SUBMISSION_RESULT_UNKNOWN', { cause });
+}
