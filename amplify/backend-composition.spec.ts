@@ -379,49 +379,65 @@ exit "$status"
 };
 
 describe('active DynamoDB backend composition', () => {
-  it('synthesizes Cognito-default AppSync with exactly four DynamoDB tables and no legacy Foundation', () => {
+  it('isolates synth from caller CDK_OUTDIR while validating the active DynamoDB composition', () => {
     const backendUrl = pathToFileURL(
       join(process.cwd(), 'amplify/backend.ts'),
     ).href;
     const marker = 'ACTIVE_BACKEND_SYNTH=';
     const script = `(async () => {
-  const active = await import(${JSON.stringify(backendUrl)});
-  if (!active.backend) {
-    process.stdout.write(${JSON.stringify(marker)} + JSON.stringify({ hasBackend: false }) + '\\n');
-    return;
-  }
-  const { readFileSync, readdirSync } = await import('node:fs');
-  const { join } = await import('node:path');
-  const assembly = active.backend.stack.node.root.synth({ errorOnDuplicateSynth: false });
-  const emittedTemplatePaths = [...new Set([
-    ...readdirSync(assembly.directory, { recursive: true })
+  const { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { isAbsolute, join, relative, resolve, sep } = await import('node:path');
+  const callerOutdir = process.env.CDK_OUTDIR;
+  const isolatedOutdir = mkdtempSync(join(tmpdir(), 'fsk-active-backend-synth-'));
+  let evidence;
+  try {
+    process.env.CDK_OUTDIR = isolatedOutdir;
+    const active = await import(${JSON.stringify(backendUrl)});
+    if (!active.backend) {
+      evidence = { hasBackend: false };
+      return;
+    }
+    const assembly = active.backend.stack.node.root.synth({ errorOnDuplicateSynth: false });
+    if (resolve(assembly.directory) !== resolve(isolatedOutdir)) {
+      throw new Error('Active backend synthesized outside its isolated CDK outdir');
+    }
+    const escapedStackTemplates = assembly.stacksRecursively
+      .map((stack) => resolve(stack.templateFullPath))
+      .filter((path) => {
+        const pathFromOutdir = relative(resolve(isolatedOutdir), path);
+        return pathFromOutdir === '..' || pathFromOutdir.startsWith('..' + sep) || isAbsolute(pathFromOutdir);
+      });
+    if (escapedStackTemplates.length > 0) {
+      throw new Error('Stack templates escaped the isolated CDK outdir');
+    }
+    const emittedTemplatePaths = readdirSync(isolatedOutdir, { recursive: true })
       .map(String)
       .filter((path) => path.endsWith('.template.json'))
-      .map((path) => join(assembly.directory, path)),
-    ...assembly.stacksRecursively.map((stack) => stack.templateFullPath),
-  ])].sort();
-  const templates = emittedTemplatePaths.map((path) => ({
+      .map((path) => join(isolatedOutdir, path))
+      .sort();
+    const templates = emittedTemplatePaths.map((path) => ({
     path,
     template: JSON.parse(readFileSync(path, 'utf8')),
-  }));
-  const resources = templates.flatMap(({ path, template }) =>
+    }));
+    const resources = templates.flatMap(({ path, template }) =>
     Object.entries(template.Resources ?? {}).map(([logicalId, resource]) => ({
       logicalId,
       path,
       resource,
     })),
-  );
-  const resourceTypes = resources.map(({ resource }) => resource.Type);
-  const [api] = resources
+    );
+    const resourceTypes = resources.map(({ resource }) => resource.Type);
+    const [api] = resources
     .map(({ resource }) => resource)
     .filter((resource) => resource.Type === 'AWS::AppSync::GraphQLApi');
-  const [identityPool] = resources
+    const [identityPool] = resources
     .map(({ resource }) => resource)
     .filter((resource) => resource.Type === 'AWS::Cognito::IdentityPool');
-  const dynamoTableTypes = resourceTypes.filter(
+    const dynamoTableTypes = resourceTypes.filter(
     (type) => type === 'AWS::DynamoDB::Table' || type === 'Custom::AmplifyDynamoDBTable',
-  );
-  const lambdaInventory = resources
+    );
+    const lambdaInventory = resources
     .filter(({ resource }) => resource.Type === 'AWS::Lambda::Function')
     .map(({ logicalId, resource }) => ({
       logicalId: logicalId.replace(/[A-F0-9]{8}$/, ''),
@@ -429,156 +445,190 @@ describe('active DynamoDB backend composition', () => {
       runtime: resource.Properties?.Runtime,
     }))
     .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
-  const environmentVariableNames = resources
+    const environmentVariableNames = resources
     .filter(({ resource }) => resource.Type === 'AWS::Lambda::Function')
     .flatMap(({ resource }) =>
       Object.keys(resource.Properties?.Environment?.Variables ?? {}),
     )
     .sort();
-  const actions = [];
-  const servicePrincipals = [];
-  const collectCapabilities = (value) => {
-    if (Array.isArray(value)) {
-      value.forEach(collectCapabilities);
-      return;
-    }
-    if (!value || typeof value !== 'object') {
-      return;
-    }
-    for (const [key, nested] of Object.entries(value)) {
-      if (key === 'Action') {
-        actions.push(...(Array.isArray(nested) ? nested : [nested]).filter((item) => typeof item === 'string'));
+    const actions = [];
+    const servicePrincipals = [];
+    const collectCapabilities = (value) => {
+      if (Array.isArray(value)) {
+        value.forEach(collectCapabilities);
+        return;
       }
-      if (key === 'Service') {
-        servicePrincipals.push(...(Array.isArray(nested) ? nested : [nested]).filter((item) => typeof item === 'string'));
+      if (!value || typeof value !== 'object') {
+        return;
       }
-      collectCapabilities(nested);
+      for (const [key, nested] of Object.entries(value)) {
+        if (key === 'Action') {
+          actions.push(...(Array.isArray(nested) ? nested : [nested]).filter((item) => typeof item === 'string'));
+        }
+        if (key === 'Service') {
+          servicePrincipals.push(...(Array.isArray(nested) ? nested : [nested]).filter((item) => typeof item === 'string'));
+        }
+        collectCapabilities(nested);
+      }
+    };
+    templates.forEach(({ template }) => collectCapabilities(template));
+    const forbiddenActionPrefixes = ['ec2:', 'rds:', 'rds-data:', 'secretsmanager:'];
+    const forbiddenServicePrincipals = [
+      'ec2.amazonaws.com',
+      'rds.amazonaws.com',
+      'secretsmanager.amazonaws.com',
+    ];
+    evidence = {
+      hasBackend: true,
+      stackArtifactIds: assembly.stacksRecursively.map((stack) => stack.id).sort(),
+      stackNames: assembly.stacksRecursively.map((stack) => stack.stackName).sort(),
+      templateCount: templates.length,
+      nestedStackCount: resourceTypes.filter((type) => type === 'AWS::CloudFormation::Stack').length,
+      appSyncCount: resourceTypes.filter((type) => type === 'AWS::AppSync::GraphQLApi').length,
+      tableCount: dynamoTableTypes.length,
+      dynamoTableTypes,
+      authenticationType: api?.Properties?.AuthenticationType,
+      additionalAuthenticationProviders: api?.Properties?.AdditionalAuthenticationProviders,
+      allowUnauthenticatedIdentities: identityPool?.Properties?.AllowUnauthenticatedIdentities,
+      ec2Types: resourceTypes.filter((type) => type.startsWith('AWS::EC2::')),
+      rdsTypes: resourceTypes.filter((type) => type.startsWith('AWS::RDS::')),
+      secretTypes: resourceTypes.filter((type) =>
+        type.startsWith('AWS::SecretsManager::'),
+      ),
+      lambdaInventory,
+      environmentVariableNames,
+      forbiddenActions: [...new Set(actions.filter((action) =>
+        forbiddenActionPrefixes.some((prefix) => action.toLowerCase().startsWith(prefix)),
+      ))].sort(),
+      forbiddenServicePrincipals: [...new Set(servicePrincipals.filter((principal) =>
+        forbiddenServicePrincipals.includes(principal.toLowerCase()),
+      ))].sort(),
+      forbiddenEnvironmentVariables: environmentVariableNames.filter((name) =>
+        /^(?:DATABASE_URL|DB_|PG|POSTGRES|RDS|SECRET)/i.test(name),
+      ),
+    };
+  } finally {
+    rmSync(isolatedOutdir, { force: true, recursive: true });
+    if (callerOutdir === undefined) {
+      delete process.env.CDK_OUTDIR;
+    } else {
+      process.env.CDK_OUTDIR = callerOutdir;
     }
-  };
-  templates.forEach(({ template }) => collectCapabilities(template));
-  const forbiddenActionPrefixes = ['ec2:', 'rds:', 'rds-data:', 'secretsmanager:'];
-  const forbiddenServicePrincipals = [
-    'ec2.amazonaws.com',
-    'rds.amazonaws.com',
-    'secretsmanager.amazonaws.com',
-  ];
+  }
   process.stdout.write(${JSON.stringify(marker)} + JSON.stringify({
-    hasBackend: true,
-    stackArtifactIds: assembly.stacksRecursively.map((stack) => stack.id).sort(),
-    stackNames: assembly.stacksRecursively.map((stack) => stack.stackName).sort(),
-    templateCount: templates.length,
-    nestedStackCount: resourceTypes.filter((type) => type === 'AWS::CloudFormation::Stack').length,
-    appSyncCount: resourceTypes.filter((type) => type === 'AWS::AppSync::GraphQLApi').length,
-    tableCount: dynamoTableTypes.length,
-    dynamoTableTypes,
-    authenticationType: api?.Properties?.AuthenticationType,
-    additionalAuthenticationProviders: api?.Properties?.AdditionalAuthenticationProviders,
-    allowUnauthenticatedIdentities: identityPool?.Properties?.AllowUnauthenticatedIdentities,
-    ec2Types: resourceTypes.filter((type) => type.startsWith('AWS::EC2::')),
-    rdsTypes: resourceTypes.filter((type) => type.startsWith('AWS::RDS::')),
-    secretTypes: resourceTypes.filter((type) =>
-      type.startsWith('AWS::SecretsManager::'),
-    ),
-    lambdaInventory,
-    environmentVariableNames,
-    forbiddenActions: [...new Set(actions.filter((action) =>
-      forbiddenActionPrefixes.some((prefix) => action.toLowerCase().startsWith(prefix)),
-    ))].sort(),
-    forbiddenServicePrincipals: [...new Set(servicePrincipals.filter((principal) =>
-      forbiddenServicePrincipals.includes(principal.toLowerCase()),
-    ))].sort(),
-    forbiddenEnvironmentVariables: environmentVariableNames.filter((name) =>
-      /^(?:DATABASE_URL|DB_|PG|POSTGRES|RDS|SECRET)/i.test(name),
-    ),
+    ...evidence,
+    isolatedOutdirExistsAfterCleanup: existsSync(isolatedOutdir),
   }) + '\\n');
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });`;
-    const result = spawnSync('pnpm', ['exec', 'tsx', '--eval', script], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        AWS_DEFAULT_REGION: 'ap-northeast-1',
-        AWS_REGION: 'ap-northeast-1',
-        CDK_CONTEXT_JSON: JSON.stringify({
-          'amplify-backend-name': 'production',
-          'amplify-backend-namespace': 'test-app-id',
-          'amplify-backend-type': 'branch',
-        }),
-      },
-      timeout: 60_000,
-    });
-    expect(result.status, result.stderr).toBe(0);
-    const evidenceLine = result.stdout
-      .split('\n')
-      .find((line) => line.startsWith(marker));
-    expect(evidenceLine, result.stdout).toBeDefined();
-    expect(JSON.parse(evidenceLine?.slice(marker.length) ?? '{}')).toEqual({
-      hasBackend: true,
-      stackArtifactIds: ['amplify-testappid-production-branch-bd754b1915'],
-      stackNames: ['amplify-testappid-production-branch-bd754b1915'],
-      templateCount: 9,
-      nestedStackCount: 8,
-      appSyncCount: 1,
-      tableCount: 4,
-      dynamoTableTypes: [
-        'Custom::AmplifyDynamoDBTable',
-        'Custom::AmplifyDynamoDBTable',
-        'Custom::AmplifyDynamoDBTable',
-        'Custom::AmplifyDynamoDBTable',
-      ],
-      authenticationType: 'AMAZON_COGNITO_USER_POOLS',
-      additionalAuthenticationProviders: [
-        { AuthenticationType: 'AWS_IAM' },
-      ],
-      allowUnauthenticatedIdentities: false,
-      ec2Types: [],
-      rdsTypes: [],
-      secretTypes: [],
-      lambdaInventory: [
-        {
-          logicalId: 'AmplifyBranchLinkerCustomResourceLambda',
-          handler: 'index.handler',
-          runtime: 'nodejs22.x',
+    const callerOutdir = mkdtempSync(join(tmpdir(), 'fsk-caller-cdk-outdir-'));
+    const staleTemplatePath = join(
+      callerOutdir,
+      'stale-forbidden.template.json',
+    );
+    writeFileSync(
+      staleTemplatePath,
+      JSON.stringify({
+        Resources: {
+          HiddenAurora: { Type: 'AWS::RDS::DBCluster' },
         },
-        {
-          logicalId: 'AmplifyBranchLinkerCustomResourceProviderframeworkonEvent',
-          handler: 'framework.onEvent',
-          runtime: 'nodejs24.x',
+      }),
+    );
+
+    try {
+      const result = spawnSync('pnpm', ['exec', 'tsx', '--eval', script], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AWS_DEFAULT_REGION: 'ap-northeast-1',
+          AWS_REGION: 'ap-northeast-1',
+          CDK_CONTEXT_JSON: JSON.stringify({
+            'amplify-backend-name': 'production',
+            'amplify-backend-namespace': 'test-app-id',
+            'amplify-backend-type': 'branch',
+          }),
+          CDK_OUTDIR: callerOutdir,
         },
-        {
-          logicalId:
-            'CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C1536MiB',
-          handler: 'index.handler',
-          runtime: 'python3.13',
-        },
-        {
-          logicalId: 'CustomS3AutoDeleteObjectsCustomResourceProviderHandler',
-          handler: 'index.handler',
-          runtime: 'nodejs24.x',
-        },
-        {
-          logicalId: 'TableManagerCustomProviderframeworkisComplete',
-          handler: 'amplify-table-manager-handler.isComplete',
-          runtime: 'nodejs24.x',
-        },
-        {
-          logicalId: 'TableManagerCustomProviderframeworkonEvent',
-          handler: 'amplify-table-manager-handler.onEvent',
-          runtime: 'nodejs24.x',
-        },
-      ],
-      environmentVariableNames: [
-        'AWS_CA_BUNDLE',
-        'USER_ON_EVENT_FUNCTION_ARN',
-        'WAITER_STATE_MACHINE_ARN',
-      ],
-      forbiddenActions: [],
-      forbiddenServicePrincipals: [],
-      forbiddenEnvironmentVariables: [],
-    });
+        timeout: 60_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const evidenceLine = result.stdout
+        .split('\n')
+        .find((line) => line.startsWith(marker));
+      expect(evidenceLine, result.stdout).toBeDefined();
+      expect(JSON.parse(evidenceLine?.slice(marker.length) ?? '{}')).toEqual({
+        hasBackend: true,
+        isolatedOutdirExistsAfterCleanup: false,
+        stackArtifactIds: ['amplify-testappid-production-branch-bd754b1915'],
+        stackNames: ['amplify-testappid-production-branch-bd754b1915'],
+        templateCount: 9,
+        nestedStackCount: 8,
+        appSyncCount: 1,
+        tableCount: 4,
+        dynamoTableTypes: [
+          'Custom::AmplifyDynamoDBTable',
+          'Custom::AmplifyDynamoDBTable',
+          'Custom::AmplifyDynamoDBTable',
+          'Custom::AmplifyDynamoDBTable',
+        ],
+        authenticationType: 'AMAZON_COGNITO_USER_POOLS',
+        additionalAuthenticationProviders: [
+          { AuthenticationType: 'AWS_IAM' },
+        ],
+        allowUnauthenticatedIdentities: false,
+        ec2Types: [],
+        rdsTypes: [],
+        secretTypes: [],
+        lambdaInventory: [
+          {
+            logicalId: 'AmplifyBranchLinkerCustomResourceLambda',
+            handler: 'index.handler',
+            runtime: 'nodejs22.x',
+          },
+          {
+            logicalId:
+              'AmplifyBranchLinkerCustomResourceProviderframeworkonEvent',
+            handler: 'framework.onEvent',
+            runtime: 'nodejs24.x',
+          },
+          {
+            logicalId:
+              'CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C1536MiB',
+            handler: 'index.handler',
+            runtime: 'python3.13',
+          },
+          {
+            logicalId: 'CustomS3AutoDeleteObjectsCustomResourceProviderHandler',
+            handler: 'index.handler',
+            runtime: 'nodejs24.x',
+          },
+          {
+            logicalId: 'TableManagerCustomProviderframeworkisComplete',
+            handler: 'amplify-table-manager-handler.isComplete',
+            runtime: 'nodejs24.x',
+          },
+          {
+            logicalId: 'TableManagerCustomProviderframeworkonEvent',
+            handler: 'amplify-table-manager-handler.onEvent',
+            runtime: 'nodejs24.x',
+          },
+        ],
+        environmentVariableNames: [
+          'AWS_CA_BUNDLE',
+          'USER_ON_EVENT_FUNCTION_ARN',
+          'WAITER_STATE_MACHINE_ARN',
+        ],
+        forbiddenActions: [],
+        forbiddenServicePrincipals: [],
+        forbiddenEnvironmentVariables: [],
+      });
+      expect(existsSync(staleTemplatePath)).toBe(true);
+    } finally {
+      rmSync(callerOutdir, { force: true, recursive: true });
+    }
   });
 });
 
