@@ -277,7 +277,7 @@ fsk_assert_no_task_id_collision() {
 set -euo pipefail
 export AWS_REGION=ap-northeast-1
 export AWS_DEFAULT_REGION=ap-northeast-1
-FSK_AWS_ACCOUNT_ID=444083008754
+export FSK_AWS_ACCOUNT_ID=444083008754
 : "${FSK_MIGRATION_APPROVAL_ID:?separate Migration approval required}"
 : "${FSK_MIGRATION_SHELL_ROLE:?control or worker required}"
 : "${FSK_MIGRATION_TASK_ID:?approved TaskId required}"

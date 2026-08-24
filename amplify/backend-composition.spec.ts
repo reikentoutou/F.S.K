@@ -52,6 +52,11 @@ const extractBashSteps = (document: string): string =>
     .map((match) => match[1])
     .join('\n');
 
+const extractBashBlocks = (document: string): string[] =>
+  [...document.matchAll(/^```bash\n([\s\S]*?)^```$/gm)].map(
+    (match) => match[1],
+  );
+
 const extractBashFunction = (document: string, name: string): string => {
   const match = extractBashSteps(document).match(
     new RegExp(`^${name.replaceAll('_', '[_]')}\\(\\) \\{\\n[\\s\\S]*?^\\}\\n`, 'm'),
@@ -701,6 +706,40 @@ printf '%s' "$${variable}"
 });
 
 describe('staging migration runbook executable contracts', () => {
+  it('exports the runbook-owned AWS account ID before rendering ownership tags in a child process', () => {
+    const [, sharedFunctions, operationGuard] =
+      extractBashBlocks(MIGRATION_RUNBOOK);
+    const result = runWithMockAws(
+      `unset FSK_AWS_ACCOUNT_ID
+${sharedFunctions}
+${operationGuard}
+printf '%s' "$FSK_TEMP_EC2_TAGS"
+`,
+      `if [ "$1" = sts ] && [ "$2" = get-caller-identity ]; then
+  printf '444083008754\\n'
+  exit 0
+fi
+exit 64`,
+      {
+        FSK_APP_ROUTE_TABLE_A_ID: 'rtb-00000000000000001',
+        FSK_APP_ROUTE_TABLE_B_ID: 'rtb-00000000000000002',
+        FSK_DB_SECURITY_GROUP_ID: 'sg-00000000000000001',
+        FSK_MIGRATION_APPROVAL_ID: 'approval-1',
+        FSK_MIGRATION_CLEANUP_DEADLINE_EPOCH: '2000000300',
+        FSK_MIGRATION_CLEANUP_OWNER: 'reiken',
+        FSK_MIGRATION_OPERATION_DEADLINE_EPOCH: '2000000000',
+        FSK_MIGRATION_OPERATION_TOKEN:
+          '00000000-0000-4000-8000-000000000000',
+        FSK_MIGRATION_SHELL_ROLE: 'control',
+        FSK_MIGRATION_TASK_ID: 'task-1',
+        FSK_VPC_ID: 'vpc-0123456789abcdef0',
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(OWNERSHIP_TAGS);
+  });
+
   it('builds complete temporary ownership tags from the approved operation tuple', () => {
     const result = spawnSync(
       'bash',
