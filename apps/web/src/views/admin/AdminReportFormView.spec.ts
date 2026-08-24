@@ -18,6 +18,33 @@ interface ReportActions {
     repository: { getByReportKey(reportKey: string): Promise<unknown> },
   ): Promise<unknown>;
   ownerReportDataErrorMessage(error: unknown, fallback: string): string;
+  createOwnerReportLoadController<T>(callbacks: {
+    reset(): void;
+    setLoading(value: boolean): void;
+    apply(value: T): void;
+    fail(error: unknown): void;
+  }): {
+    load(read: () => Promise<T>): Promise<void>;
+    invalidate(): void;
+  };
+  createOwnerReportSaveController(callbacks: {
+    setSaving(value: boolean): void;
+    succeed(): void;
+    fail(error: unknown): void;
+  }): {
+    run(
+      save: (isCurrent: () => boolean) => Promise<unknown>,
+    ): Promise<boolean>;
+    invalidate(): void;
+  };
+  responsiblePersonSnapshot(
+    existing: {
+      responsiblePersonId: string;
+      responsiblePersonSnapshot: string;
+    } | null,
+    selectedId: string,
+    selectedMasterName: string,
+  ): string;
 }
 
 const actions = reportView as unknown as ReportActions;
@@ -40,6 +67,16 @@ const command: CreateDailyReportCommand = {
   staffMealAlipayYen: 600,
   attachmentKeys: ['receipts/a.jpg'],
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 describe('OWNER report repository actions', () => {
   it('creates a backfill through create without a client-supplied owner', async () => {
@@ -91,5 +128,196 @@ describe('OWNER report repository actions', () => {
         'fallback',
       ),
     ).toContain(text);
+  });
+
+  it('clears route state immediately and ignores an older load while the current route is pending', async () => {
+    const older = deferred<{ reportKey: string }>();
+    const current = deferred<{ reportKey: string }>();
+    const state = {
+      reportKey: 'stale#report',
+      ready: true,
+      loading: false,
+    };
+    const applied: string[] = [];
+    const controller = actions.createOwnerReportLoadController<{
+      reportKey: string;
+    }>({
+      reset() {
+        state.reportKey = '';
+        state.ready = false;
+      },
+      setLoading(value) {
+        state.loading = value;
+      },
+      apply(value) {
+        state.reportKey = value.reportKey;
+        state.ready = true;
+        applied.push(value.reportKey);
+      },
+      fail: vi.fn(),
+    });
+
+    const olderLoad = controller.load(() => older.promise);
+    const currentLoad = controller.load(() => current.promise);
+
+    expect(state).toEqual({ reportKey: '', ready: false, loading: true });
+    older.resolve({ reportKey: 'A#day' });
+    await olderLoad;
+    expect(state).toEqual({ reportKey: '', ready: false, loading: true });
+    expect(applied).toEqual([]);
+
+    current.resolve({ reportKey: 'B#day' });
+    await currentLoad;
+    expect(state).toEqual({ reportKey: 'B#day', ready: true, loading: false });
+    expect(applied).toEqual(['B#day']);
+  });
+
+  it('keeps a failed current route blank after an older load resolves late', async () => {
+    const older = deferred<{ reportKey: string }>();
+    const current = deferred<{ reportKey: string }>();
+    const state = { reportKey: 'stale#report', ready: true, loading: false };
+    const failures: unknown[] = [];
+    const controller = actions.createOwnerReportLoadController<{
+      reportKey: string;
+    }>({
+      reset() {
+        state.reportKey = '';
+        state.ready = false;
+      },
+      setLoading(value) {
+        state.loading = value;
+      },
+      apply(value) {
+        state.reportKey = value.reportKey;
+        state.ready = true;
+      },
+      fail(error) {
+        failures.push(error);
+      },
+    });
+
+    const olderLoad = controller.load(() => older.promise);
+    const currentLoad = controller.load(() => current.promise);
+    const currentFailure = new DataRepositoryError('DATA_NOT_FOUND');
+    current.reject(currentFailure);
+    await currentLoad;
+    expect(state).toEqual({ reportKey: '', ready: false, loading: false });
+    expect(failures).toEqual([currentFailure]);
+
+    older.resolve({ reportKey: 'A#day' });
+    await olderLoad;
+    expect(state).toEqual({ reportKey: '', ready: false, loading: false });
+    expect(failures).toEqual([currentFailure]);
+  });
+
+  it('drops a pending load after the report route unmounts', async () => {
+    const pending = deferred<{ reportKey: string }>();
+    const apply = vi.fn();
+    const fail = vi.fn();
+    const controller = actions.createOwnerReportLoadController({
+      reset: vi.fn(),
+      setLoading: vi.fn(),
+      apply,
+      fail,
+    });
+
+    const load = controller.load(() => pending.promise);
+    controller.invalidate();
+    pending.resolve({ reportKey: 'A#day' });
+    await load;
+
+    expect(apply).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it('allows only one pending save and drops stale save callbacks after route invalidation', async () => {
+    const pending = deferred<unknown>();
+    const save = vi.fn(() => pending.promise);
+    const staleFailures: unknown[] = [];
+    const savingStates: boolean[] = [];
+    const controller = actions.createOwnerReportSaveController({
+      setSaving(value) {
+        savingStates.push(value);
+      },
+      succeed: vi.fn(),
+      fail(error) {
+        staleFailures.push(error);
+      },
+    });
+
+    const first = controller.run(save);
+    const second = await controller.run(save);
+    expect(second).toBe(false);
+    expect(save).toHaveBeenCalledOnce();
+    expect(savingStates).toEqual([true]);
+
+    controller.invalidate();
+    const staleFailure = new Error('old route failed');
+    pending.reject(staleFailure);
+    await first;
+    expect(staleFailures).toEqual([]);
+    expect(savingStates).toEqual([true, false]);
+  });
+
+  it('clears saving after a current failure without reporting success', async () => {
+    const failure = new DataRepositoryError('DATA_CONFLICT');
+    const failures: unknown[] = [];
+    const successes = vi.fn();
+    const savingStates: boolean[] = [];
+    const controller = actions.createOwnerReportSaveController({
+      setSaving(value) {
+        savingStates.push(value);
+      },
+      succeed: successes,
+      fail(error) {
+        failures.push(error);
+      },
+    });
+
+    await expect(controller.run(() => Promise.reject(failure))).resolves.toBe(
+      false,
+    );
+    expect(failures).toEqual([failure]);
+    expect(successes).not.toHaveBeenCalled();
+    expect(savingStates).toEqual([true, false]);
+  });
+
+  it('lets a pending confirmation stop before persistence after route invalidation', async () => {
+    const confirmation = deferred<void>();
+    const persist = vi.fn().mockResolvedValue({});
+    let currentCheck: (() => boolean) | undefined;
+    const controller = actions.createOwnerReportSaveController({
+      setSaving: vi.fn(),
+      succeed: vi.fn(),
+      fail: vi.fn(),
+    });
+
+    const submission = controller.run(async (isCurrent) => {
+      currentCheck = isCurrent;
+      await confirmation.promise;
+      if (!isCurrent()) return { saved: false };
+      return persist();
+    });
+
+    expect(typeof currentCheck).toBe('function');
+    controller.invalidate();
+    confirmation.resolve();
+    await submission;
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('preserves the historical responsible-person snapshot until its ID changes', () => {
+    const existing = {
+      responsiblePersonId: 'p1',
+      responsiblePersonSnapshot: '历史姓名',
+    };
+
+    expect(
+      actions.responsiblePersonSnapshot(existing, 'p1', '主数据新姓名'),
+    ).toBe('历史姓名');
+    expect(
+      actions.responsiblePersonSnapshot(existing, 'p2', '李四'),
+    ).toBe('李四');
+    expect(actions.responsiblePersonSnapshot(null, 'p1', '张三')).toBe('张三');
   });
 });

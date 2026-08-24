@@ -58,11 +58,96 @@ export function saveOwnerReport<T>(
     command;
   return repository.updateByReportKey(reportKey, changes);
 }
+
+export function createOwnerReportLoadController<T>(callbacks: {
+  reset(): void;
+  setLoading(value: boolean): void;
+  apply(value: T): void;
+  fail(error: unknown): void;
+}) {
+  let generation = 0;
+
+  return {
+    async load(read: () => Promise<T>): Promise<void> {
+      const currentGeneration = ++generation;
+      callbacks.reset();
+      callbacks.setLoading(true);
+      try {
+        const value = await read();
+        if (currentGeneration !== generation) return;
+        callbacks.apply(value);
+      } catch (error: unknown) {
+        if (currentGeneration !== generation) return;
+        callbacks.fail(error);
+      } finally {
+        if (currentGeneration === generation) callbacks.setLoading(false);
+      }
+    },
+    invalidate(): void {
+      generation += 1;
+    },
+  };
+}
+
+export function createOwnerReportSaveController<T>(callbacks: {
+  setSaving(value: boolean): void;
+  succeed(value: T): void | Promise<void>;
+  fail(error: unknown): void;
+}) {
+  let generation = 0;
+  let pending = false;
+
+  return {
+    async run(
+      save: (isCurrent: () => boolean) => Promise<T>,
+    ): Promise<boolean> {
+      if (pending) return false;
+      const currentGeneration = generation;
+      pending = true;
+      callbacks.setSaving(true);
+      try {
+        const isCurrent = () =>
+          currentGeneration === generation && pending;
+        const value = await save(isCurrent);
+        if (currentGeneration !== generation) return false;
+        await callbacks.succeed(value);
+        return true;
+      } catch (error: unknown) {
+        if (currentGeneration === generation) callbacks.fail(error);
+        return false;
+      } finally {
+        if (currentGeneration === generation) {
+          pending = false;
+          callbacks.setSaving(false);
+        }
+      }
+    },
+    invalidate(): void {
+      generation += 1;
+      if (pending) callbacks.setSaving(false);
+      pending = false;
+    },
+  };
+}
+
+export function responsiblePersonSnapshot(
+  existing: {
+    responsiblePersonId: string;
+    responsiblePersonSnapshot: string;
+  } | null,
+  selectedId: string,
+  selectedMasterName: string,
+): string {
+  if (existing?.responsiblePersonId === selectedId) {
+    return existing.responsiblePersonSnapshot;
+  }
+  return selectedMasterName;
+}
 </script>
 
 <script setup lang="ts">
 import { ElMessage } from 'element-plus';
-import { computed, shallowRef, watch } from 'vue';
+import { computed, onUnmounted, shallowRef, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import DailyReportConfirmSummary from '@/components/daily-report/DailyReportConfirmSummary.vue';
@@ -86,23 +171,50 @@ type LoadedReport = Awaited<
   ReturnType<typeof dailyReportsRepository.getByReportKey>
 >;
 
+type ShiftOption = {
+  id: string;
+  name: string;
+  sortOrder: number;
+  active: boolean;
+};
+
+type PersonOption = {
+  id: string;
+  name: string;
+  active: boolean;
+};
+
+type OwnerReportRouteRequest =
+  | { mode: 'edit'; reportKey: string }
+  | { mode: 'create'; businessDate: string; shiftId: string };
+
+type OwnerReportPageData = {
+  request: OwnerReportRouteRequest;
+  shifts: ShiftOption[];
+  persons: PersonOption[];
+  registerFloatAmount: number;
+  report: LoadedReport | null;
+};
+
+type OwnerReportSaveOutcome =
+  | { saved: false }
+  | { saved: true; mode: 'create' | 'edit' };
+
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 const loading = shallowRef(true);
 const saving = shallowRef(false);
+const pageReady = shallowRef(false);
+const loadErrorMessage = shallowRef('');
 const step = shallowRef<'form' | 'confirm'>('form');
 const registerFloatAmount = shallowRef(0);
 const reportKey = shallowRef<string | null>(null);
 const shiftId = shallowRef('');
 const businessDate = shallowRef('');
 const existingReport = shallowRef<LoadedReport | null>(null);
-const shifts = shallowRef<
-  Array<{ id: string; name: string; sortOrder: number; active: boolean }>
->([]);
-const persons = shallowRef<Array<{ id: string; name: string; active: boolean }>>(
-  [],
-);
+const shifts = shallowRef<ShiftOption[]>([]);
+const persons = shallowRef<PersonOption[]>([]);
 const {
   form,
   reset: resetDailyReportForm,
@@ -130,7 +242,7 @@ const personName = computed(
 );
 const preview = useDailyReportPreview(form, registerFloatAmount);
 
-async function loadSetting(): Promise<number> {
+async function loadSettingValue(): Promise<number> {
   try {
     const setting = await ownerMasterDataRepository.getSetting('default');
     return setting.registerFloatAmount;
@@ -145,13 +257,15 @@ async function loadSetting(): Promise<number> {
   }
 }
 
-async function loadMeta(): Promise<void> {
+async function readPageData(
+  request: OwnerReportRouteRequest,
+): Promise<OwnerReportPageData> {
   const [loadedShifts, loadedPersons, floatAmount] = await Promise.all([
     ownerMasterDataRepository.listShifts(),
     ownerMasterDataRepository.listResponsiblePersons(),
-    loadSetting(),
+    loadSettingValue(),
   ]);
-  shifts.value = loadedShifts
+  const loadedShiftOptions = loadedShifts
     .filter((shift): shift is NonNullable<typeof shift> => shift != null)
     .sort((left, right) => left.sortOrder - right.sortOrder)
     .map((shift) => ({
@@ -160,49 +274,120 @@ async function loadMeta(): Promise<void> {
       sortOrder: shift.sortOrder,
       active: shift.active,
     }));
-  persons.value = loadedPersons
+  const loadedPersonOptions = loadedPersons
     .filter((person): person is NonNullable<typeof person> => person != null)
     .map((person) => ({
       id: person.id,
       name: person.name,
       active: person.active,
     }));
-  registerFloatAmount.value = floatAmount;
+  const report =
+    request.mode === 'edit'
+      ? await loadOwnerReport(request.reportKey, dailyReportsRepository)
+      : null;
+  return {
+    request,
+    shifts: loadedShiftOptions,
+    persons: loadedPersonOptions,
+    registerFloatAmount: floatAmount,
+    report,
+  };
 }
 
-async function loadExisting(key: string): Promise<void> {
-  const report = await loadOwnerReport(key, dailyReportsRepository);
-  existingReport.value = report;
-  reportKey.value = report.reportKey;
-  shiftId.value = report.shiftId;
-  businessDate.value = report.businessDate;
-  applyExisting(report);
+function resetPageState(): void {
+  saveController.invalidate();
+  pageReady.value = false;
+  loadErrorMessage.value = '';
+  step.value = 'form';
+  existingReport.value = null;
+  reportKey.value = null;
+  businessDate.value = '';
+  shiftId.value = '';
+  shifts.value = [];
+  persons.value = [];
+  registerFloatAmount.value = 0;
+  resetDailyReportForm();
+}
+
+function applyPageData(data: OwnerReportPageData): void {
+  shifts.value = data.shifts;
+  persons.value = data.persons;
+  registerFloatAmount.value = data.registerFloatAmount;
+  if (data.request.mode === 'edit' && data.report) {
+    existingReport.value = data.report;
+    reportKey.value = data.report.reportKey;
+    shiftId.value = data.report.shiftId;
+    businessDate.value = data.report.businessDate;
+    applyExisting(data.report);
+  } else if (data.request.mode === 'create') {
+    businessDate.value = data.request.businessDate;
+    shiftId.value = data.request.shiftId;
+    const defaultPerson = data.persons.find((person) => person.active)?.id;
+    resetDailyReportForm(defaultPerson);
+    setDefaultResponsiblePerson(defaultPerson);
+  }
+  pageReady.value = true;
+}
+
+const loadController = createOwnerReportLoadController<OwnerReportPageData>({
+  reset: resetPageState,
+  setLoading(value) {
+    loading.value = value;
+  },
+  apply: applyPageData,
+  fail(error) {
+    loadErrorMessage.value = ownerReportDataErrorMessage(
+      error,
+      '読み込みに失敗しました',
+    );
+    ElMessage.error(loadErrorMessage.value);
+  },
+});
+
+const saveController =
+  createOwnerReportSaveController<OwnerReportSaveOutcome>({
+    setSaving(value) {
+      saving.value = value;
+    },
+    async succeed(outcome) {
+      if (!outcome.saved) return;
+      ElMessage.success(
+        outcome.mode === 'edit' ? '修正しました' : '老板补录を保存しました',
+      );
+      await router.replace(ownerDailyPath);
+    },
+    fail(error) {
+      ElMessage.error(ownerReportDataErrorMessage(error, '保存に失敗しました'));
+    },
+  });
+
+onUnmounted(() => {
+  loadController.invalidate();
+  saveController.invalidate();
+});
+
+function currentRouteRequest(): OwnerReportRouteRequest | null {
+  const mode = ownerReportMode(route.name);
+  if (mode === 'edit') {
+    const key = String(route.params.reportKey ?? '');
+    return key ? { mode, reportKey: key } : null;
+  }
+  if (mode === 'create') {
+    return {
+      mode,
+      businessDate: String(route.query.businessDate ?? ''),
+      shiftId: String(route.query.shiftId ?? ''),
+    };
+  }
+  return null;
 }
 
 async function loadPage(): Promise<void> {
-  loading.value = true;
-  step.value = 'form';
-  existingReport.value = null;
-  try {
-    await loadMeta();
-    const mode = ownerReportMode(route.name);
-    if (mode === 'edit') {
-      const key = String(route.params.reportKey ?? '');
-      if (!key) throw new DataRepositoryError('DATA_NOT_FOUND');
-      await loadExisting(key);
-    } else if (mode === 'create') {
-      reportKey.value = null;
-      businessDate.value = String(route.query.businessDate ?? '');
-      shiftId.value = String(route.query.shiftId ?? '');
-      const defaultPerson = persons.value.find((person) => person.active)?.id;
-      resetDailyReportForm(defaultPerson);
-      setDefaultResponsiblePerson(defaultPerson);
-    }
-  } catch (error: unknown) {
-    ElMessage.error(ownerReportDataErrorMessage(error, '読み込みに失敗しました'));
-  } finally {
-    loading.value = false;
-  }
+  const request = currentRouteRequest();
+  await loadController.load(async () => {
+    if (!request) throw new DataRepositoryError('DATA_NOT_FOUND');
+    return readPageData(request);
+  });
 }
 
 watch(
@@ -229,6 +414,7 @@ function validationOptions() {
 }
 
 function goToConfirm(): void {
+  if (!pageReady.value || loading.value || saving.value) return;
   const error = validateDailyReportGoToConfirm({
     form,
     admin: validationOptions(),
@@ -264,7 +450,11 @@ function buildCommand(): CreateDailyReportCommand {
     shiftNameSnapshot:
       existingReport.value?.shiftNameSnapshot ?? selectedShift.name,
     responsiblePersonId: payload.responsiblePersonId,
-    responsiblePersonSnapshot: selectedPerson.name,
+    responsiblePersonSnapshot: responsiblePersonSnapshot(
+      existingReport.value,
+      payload.responsiblePersonId,
+      selectedPerson.name,
+    ),
     startMinuteOfDay: payload.startMinuteOfDay,
     endMinuteOfDay: payload.endMinuteOfDay,
     timeRangeLabelSnapshot: `${form.startStr}–${form.endStr}`,
@@ -283,6 +473,7 @@ function buildCommand(): CreateDailyReportCommand {
 }
 
 async function submit(): Promise<void> {
+  if (!pageReady.value || loading.value) return;
   const validationError = validateDailyReportSubmit({
     form,
     admin: validationOptions(),
@@ -291,31 +482,22 @@ async function submit(): Promise<void> {
     ElMessage.error(validationError);
     return;
   }
-  try {
-    await confirmCashBeforeSubmit({
-      registerFloatYen: registerFloatAmount.value,
-      cashInDrawerYen: form.cashInDrawerYen,
-      withdrawalYen: preview.value.cashDepositYen,
-    });
-  } catch {
-    return;
-  }
-  saving.value = true;
-  try {
-    const command = buildCommand();
-    if (reportKey.value) {
-      await saveOwnerReport(reportKey.value, command, dailyReportsRepository);
-      ElMessage.success('修正しました');
-    } else {
-      await saveOwnerReport(null, command, dailyReportsRepository);
-      ElMessage.success('老板补录を保存しました');
+  await saveController.run(async (isCurrent) => {
+    try {
+      await confirmCashBeforeSubmit({
+        registerFloatYen: registerFloatAmount.value,
+        cashInDrawerYen: form.cashInDrawerYen,
+        withdrawalYen: preview.value.cashDepositYen,
+      });
+    } catch {
+      return { saved: false };
     }
-    await router.replace(ownerDailyPath);
-  } catch (error: unknown) {
-    ElMessage.error(ownerReportDataErrorMessage(error, '保存に失敗しました'));
-  } finally {
-    saving.value = false;
-  }
+    if (!isCurrent()) return { saved: false };
+    const command = buildCommand();
+    const key = reportKey.value;
+    await saveOwnerReport(key, command, dailyReportsRepository);
+    return { saved: true, mode: key ? 'edit' : 'create' };
+  });
 }
 </script>
 
@@ -333,7 +515,15 @@ async function submit(): Promise<void> {
       </div>
     </header>
 
-    <template v-if="!loading && step === 'confirm'">
+    <p
+      v-if="!loading && !pageReady && loadErrorMessage"
+      class="load-error"
+      role="alert"
+    >
+      {{ loadErrorMessage }}
+    </p>
+
+    <template v-if="!loading && pageReady && step === 'confirm'">
       <DailyReportConfirmSummary
         :preview="preview"
         :shift-name="shiftName"
@@ -356,6 +546,7 @@ async function submit(): Promise<void> {
           size="large"
           class="submit-btn"
           :loading="saving"
+          :disabled="!pageReady"
           @click="submit"
         >
           {{ isNew ? '老板补录を保存' : '修正を保存' }}
@@ -364,7 +555,7 @@ async function submit(): Promise<void> {
     </template>
 
     <el-form
-      v-if="!loading && step === 'form'"
+      v-if="!loading && pageReady && step === 'form'"
       label-position="top"
       require-asterisk-position="right"
       class="form"
@@ -386,6 +577,7 @@ async function submit(): Promise<void> {
 .bar { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
 .bar h2 { margin: 0; }
 .audit-note { margin: 6px 0 0; color: var(--fs-muted); font-size: 0.82rem; }
+.load-error { padding: 16px; color: var(--el-color-danger); border: 1px solid var(--el-color-danger-light-5); border-radius: var(--fs-radius-sm); }
 .confirm-actions { margin-top: 20px; padding-top: 8px; }
 .submit-btn { width: 100%; max-width: 360px; font-weight: 700; }
 </style>

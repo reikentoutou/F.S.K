@@ -251,7 +251,12 @@ void load();
                 <span class="day-sum">{{ formatYen(daySalesYen(list)) }}</span>
               </div>
             </template>
-            <div class="table-scroll">
+            <div
+              class="table-scroll"
+              role="region"
+              aria-label="横スクロール可能な日報明細"
+              tabindex="0"
+            >
               <el-table :data="list" size="small" stripe border class="day-table">
                 <el-table-column prop="shiftNameSnapshot" label="シフト" width="108" />
                 <el-table-column label="実際売上" min-width="120">
