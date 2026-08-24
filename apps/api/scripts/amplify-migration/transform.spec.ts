@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1216,10 +1217,10 @@ describe('dry-run CLI', () => {
     expect(process.cwd()).toBe(repositoryRoot);
   });
 
-  it('marks the anchored output in progress before long source processing', async () => {
+  it('does not expose output paths before source processing is complete', async () => {
     const fixture = createFixture();
     const outputPath = join(fixture.root, 'status-output');
-    let observedStatus: unknown;
+    let outputWasVisible = false;
 
     await runDryRunCli(
       [
@@ -1230,17 +1231,304 @@ describe('dry-run CLI', () => {
         '--out',
         outputPath,
       ],
+        repositoryRoot,
+        {
+          beforeOutputWrite: () => {
+            try {
+              readFileSync(join(outputPath, 'migration-status.json'), 'utf8');
+              outputWasVisible = true;
+            } catch {
+              outputWasVisible = false;
+            }
+          },
+        },
+      );
+
+    expect(outputWasVisible).toBe(false);
+    expect(
+      JSON.parse(readFileSync(join(outputPath, 'migration-status.json'), 'utf8')),
+    ).toEqual({ status: 'complete', errorCode: null });
+  });
+
+  it('runs concurrently without changing caller cwd or cleaning another run', async () => {
+    const first = createFixture();
+    const second = createFixture();
+    const sharedOutputParent = temporaryRoot();
+    const firstOutput = join(sharedOutputParent, 'output-one');
+    const secondOutput = join(sharedOutputParent, 'output-two');
+    const callerCwd = process.cwd();
+    let arrivals = 0;
+    let release!: () => void;
+    const bothArrived = new Promise<void>((resolveBarrier) => {
+      release = resolveBarrier;
+    });
+    const barrier = async () => {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await bothArrived;
+    };
+
+    const results = await Promise.allSettled([
+      runDryRunCli(
+        ['--sqlite', first.sqlitePath, '--uploads', first.uploadsPath, '--out', firstOutput],
+        repositoryRoot,
+        { beforeOutputWrite: barrier },
+      ),
+      runDryRunCli(
+        ['--sqlite', second.sqlitePath, '--uploads', second.uploadsPath, '--out', secondOutput],
+        repositoryRoot,
+        { beforeOutputWrite: barrier },
+      ),
+    ]);
+    process.chdir(callerCwd);
+
+    expect(results).toEqual([
+      { status: 'fulfilled', value: undefined },
+      { status: 'fulfilled', value: undefined },
+    ]);
+    expect(process.cwd()).toBe(callerCwd);
+    expect(readFileSync(join(firstOutput, 'migration-bundle.json'), 'utf8')).toBe(
+      readFileSync(join(secondOutput, 'migration-bundle.json'), 'utf8'),
+    );
+    expect(
+      JSON.parse(readFileSync(join(firstOutput, 'migration-status.json'), 'utf8')),
+    ).toEqual({ status: 'complete', errorCode: null });
+    expect(
+      JSON.parse(readFileSync(join(secondOutput, 'migration-status.json'), 'utf8')),
+    ).toEqual({ status: 'complete', errorCode: null });
+  });
+
+  it('never cross-cleans a successful concurrent run when its peer aborts', async () => {
+    const failed = createFixture();
+    const successful = createFixture();
+    const sharedOutputParent = temporaryRoot();
+    const failedOutput = join(sharedOutputParent, 'failed-output');
+    const successfulOutput = join(sharedOutputParent, 'successful-output');
+    const evidencePath = join(failed.root, 'failed-hardlink-evidence');
+    const callerCwd = process.cwd();
+    let arrivals = 0;
+    let release!: () => void;
+    const bothArrived = new Promise<void>((resolveBarrier) => {
+      release = resolveBarrier;
+    });
+    const barrier = async () => {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await bothArrived;
+    };
+
+    const results = await Promise.allSettled([
+      runDryRunCli(
+        ['--sqlite', failed.sqlitePath, '--uploads', failed.uploadsPath, '--out', failedOutput],
+        repositoryRoot,
+        {
+          beforeOutputWrite: barrier,
+          beforeWorkerFileWrite: ({ fileKind, stagingFilePath }) => {
+            if (fileKind === 'bundle') linkSync(stagingFilePath, evidencePath);
+          },
+        },
+      ),
+      runDryRunCli(
+        [
+          '--sqlite',
+          successful.sqlitePath,
+          '--uploads',
+          successful.uploadsPath,
+          '--out',
+          successfulOutput,
+        ],
+        repositoryRoot,
+        { beforeOutputWrite: barrier },
+      ),
+    ]);
+
+    expect(process.cwd()).toBe(callerCwd);
+    expect(results[0]).toMatchObject({
+      status: 'rejected',
+      reason: { message: 'MIGRATION_OUTPUT_ANCHOR_CHANGED' },
+    });
+    expect(results[1]).toEqual({ status: 'fulfilled', value: undefined });
+    expect(() => readFileSync(join(failedOutput, 'migration-status.json'))).toThrow();
+    expect(
+      JSON.parse(readFileSync(join(successfulOutput, 'migration-status.json'), 'utf8')),
+    ).toEqual({ status: 'complete', errorCode: null });
+  });
+
+  it('uses the SQLite snapshot bound before a 5000-to-6000-to-5000 ABA swap', async () => {
+    const fixture = createFixture();
+    const outputPath = join(fixture.root, 'sqlite-aba-output');
+    let sourceHookRan = false;
+
+    await runDryRunCli(
+      ['--sqlite', fixture.sqlitePath, '--uploads', fixture.uploadsPath, '--out', outputPath],
       repositoryRoot,
       {
-        beforeOutputWrite: () => {
-          observedStatus = JSON.parse(
-            readFileSync(join(outputPath, 'migration-status.json'), 'utf8'),
-          );
+        afterSourcesBound: () => {
+          sourceHookRan = true;
+          const database = new DatabaseSync(fixture.sqlitePath);
+          database.prepare(
+            'UPDATE "AppSettings" SET "registerFloatAmount" = 6000 WHERE "id" = \'default\'',
+          ).run();
+          database.close();
+        },
+        beforeSourceIdentityEvidence: () => {
+          const database = new DatabaseSync(fixture.sqlitePath);
+          database.prepare(
+            'UPDATE "AppSettings" SET "registerFloatAmount" = 5000 WHERE "id" = \'default\'',
+          ).run();
+          database.close();
         },
       },
     );
 
-    expect(observedStatus).toEqual({ status: 'in-progress', errorCode: null });
+    expect(sourceHookRan).toBe(true);
+    expect(
+      JSON.parse(readFileSync(join(outputPath, 'migration-bundle.json'), 'utf8'))
+        .appSetting.registerFloatAmount,
+    ).toBe(5_000);
+  });
+
+  it('inventories the uploads root inode bound before an ABA replacement', async () => {
+    const fixture = createFixture();
+    const outputPath = join(fixture.root, 'uploads-aba-output');
+    const movedUploads = join(fixture.root, 'uploads-original');
+    let sourceHookRan = false;
+
+    await runDryRunCli(
+      ['--sqlite', fixture.sqlitePath, '--uploads', fixture.uploadsPath, '--out', outputPath],
+      repositoryRoot,
+      {
+        afterSourcesBound: () => {
+          sourceHookRan = true;
+          renameSync(fixture.uploadsPath, movedUploads);
+          mkdirSync(join(fixture.uploadsPath, 'legacy-report-1'), {
+            recursive: true,
+          });
+          writeFileSync(
+            join(fixture.uploadsPath, 'legacy-report-1', 'receipt.txt'),
+            'replacement-upload',
+          );
+        },
+        beforeSourceIdentityEvidence: () => {
+          rmSync(fixture.uploadsPath, { recursive: true, force: true });
+          renameSync(movedUploads, fixture.uploadsPath);
+        },
+      },
+    );
+
+    expect(sourceHookRan).toBe(true);
+    const bundle = JSON.parse(
+      readFileSync(join(outputPath, 'migration-bundle.json'), 'utf8'),
+    );
+    expect(bundle.attachments[0].sha256).toBe(
+      createHash('sha256').update('receipt-one').digest('hex'),
+    );
+  });
+
+  it.each(['bundle', 'report', 'status'] as const)(
+    'rejects a hardlink before the %s write without writing source bytes',
+    async (fileKind) => {
+      const fixture = createFixture();
+      const outputPath = join(fixture.root, `hardlink-before-${fileKind}`);
+      const evidencePath = join(fixture.root, `evidence-before-${fileKind}`);
+
+      await expect(
+        runDryRunCli(
+          ['--sqlite', fixture.sqlitePath, '--uploads', fixture.uploadsPath, '--out', outputPath],
+          repositoryRoot,
+          {
+            beforeWorkerFileWrite: (context) => {
+              if (context.fileKind === fileKind) {
+                linkSync(context.stagingFilePath, evidencePath);
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+      expect(readFileSync(evidencePath)).toHaveLength(0);
+      expect(() => readFileSync(join(outputPath, 'migration-status.json'))).toThrow();
+    },
+  );
+
+  it('keeps held writes off sources when the private staging path is replaced', async () => {
+    const fixture = createFixture();
+    const outputPath = join(fixture.root, 'stage-swap-output');
+    let swapped = false;
+
+    await expect(
+      runDryRunCli(
+        ['--sqlite', fixture.sqlitePath, '--uploads', fixture.uploadsPath, '--out', outputPath],
+        repositoryRoot,
+        {
+          beforeWorkerFileWrite: ({ fileKind, stagingFilePath }) => {
+            if (fileKind !== 'bundle' || swapped) return;
+            swapped = true;
+            const stagePath = dirname(stagingFilePath);
+            renameSync(stagePath, `${stagePath}-moved`);
+            symlinkSync(fixture.uploadsPath, stagePath);
+          },
+        },
+      ),
+    ).rejects.toThrow('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+    expect(swapped).toBe(true);
+    expect(() => readFileSync(join(outputPath, 'migration-status.json'))).toThrow();
+    expect(() =>
+      readFileSync(join(fixture.uploadsPath, 'migration-bundle.json')),
+    ).toThrow();
+    expect(() =>
+      readFileSync(join(fixture.uploadsPath, 'migration-report.json')),
+    ).toThrow();
+  });
+
+  it.each(['bundle', 'report', 'status'] as const)(
+    'aborts after detecting a hardlink after the %s write',
+    async (fileKind) => {
+      const fixture = createFixture();
+      const outputPath = join(fixture.root, `hardlink-after-${fileKind}`);
+      const evidencePath = join(fixture.root, `evidence-after-${fileKind}`);
+
+      await expect(
+        runDryRunCli(
+          ['--sqlite', fixture.sqlitePath, '--uploads', fixture.uploadsPath, '--out', outputPath],
+          repositoryRoot,
+          {
+            afterWorkerFileWrite: (context) => {
+              if (context.fileKind === fileKind) {
+                linkSync(context.stagingFilePath, evidencePath);
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+      expect(readFileSync(evidencePath).byteLength).toBeGreaterThan(0);
+      expect(() => readFileSync(join(outputPath, 'migration-status.json'))).toThrow();
+    },
+  );
+
+  it('publishes a valid aborted status when source validation fails', async () => {
+    const fixture = createFixture();
+    const outputPath = join(fixture.root, 'aborted-output');
+    const database = new DatabaseSync(fixture.sqlitePath);
+    database.prepare('UPDATE "DailyReport" SET "status" = \'draft\'').run();
+    database.close();
+
+    await expect(
+      runDryRunCli([
+        '--sqlite',
+        fixture.sqlitePath,
+        '--uploads',
+        fixture.uploadsPath,
+        '--out',
+        outputPath,
+      ]),
+    ).rejects.toThrow('INVALID_SQLITE_SOURCE_FIELD:DailyReport.status');
+    expect(
+      JSON.parse(readFileSync(join(outputPath, 'migration-status.json'), 'utf8')),
+    ).toEqual({
+      status: 'aborted',
+      errorCode: 'INVALID_SQLITE_SOURCE_FIELD:DailyReport.status',
+    });
+    expect(() => readFileSync(join(outputPath, 'migration-report.json'))).toThrow();
   });
 
   it('writes a deterministic bundle and report outside the repository without changing sources', () => {

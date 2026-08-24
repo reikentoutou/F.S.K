@@ -1,20 +1,6 @@
+import { lstatSync, realpathSync } from 'node:fs';
+import { fork, type ChildProcess } from 'node:child_process';
 import {
-  closeSync,
-  constants,
-  fstatSync,
-  ftruncateSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  realpathSync,
-  rmdirSync,
-  unlinkSync,
-  writeFileSync,
-  writeSync,
-} from 'node:fs';
-import {
-  basename,
   dirname,
   isAbsolute,
   join,
@@ -36,8 +22,8 @@ import type {
   MigrationSummary,
   ResponsiblePersonRecord,
   ShiftDefinitionRecord,
+  UploadInventory,
 } from './contracts';
-import { inventoryUploads } from './inventory';
 import { buildMigrationSummary, serializeMigrationReport } from './report';
 
 interface LegacyDailyReportRow {
@@ -67,6 +53,13 @@ interface LegacyDailyReportRow {
 interface LegacyDailyReport {
   sourceId: string;
   record: DailyReportRecord;
+}
+
+interface LegacySourceSnapshot {
+  shifts: ShiftDefinitionRecord[];
+  responsiblePersons: ResponsiblePersonRecord[];
+  appSetting: AppSettingRecord;
+  reports: LegacyDailyReport[];
 }
 
 export class MigrationReportKeyConflictError extends Error {
@@ -208,12 +201,7 @@ function queryRows<T>(database: DatabaseSync, sql: string): T[] {
   return database.prepare(sql).all() as unknown as T[];
 }
 
-function readSource(sqlitePath: string): {
-  shifts: ShiftDefinitionRecord[];
-  responsiblePersons: ResponsiblePersonRecord[];
-  appSetting: AppSettingRecord;
-  reports: LegacyDailyReport[];
-} {
+function readSource(sqlitePath: string): LegacySourceSnapshot {
   const declaredPath = resolve(sqlitePath);
   const sourceStat = lstatSync(declaredPath);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
@@ -223,6 +211,7 @@ function readSource(sqlitePath: string): {
   const database = new DatabaseSync(canonicalPath, { readOnly: true });
   try {
     database.exec('PRAGMA query_only = ON');
+    database.exec('BEGIN');
     if (
       queryRows<Record<string, unknown>>(
         database,
@@ -400,6 +389,11 @@ function readSource(sqlitePath: string): {
     });
     return { shifts, responsiblePersons, appSetting, reports };
   } finally {
+    try {
+      database.exec('ROLLBACK');
+    } catch {
+      // A failed source read remains authoritative.
+    }
     database.close();
   }
 }
@@ -421,19 +415,11 @@ function reportKeyConflicts(reports: LegacyDailyReport[]): MigrationConflict[] {
   return conflicts;
 }
 
-export async function createMigrationBundle(
-  sqlitePath: string,
-  uploadsPath: string,
-): Promise<MigrationBundle> {
-  const source = readSource(sqlitePath);
+function bundleFromSource(
+  source: LegacySourceSnapshot,
+  uploadInventory: UploadInventory,
+): MigrationBundle {
   const conflicts = reportKeyConflicts(source.reports);
-  const uploadInventory = await inventoryUploads(
-    uploadsPath,
-    source.reports.map((report) => ({
-      legacyReportId: report.sourceId,
-      reportKey: report.record.reportKey,
-    })),
-  );
   const attachments = uploadInventory.targetAttachments;
   const dailyReports = source.reports.map(({ record }) => ({
     ...record,
@@ -466,6 +452,39 @@ export async function createMigrationBundle(
     attachments,
     sourceSummary,
   };
+}
+
+export async function createMigrationBundle(
+  sqlitePath: string,
+  uploadsPath: string,
+): Promise<MigrationBundle> {
+  const sqliteSource = pathIdentity(sqlitePath, 'file');
+  const uploadsSource = pathIdentity(uploadsPath, 'directory');
+  const source = readSource(sqlitePath);
+  const session = await startInventoryWorker(
+    uploadsSource,
+    source.reports.map((report) => ({
+      legacyReportId: report.sourceId,
+      reportKey: report.record.reportKey,
+    })),
+  );
+  try {
+    const uploadInventory = await session.collect();
+    const currentSqlite = pathIdentity(sqliteSource.canonicalPath, 'file');
+    const currentUploads = pathIdentity(
+      uploadsSource.canonicalPath,
+      'directory',
+    );
+    if (
+      !samePathIdentity(currentSqlite, sqliteSource) ||
+      !samePathIdentity(currentUploads, uploadsSource)
+    ) {
+      throw new Error('MIGRATION_SOURCE_CHANGED');
+    }
+    return bundleFromSource(source, uploadInventory);
+  } finally {
+    if (session.child.connected) session.child.kill();
+  }
 }
 
 export function serializeMigrationBundle(bundle: MigrationBundle): string {
@@ -569,6 +588,16 @@ export interface DryRunSafetyHooks {
   beforeAnchoredFileWrite?(context: {
     outputParent: string;
   }): void | Promise<void>;
+  afterSourcesBound?(): void | Promise<void>;
+  beforeSourceIdentityEvidence?(): void | Promise<void>;
+  beforeWorkerFileWrite?(context: {
+    fileKind: OutputFileKind;
+    stagingFilePath: string;
+  }): void | Promise<void>;
+  afterWorkerFileWrite?(context: {
+    fileKind: OutputFileKind;
+    stagingFilePath: string;
+  }): void | Promise<void>;
 }
 
 function pathIdentity(path: string, kind: 'file' | 'directory'): PathIdentity {
@@ -659,283 +688,248 @@ function createOutputSafetyContext(
   };
 }
 
-interface HeldOutputFile {
-  name: string;
-  fd: number;
-  device: bigint;
-  inode: bigint;
+type OutputFileKind = 'bundle' | 'report' | 'status';
+
+interface WorkerEnvelope {
+  type: string;
+  errorCode?: string;
+  stageName?: string;
+  fileName?: string;
+  fileKind?: OutputFileKind;
+  device?: string;
+  inode?: string;
+  inventory?: UploadInventory;
 }
 
-interface AnchoredOutput {
-  originalCwd: string;
-  outputName: string;
-  directory: PathIdentity;
-  directoryFd: number;
-  report: HeldOutputFile;
-  status: HeldOutputFile;
-  bundle?: HeldOutputFile;
+interface InventoryWorkerSession {
+  child: ChildProcess;
+  collect(): Promise<UploadInventory>;
 }
 
-function sameDeviceAndInode(
-  left: { dev: bigint; ino: bigint },
-  right: { device: bigint; inode: bigint },
-): boolean {
-  return left.dev === right.device && left.ino === right.inode;
+interface OutputWorkerSession {
+  child: ChildProcess;
+  stageName: string;
+  write(
+    files: Array<{ kind: OutputFileKind; name: string; content: string }>,
+    hooks: DryRunSafetyHooks,
+  ): Promise<PathIdentity>;
+  accept(): Promise<void>;
+  cleanup(): Promise<void>;
 }
 
-function openHeldOutputFile(name: string): HeldOutputFile {
-  const fd = openSync(
-    name,
-    constants.O_WRONLY |
-      constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW,
-    0o600,
-  );
-  const stat = fstatSync(fd, { bigint: true });
-  if (!stat.isFile() || stat.nlink !== 1n || stat.size !== 0n) {
-    closeSync(fd);
-    throw new Error('MIGRATION_OUTPUT_ANCHOR_FAILED');
-  }
-  return { name, fd, device: stat.dev, inode: stat.ino };
+function workerScriptPath(): string {
+  return resolve(__dirname, 'worker.ts');
 }
 
-function closeHeldOutputFile(file: HeldOutputFile | undefined): void {
-  if (!file) return;
-  try {
-    closeSync(file.fd);
-  } catch {
-    // Preserve the primary migration result or failure.
-  }
+function spawnWorker(
+  mode: 'inventory' | 'output',
+  cwd: string,
+  args: string[],
+): ChildProcess {
+  return fork(workerScriptPath(), [mode, ...args], {
+    cwd,
+    execArgv: ['--import', require.resolve('tsx')],
+    stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+  });
 }
 
-function createAnchoredOutput(context: OutputSafetyContext): AnchoredOutput {
-  const originalCwd = process.cwd();
-  const outputName = basename(context.outputPath);
-  let createdDirectory = false;
-  let enteredDirectory = false;
-  let directoryFd: number | undefined;
-  let report: HeldOutputFile | undefined;
-  let status: HeldOutputFile | undefined;
-  try {
-    process.chdir(context.outputParent.canonicalPath);
-    const parentStat = lstatSync('.', { bigint: true });
-    if (
-      !parentStat.isDirectory() ||
-      !sameDeviceAndInode(parentStat, context.outputParent)
-    ) {
-      throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
-    }
-    mkdirSync(outputName, { mode: 0o700 });
-    createdDirectory = true;
-    process.chdir(outputName);
-    enteredDirectory = true;
-    const directory = pathIdentity('.', 'directory');
-    if (directory.canonicalPath !== context.outputPath) {
-      throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
-    }
-    assertOutputDoesNotOverlap(
-      directory.canonicalPath,
-      context.sqliteSource,
-      context.uploadsSource,
-      context.repositoryRoot,
-    );
-    directoryFd = openSync(
-      '.',
-      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-    );
-    report = openHeldOutputFile('migration-report.json');
-    status = openHeldOutputFile('migration-status.json');
-    replaceHeldOutputFile(
-      status,
-      `${JSON.stringify({ status: 'in-progress', errorCode: null }, null, 2)}\n`,
-    );
-    return {
-      originalCwd,
-      outputName,
-      directory,
-      directoryFd,
-      report,
-      status,
-    };
-  } catch (error) {
-    closeHeldOutputFile(report);
-    closeHeldOutputFile(status);
-    if (directoryFd !== undefined) closeSync(directoryFd);
-    try {
-      if (enteredDirectory) {
-        for (const name of ['migration-report.json', 'migration-status.json']) {
-          try {
-            unlinkSync(name);
-          } catch {
-            // Best-effort cleanup within the anchored directory.
-          }
-        }
-        process.chdir('..');
+function waitForWorkerMessage(
+  child: ChildProcess,
+  acceptedTypes: string[],
+): Promise<WorkerEnvelope> {
+  return new Promise((resolveMessage, rejectMessage) => {
+    const onMessage = (message: WorkerEnvelope) => {
+      if (message.type === 'error') {
+        cleanup();
+        rejectMessage(new Error(message.errorCode ?? 'MIGRATION_WORKER_FAILED'));
+      } else if (acceptedTypes.includes(message.type)) {
+        cleanup();
+        resolveMessage(message);
       }
-      if (createdDirectory) rmdirSync(outputName);
-    } catch {
-      // A safely isolated empty orphan is preferable to path-based cleanup.
-    } finally {
-      process.chdir(originalCwd);
-    }
+    };
+    const onExit = (code: number | null) => {
+      cleanup();
+      rejectMessage(new Error(`MIGRATION_WORKER_EXIT:${code ?? 'signal'}`));
+    };
+    const cleanup = () => {
+      child.off('message', onMessage);
+      child.off('exit', onExit);
+    };
+    child.on('message', onMessage);
+    child.on('exit', onExit);
+  });
+}
+
+function sendWorkerMessage(
+  child: ChildProcess,
+  message: Record<string, unknown>,
+): void {
+  if (!child.connected) throw new Error('MIGRATION_WORKER_DISCONNECTED');
+  child.send(message);
+}
+
+async function startInventoryWorker(
+  uploadsSource: PathIdentity,
+  reportHints: Array<{ legacyReportId: string; reportKey: string }>,
+): Promise<InventoryWorkerSession> {
+  const child = spawnWorker('inventory', uploadsSource.canonicalPath, [
+    uploadsSource.device.toString(),
+    uploadsSource.inode.toString(),
+  ]);
+  try {
+    await waitForWorkerMessage(child, ['ready']);
+  } catch (error) {
+    child.kill();
     throw error;
   }
+  return {
+    child,
+    async collect() {
+      const response = waitForWorkerMessage(child, ['inventory']);
+      sendWorkerMessage(child, { type: 'inventory', reportHints });
+      const message = await response;
+      if (!message.inventory) throw new Error('MIGRATION_WORKER_RESULT_INVALID');
+      return message.inventory;
+    },
+  };
 }
 
-function assertCurrentOutputAnchor(anchor: AnchoredOutput): void {
-  const current = lstatSync('.', { bigint: true });
-  const held = fstatSync(anchor.directoryFd, { bigint: true });
-  if (
-    !current.isDirectory() ||
-    !held.isDirectory() ||
-    current.dev !== held.dev ||
-    current.ino !== held.ino ||
-    !sameDeviceAndInode(held, anchor.directory)
-  ) {
-    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
-  }
-}
-
-function writeHeldOutputFile(file: HeldOutputFile, content: string): void {
-  const before = fstatSync(file.fd, { bigint: true });
-  if (!before.isFile() || !sameDeviceAndInode(before, file)) {
-    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
-  }
-  writeFileSync(file.fd, content, { encoding: 'utf8' });
-  fsyncSync(file.fd);
-  const after = fstatSync(file.fd, { bigint: true });
-  if (!after.isFile() || !sameDeviceAndInode(after, file)) {
-    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
-  }
-}
-
-function replaceHeldOutputFile(file: HeldOutputFile, content: string): void {
-  const before = fstatSync(file.fd, { bigint: true });
-  if (!before.isFile() || !sameDeviceAndInode(before, file)) {
-    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
-  }
-  const bytes = Buffer.from(content, 'utf8');
-  ftruncateSync(file.fd, 0);
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    offset += writeSync(
-      file.fd,
-      bytes,
-      offset,
-      bytes.byteLength - offset,
-      offset,
-    );
-  }
-  fsyncSync(file.fd);
-  const after = fstatSync(file.fd, { bigint: true });
-  if (
-    !after.isFile() ||
-    !sameDeviceAndInode(after, file) ||
-    after.size !== BigInt(bytes.byteLength)
-  ) {
-    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
-  }
-}
-
-function assertHeldFilePath(file: HeldOutputFile): void {
-  const stat = lstatSync(file.name, { bigint: true });
-  if (
-    stat.isSymbolicLink() ||
-    !stat.isFile() ||
-    !sameDeviceAndInode(stat, file)
-  ) {
-    throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
-  }
-}
-
-function assertAnchoredOutputStillDeclared(
+async function startOutputWorker(
   context: OutputSafetyContext,
-  anchor: AnchoredOutput,
-): void {
-  let declaredDirectory: PathIdentity;
-  let declaredParent: PathIdentity;
-  let currentSqlite: PathIdentity;
-  let currentUploads: PathIdentity;
+): Promise<OutputWorkerSession> {
+  const outputName = context.outputPath.slice(
+    dirname(context.outputPath).length + 1,
+  );
+  const child = spawnWorker('output', context.outputParent.canonicalPath, [
+    outputName,
+    context.outputParent.device.toString(),
+    context.outputParent.inode.toString(),
+  ]);
+  let ready: WorkerEnvelope;
   try {
-    assertCurrentOutputAnchor(anchor);
-    declaredDirectory = pathIdentity(context.outputPath, 'directory');
-    declaredParent = pathIdentity(dirname(context.outputPath), 'directory');
-    currentSqlite = pathIdentity(context.sqliteSource.canonicalPath, 'file');
-    currentUploads = pathIdentity(
-      context.uploadsSource.canonicalPath,
-      'directory',
-    );
-    assertHeldFilePath(anchor.report);
-    assertHeldFilePath(anchor.status);
-    if (anchor.bundle) assertHeldFilePath(anchor.bundle);
+    ready = await waitForWorkerMessage(child, ['ready']);
+  } catch (error) {
+    child.kill();
+    throw error;
+  }
+  if (!ready.stageName) {
+    child.kill();
+    throw new Error('MIGRATION_WORKER_RESULT_INVALID');
+  }
+  let materialized = false;
+  let writeStarted = false;
+  const waitForExit = () =>
+    new Promise<void>((resolveExit) => {
+      if (child.exitCode !== null) resolveExit();
+      else child.once('exit', () => resolveExit());
+    });
+  return {
+    child,
+    stageName: ready.stageName,
+    async write(files, hooks) {
+      writeStarted = true;
+      let next = waitForWorkerMessage(child, [
+        'beforeWrite',
+        'afterWrite',
+        'materialized',
+      ]);
+      sendWorkerMessage(child, { type: 'write', files });
+      while (true) {
+        const message = await next;
+        if (message.type === 'materialized') {
+          if (!message.device || !message.inode) {
+            throw new Error('MIGRATION_WORKER_RESULT_INVALID');
+          }
+          materialized = true;
+          return {
+            canonicalPath: context.outputPath,
+            device: BigInt(message.device),
+            inode: BigInt(message.inode),
+          };
+        }
+        if (!message.fileKind || !message.fileName) {
+          throw new Error('MIGRATION_WORKER_RESULT_INVALID');
+        }
+        const stagingFilePath = join(
+          context.outputParent.canonicalPath,
+          ready.stageName!,
+          message.fileName,
+        );
+        if (message.type === 'beforeWrite') {
+          await hooks.beforeWorkerFileWrite?.({
+            fileKind: message.fileKind,
+            stagingFilePath,
+          });
+        } else {
+          await hooks.afterWorkerFileWrite?.({
+            fileKind: message.fileKind,
+            stagingFilePath,
+          });
+        }
+        next = waitForWorkerMessage(child, [
+          'beforeWrite',
+          'afterWrite',
+          'materialized',
+        ]);
+        sendWorkerMessage(child, { type: 'continue' });
+      }
+    },
+    async accept() {
+      const exited = waitForExit();
+      sendWorkerMessage(child, { type: 'accept' });
+      await exited;
+    },
+    async cleanup() {
+      const exited = waitForExit();
+      if ((materialized || !writeStarted) && child.connected) {
+        sendWorkerMessage(child, { type: 'cleanup' });
+      } else {
+        child.kill();
+      }
+      await exited;
+    },
+  };
+}
+
+function assertDeclaredIdentities(context: OutputSafetyContext): void {
+  let parent: PathIdentity;
+  let sqlite: PathIdentity;
+  let uploads: PathIdentity;
+  try {
+    parent = pathIdentity(dirname(context.outputPath), 'directory');
+    sqlite = pathIdentity(context.sqliteSource.canonicalPath, 'file');
+    uploads = pathIdentity(context.uploadsSource.canonicalPath, 'directory');
   } catch {
     throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
   }
   if (
-    !samePathIdentity(declaredDirectory, anchor.directory) ||
-    !samePathIdentity(declaredParent, context.outputParent) ||
-    !samePathIdentity(currentSqlite, context.sqliteSource) ||
-    !samePathIdentity(currentUploads, context.uploadsSource)
+    !samePathIdentity(parent, context.outputParent) ||
+    !samePathIdentity(sqlite, context.sqliteSource) ||
+    !samePathIdentity(uploads, context.uploadsSource)
   ) {
     throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
   }
   assertOutputDoesNotOverlap(
-    declaredDirectory.canonicalPath,
-    currentSqlite,
-    currentUploads,
+    context.outputPath,
+    sqlite,
+    uploads,
     context.repositoryRoot,
   );
 }
 
-function closeAnchoredOutput(anchor: AnchoredOutput): void {
-  closeHeldOutputFile(anchor.bundle);
-  closeHeldOutputFile(anchor.report);
-  closeHeldOutputFile(anchor.status);
+function assertPublishedOutput(
+  context: OutputSafetyContext,
+  published: PathIdentity,
+): void {
+  assertDeclaredIdentities(context);
+  let declared: PathIdentity;
   try {
-    closeSync(anchor.directoryFd);
+    declared = pathIdentity(context.outputPath, 'directory');
   } catch {
-    // Preserve the primary migration result or failure.
+    throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
   }
-  process.chdir(anchor.originalCwd);
-}
-
-function cleanupAnchoredOutput(anchor: AnchoredOutput): void {
-  for (const file of [anchor.bundle, anchor.report, anchor.status]) {
-    if (!file) continue;
-    try {
-      unlinkSync(file.name);
-    } catch {
-      // Do not follow a changed external pathname during cleanup.
-    }
-  }
-  try {
-    fsyncSync(anchor.directoryFd);
-  } catch {
-    // Cleanup is best effort after a terminal failure.
-  }
-  closeHeldOutputFile(anchor.bundle);
-  closeHeldOutputFile(anchor.report);
-  closeHeldOutputFile(anchor.status);
-  try {
-    closeSync(anchor.directoryFd);
-  } catch {
-    // Continue restoring cwd; the migration is already terminal.
-  }
-  try {
-    process.chdir('..');
-    const child = lstatSync(anchor.outputName, { bigint: true });
-    if (
-      child.isDirectory() &&
-      !child.isSymbolicLink() &&
-      sameDeviceAndInode(child, anchor.directory)
-    ) {
-      rmdirSync(anchor.outputName);
-    }
-  } catch {
-    // A safely isolated orphan is allowed if its anchored identity changed.
-  } finally {
-    process.chdir(anchor.originalCwd);
+  if (!samePathIdentity(declared, published)) {
+    throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
   }
 }
 
@@ -946,66 +940,124 @@ export async function runDryRunCli(
 ): Promise<void> {
   const parsed = parseCliArguments(args);
   const safety = createOutputSafetyContext(parsed, repositoryRoot);
-  const anchor = createAnchoredOutput(safety);
-  let preserveOutput = false;
+  let source: LegacySourceSnapshot | undefined;
+  let sourceError: Error | undefined;
+  try {
+    source = readSource(parsed.sqlitePath);
+  } catch (error) {
+    sourceError =
+      error instanceof Error ? error : new Error('MIGRATION_SOURCE_READ_FAILED');
+  }
+  const reportHints =
+    source?.reports.map((report) => ({
+      legacyReportId: report.sourceId,
+      reportKey: report.record.reportKey,
+    })) ?? [];
+  const inventorySessionPromise = source
+    ? startInventoryWorker(safety.uploadsSource, reportHints)
+    : undefined;
+  const outputSessionPromise = startOutputWorker(safety);
+  let inventorySession: InventoryWorkerSession | undefined;
+  let outputSession: OutputWorkerSession | undefined;
+  let outputAccepted = false;
   let bundle: MigrationBundle | undefined;
-  let summary: MigrationSummary;
   let terminalError: MigrationReportKeyConflictError | undefined;
   try {
+    const [inventoryResult, outputResult] = await Promise.allSettled([
+      inventorySessionPromise,
+      outputSessionPromise,
+    ]);
+    if (inventoryResult.status === 'fulfilled') {
+      inventorySession = inventoryResult.value;
+    }
+    if (outputResult.status === 'fulfilled') {
+      outputSession = outputResult.value;
+    }
+    if (inventoryResult.status === 'rejected') throw inventoryResult.reason;
+    if (outputResult.status === 'rejected') throw outputResult.reason;
+    if (!outputSession) throw new Error('MIGRATION_OUTPUT_WORKER_UNAVAILABLE');
     await hooks.beforeOutputWrite?.({
       outputParent: safety.outputParent.canonicalPath,
     });
-    assertCurrentOutputAnchor(anchor);
+    assertDeclaredIdentities(safety);
+    if (sourceError) {
+      const published = await outputSession.write(
+        [
+          {
+            kind: 'status',
+            name: 'migration-status.json',
+            content: `${JSON.stringify(
+              { status: 'aborted', errorCode: sourceError.message },
+              null,
+              2,
+            )}\n`,
+          },
+        ],
+        hooks,
+      );
+      assertPublishedOutput(safety, published);
+      await outputSession.accept();
+      outputAccepted = true;
+      throw sourceError;
+    }
+    if (!source || !inventorySession) {
+      throw new Error('MIGRATION_SOURCE_READ_FAILED');
+    }
+    await hooks.afterSourcesBound?.();
+    const uploadInventory = await inventorySession.collect();
+    await hooks.beforeSourceIdentityEvidence?.();
+    assertDeclaredIdentities(safety);
     try {
-      bundle = await createMigrationBundle(parsed.sqlitePath, parsed.uploadsPath);
-      summary = bundle.sourceSummary;
+      bundle = bundleFromSource(source, uploadInventory);
     } catch (error) {
       if (!(error instanceof MigrationReportKeyConflictError)) throw error;
-      summary = error.summary;
       terminalError = error;
     }
     await hooks.beforeOutputCommit?.({
       outputParent: safety.outputParent.canonicalPath,
     });
-    assertCurrentOutputAnchor(anchor);
-    if (bundle) {
-      anchor.bundle = openHeldOutputFile('migration-bundle.json');
-    }
+    assertDeclaredIdentities(safety);
     await hooks.beforeAnchoredFileWrite?.({
       outputParent: safety.outputParent.canonicalPath,
     });
-    if (bundle && anchor.bundle) {
-      writeHeldOutputFile(anchor.bundle, serializeMigrationBundle(bundle));
+    assertDeclaredIdentities(safety);
+    const summary = bundle?.sourceSummary ?? terminalError!.summary;
+    const files: Array<{
+      kind: OutputFileKind;
+      name: string;
+      content: string;
+    }> = [];
+    if (bundle) {
+      files.push({
+        kind: 'bundle',
+        name: 'migration-bundle.json',
+        content: serializeMigrationBundle(bundle),
+      });
     }
-    writeHeldOutputFile(anchor.report, serializeMigrationReport(summary));
-    fsyncSync(anchor.directoryFd);
-    assertAnchoredOutputStillDeclared(safety, anchor);
-    replaceHeldOutputFile(
-      anchor.status,
-      `${JSON.stringify({
-        status: terminalError ? 'conflict' : 'complete',
-        errorCode: terminalError?.code ?? null,
-      }, null, 2)}\n`,
-    );
-    fsyncSync(anchor.directoryFd);
-    preserveOutput = true;
-  } catch (error) {
-    try {
-      replaceHeldOutputFile(
-        anchor.status,
-        `${JSON.stringify({
-          status: 'aborted',
-          errorCode: error instanceof Error ? error.message : 'MIGRATION_FAILED',
-        }, null, 2)}\n`,
-      );
-      fsyncSync(anchor.directoryFd);
-    } catch {
-      // The thrown error remains authoritative if even the held status FD fails.
-    }
-    throw error;
+    files.push({
+      kind: 'report',
+      name: 'migration-report.json',
+      content: serializeMigrationReport(summary),
+    });
+    files.push({
+      kind: 'status',
+      name: 'migration-status.json',
+      content: `${JSON.stringify(
+        {
+          status: terminalError ? 'conflict' : 'complete',
+          errorCode: terminalError?.code ?? null,
+        },
+        null,
+        2,
+      )}\n`,
+    });
+    const published = await outputSession.write(files, hooks);
+    assertPublishedOutput(safety, published);
+    await outputSession.accept();
+    outputAccepted = true;
   } finally {
-    if (preserveOutput) closeAnchoredOutput(anchor);
-    else cleanupAnchoredOutput(anchor);
+    if (inventorySession?.child.connected) inventorySession.child.kill();
+    if (outputSession && !outputAccepted) await outputSession.cleanup();
   }
   if (terminalError) throw terminalError;
 }
