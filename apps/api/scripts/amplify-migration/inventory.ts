@@ -52,6 +52,11 @@ interface SourceDirectory {
   entryNames: string[];
 }
 
+interface SourceFileHash {
+  byteSize: number;
+  sha256: string;
+}
+
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -202,6 +207,7 @@ async function readFileForHash(
 async function assertTreeStable(
   sourceDirectories: SourceDirectory[],
   sourceFiles: SourceFile[],
+  sourceHashes: ReadonlyMap<string, SourceFileHash>,
   hooks: InventorySafetyHooks,
 ): Promise<void> {
   try {
@@ -233,6 +239,15 @@ async function assertTreeStable(
         !stat.isFile() ||
         (await realpath(sourceFile.accessPath)) !== sourceFile.canonicalPath ||
         !sameFileState(stat, sourceFile.initialStat)
+      ) {
+        throw new Error('UPLOAD_TREE_CHANGED');
+      }
+      const expectedHash = sourceHashes.get(sourceFile.sourceRelativeKey);
+      const finalHash = await readFileForHash(sourceFile, hooks);
+      if (
+        !expectedHash ||
+        finalHash.byteSize !== expectedHash.byteSize ||
+        finalHash.sha256 !== expectedHash.sha256
       ) {
         throw new Error('UPLOAD_TREE_CHANGED');
       }
@@ -342,6 +357,7 @@ async function inventoryUploadsFromRoot(
   const sourceKeys = new Set<string>();
   const targetKeys = new Set<string>();
   const sourceInventory: SourceUploadEvidence[] = [];
+  const sourceHashes = new Map<string, SourceFileHash>();
   const targetAttachments: AttachmentManifestEntry[] = [];
   const sortedHints = [...reportHints].sort((left, right) =>
     compareText(left.reportKey, right.reportKey),
@@ -364,6 +380,7 @@ async function inventoryUploadsFromRoot(
       ),
     ];
     const hash = await readFileForHash(sourceFile, hooks);
+    sourceHashes.set(sourceFile.sourceRelativeKey, hash);
     sourceInventory.push({
       sourceRelativeKey: sourceFile.sourceRelativeKey,
       ...hash,
@@ -378,7 +395,7 @@ async function inventoryUploadsFromRoot(
     }
   }
   await hooks.beforeFinalTreeCheck?.();
-  await assertTreeStable(sourceDirectories, sourceFiles, hooks);
+  await assertTreeStable(sourceDirectories, sourceFiles, sourceHashes, hooks);
   return {
     sourceFiles: sourceInventory.sort((left, right) =>
       compareText(left.sourceRelativeKey, right.sourceRelativeKey),

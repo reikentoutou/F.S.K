@@ -1449,6 +1449,32 @@ describe('uploads inventory safety', () => {
     ).rejects.toThrow('UPLOAD_TREE_CHANGED');
   });
 
+  it('rehashes every source file during the final tree check', async () => {
+    const fixture = createFixture();
+    let finalCheckStarted = false;
+    let mutatedDuringFinalHash = false;
+
+    await expect(
+      inventoryUploads(fixture.uploadsPath, [], {
+        beforeFinalTreeCheck: () => {
+          finalCheckStarted = true;
+        },
+        onProgress: ({ phase, sourceRelativeKey }) => {
+          if (
+            finalCheckStarted &&
+            phase === 'chunk' &&
+            sourceRelativeKey === 'unlinked.txt' &&
+            !mutatedDuringFinalHash
+          ) {
+            writeFileSync(join(fixture.uploadsPath, 'unlinked.txt'), 'change');
+            mutatedDuringFinalHash = true;
+          }
+        },
+      }),
+    ).rejects.toThrow('UPLOAD_TREE_CHANGED');
+    expect(mutatedDuringFinalHash).toBe(true);
+  });
+
   it('rejects a special filesystem entry', async () => {
     const fixture = createFixture();
     const socketPath = join(fixture.uploadsPath, 'inventory.sock');
