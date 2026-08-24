@@ -1,5 +1,3 @@
-import { posix } from 'node:path';
-
 const STORAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/gu;
 const UNSAFE_FORMAT_CONTROL_PATTERN =
@@ -21,14 +19,15 @@ function sanitizeFileName(fileName: string): string {
     throw new Error('INVALID_STORAGE_FILE_NAME');
   }
 
-  const baseName = posix.basename(fileName.replaceAll('\\', '/'));
+  const normalizedPath = fileName.replaceAll('\\', '/').replace(/\/+$/u, '');
+  const baseName = normalizedPath.slice(normalizedPath.lastIndexOf('/') + 1);
   const sanitized = baseName.replace(CONTROL_CHARACTER_PATTERN, '');
 
   if (!sanitized || sanitized === '.' || sanitized === '..') {
     throw new Error('INVALID_STORAGE_FILE_NAME');
   }
 
-  if (Buffer.byteLength(sanitized, 'utf8') > MAX_STORAGE_FILE_NAME_BYTES) {
+  if (new TextEncoder().encode(sanitized).byteLength > MAX_STORAGE_FILE_NAME_BYTES) {
     throw new Error('STORAGE_FILE_NAME_TOO_LONG');
   }
 
@@ -47,17 +46,27 @@ function isWellFormedUnicode(value: string): boolean {
   return true;
 }
 
+export function submissionKey(
+  identityId: string,
+  draftId: string,
+  attachmentId: string,
+  fileName: string,
+): string {
+  assertStorageId(identityId, 'identityId');
+  assertStorageId(draftId, 'draftId');
+  assertStorageId(attachmentId, 'attachmentId');
+
+  return `submissions/${identityId}/${draftId}/${attachmentId}/${sanitizeFileName(fileName)}`;
+}
+
+/** @deprecated Use submissionKey with the authenticated identity ID. */
 export function pendingKey(
   subject: string,
   draftId: string,
   attachmentId: string,
   fileName: string,
 ): string {
-  assertStorageId(subject, 'subject');
-  assertStorageId(draftId, 'draftId');
-  assertStorageId(attachmentId, 'attachmentId');
-
-  return `submissions/${subject}/${draftId}/${attachmentId}/${sanitizeFileName(fileName)}`;
+  return submissionKey(subject, draftId, attachmentId, fileName);
 }
 
 export function formalAttachmentKey(

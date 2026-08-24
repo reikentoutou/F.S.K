@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import * as keyPolicy from './key-policy.js';
 import {
   assertOwnedPendingKey,
   formalAttachmentKey,
@@ -11,7 +12,42 @@ import {
   type StorageBucketOverrideTarget,
 } from './resource.js';
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('Storage key construction', () => {
+  it('exports submissionKey as the canonical identity-scoped key builder', () => {
+    const submissionKey = (
+      keyPolicy as Partial<{
+        submissionKey: (
+          identityId: string,
+          draftId: string,
+          attachmentId: string,
+          fileName: string,
+        ) => string;
+      }>
+    ).submissionKey;
+
+    expect(submissionKey).toBeTypeOf('function');
+    expect(submissionKey?.('sub-a', 'draft-1', 'att-1', '../票据.jpg')).toBe(
+      'submissions/sub-a/draft-1/att-1/票据.jpg',
+    );
+  });
+
+  it('builds UTF-8 bounded submission keys without a Node Buffer global', () => {
+    vi.stubGlobal('Buffer', undefined);
+
+    expect(
+      keyPolicy.submissionKey(
+        'sub-a',
+        'draft-1',
+        'att-1',
+        `${'票'.repeat(83)}文件`,
+      ),
+    ).toBe(`submissions/sub-a/draft-1/att-1/${'票'.repeat(83)}文件`);
+  });
+
   it('builds the exact identity-scoped submission namespace and basenames filename input', () => {
     expect(pendingKey('sub-a', 'draft-1', 'att-1', '../票据.jpg')).toBe(
       'submissions/sub-a/draft-1/att-1/票据.jpg',
