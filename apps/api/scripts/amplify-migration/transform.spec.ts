@@ -12,6 +12,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,7 +21,7 @@ import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fork, spawnSync, type ChildProcess } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createMigrationBundle,
   normalizeLegacySubmittedAt,
@@ -320,6 +321,7 @@ async function createPrismaFixture(): Promise<{
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   while (temporaryRoots.length > 0) {
     rmSync(temporaryRoots.pop()!, { recursive: true, force: true });
   }
@@ -377,6 +379,34 @@ class FakeWorkerProcess extends EventEmitter implements WorkerClientProcess {
 
 describe('worker IPC client lifecycle', () => {
   const clientOptions = { timeoutMs: 20, terminateGraceMs: 20 };
+
+  it('allows total work beyond fifteen minutes while progress resets inactivity', async () => {
+    vi.useFakeTimers();
+    const child = new FakeWorkerProcess();
+    child.sendBehavior = (_message, callback) => callback(null);
+    const client = createWorkerClient(child, {
+      timeoutMs: 15 * 60 * 1_000,
+      terminateGraceMs: 20,
+    });
+    const result = client.request({ type: 'inventory' }, ['inventory']);
+    const outcome = result.then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason: Error) => ({ status: 'rejected' as const, reason }),
+    );
+
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
+    child.emit('message', { type: 'progress', phase: 'chunk' });
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
+    child.emit('message', { type: 'inventory', inventory: { synthetic: true } });
+
+    expect(await outcome).toMatchObject({
+      status: 'fulfilled',
+      value: { type: 'inventory' },
+    });
+    expect(child.killSignals).toEqual([]);
+    child.finish(0);
+    await expect(client.waitForExit()).resolves.toBeUndefined();
+  });
 
   it('times out a worker that never responds and reaps it', async () => {
     const child = new FakeWorkerProcess();
@@ -489,6 +519,26 @@ describe('worker IPC client lifecycle', () => {
       }),
     ).toThrow('MIGRATION_WORKER_TIMEOUT_INVALID');
   });
+
+  it('surfaces final reap failure after SIGTERM and SIGKILL both fail to stop the worker', async () => {
+    vi.useFakeTimers();
+    const child = new FakeWorkerProcess();
+    child.autoExitOnKill = false;
+    const client = createWorkerClient(child, clientOptions);
+    const reaping = client.terminateAndReap();
+    const outcome = reaping.then(
+      () => ({ status: 'fulfilled' as const }),
+      (reason: Error) => ({ status: 'rejected' as const, reason }),
+    );
+
+    await vi.advanceTimersByTimeAsync(40);
+
+    expect(await outcome).toMatchObject({
+      status: 'rejected',
+      reason: { message: 'MIGRATION_WORKER_REAP_FAILED' },
+    });
+    expect(child.killSignals).toEqual(['SIGTERM', 'SIGKILL']);
+  });
 });
 
 function forkMigrationWorker(
@@ -510,6 +560,7 @@ function forkMigrationWorker(
 function waitForChildMessage(
   child: ChildProcess,
   type: string,
+  predicate: (message: Record<string, unknown>) => boolean = () => true,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolveMessage, rejectMessage) => {
     const timer = setTimeout(() => {
@@ -525,8 +576,10 @@ function waitForChildMessage(
       ) {
         return;
       }
+      const envelope = message as Record<string, unknown>;
+      if (!predicate(envelope)) return;
       cleanup();
-      resolveMessage(message as Record<string, unknown>);
+      resolveMessage(envelope);
     };
     const onExit = () => {
       cleanup();
@@ -567,6 +620,29 @@ function waitForChildExit(
     child.once('error', rejectExit);
     child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
+}
+
+async function waitForChildExitWithin(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { code: child.exitCode, signal: child.signalCode };
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      waitForChildExit(child),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('TEST_WORKER_EXIT_TIMEOUT')),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 describe('worker IPC flush and signal cleanup', () => {
@@ -682,6 +758,41 @@ describe('worker IPC flush and signal cleanup', () => {
     await expect(exited).resolves.toEqual({ code: 1, signal: null });
     expect(events).toEqual(['error', 'exit']);
   });
+
+  it('aborts a real inventory worker promptly when its parent disconnects during a large-file hash', async () => {
+    const uploadsPath = temporaryRoot();
+    const largeFilePath = join(uploadsPath, 'large.bin');
+    writeFileSync(largeFilePath, '');
+    truncateSync(largeFilePath, 64 * 1024 * 1024);
+    const root = lstatSync(uploadsPath, { bigint: true });
+    const child = forkMigrationWorker(
+      'inventory',
+      [root.dev.toString(), root.ino.toString()],
+      uploadsPath,
+    );
+    try {
+      await waitForChildMessage(child, 'ready');
+      const chunkProgress = waitForChildMessage(
+        child,
+        'progress',
+        (message) => message.phase === 'chunk',
+      );
+      await sendChildMessage(child, { type: 'inventory', reportHints: [] });
+      await chunkProgress;
+
+      child.disconnect();
+
+      await expect(waitForChildExitWithin(child, 2_000)).resolves.toEqual({
+        code: 1,
+        signal: null,
+      });
+      expect(readdirSync(uploadsPath)).toEqual(['large.bin']);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+      }
+    }
+  }, 5_000);
 });
 
 describe('SQLite migration transform', () => {
@@ -1896,6 +2007,38 @@ describe('dry-run CLI', () => {
     ).rejects.toThrow('MIGRATION_OUTPUT_ANCHOR_CHANGED');
     expect(readFileSync(evidencePath).byteLength).toBeGreaterThan(0);
     expect(() => readFileSync(join(outputPath, 'migration-status.json'))).toThrow();
+    expect(
+      readdirSync(fixture.root).filter((name) =>
+        name.startsWith('.fsk-migration-output-'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('rejects a completed bundle directory entry replaced under the same name before publication', async () => {
+    const fixture = createFixture();
+    const outputPath = join(fixture.root, 'replaced-bundle-entry-output');
+    const evidencePath = join(fixture.root, 'original-bundle-evidence.json');
+    let bundleStagingPath: string | undefined;
+
+    await expect(
+      runDryRunCli(
+        ['--sqlite', fixture.sqlitePath, '--uploads', fixture.uploadsPath, '--out', outputPath],
+        repositoryRoot,
+        {
+          afterWorkerFileWrite: ({ fileKind, stagingFilePath }) => {
+            if (fileKind === 'bundle') bundleStagingPath = stagingFilePath;
+            if (fileKind !== 'status') return;
+            if (!bundleStagingPath) throw new Error('TEST_BUNDLE_PATH_MISSING');
+            renameSync(bundleStagingPath, evidencePath);
+            writeFileSync(bundleStagingPath, readFileSync(evidencePath));
+          },
+        },
+      ),
+    ).rejects.toThrow('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+    expect(
+      JSON.parse(readFileSync(evidencePath, 'utf8')).dailyReports[0].reportKey,
+    ).toBe('2026-08-23#shift-day');
+    expect(existsSync(outputPath)).toBe(false);
     expect(
       readdirSync(fixture.root).filter((name) =>
         name.startsWith('.fsk-migration-output-'),

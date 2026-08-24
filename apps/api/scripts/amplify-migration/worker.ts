@@ -41,10 +41,14 @@ interface WorkerMessage {
 let workerAbortError: Error | undefined;
 const workerAbortListeners = new Set<(error: Error) => void>();
 
-function abortWorker(signal: NodeJS.Signals): void {
+function abortWorkerWithCode(errorCode: string): void {
   if (workerAbortError) return;
-  workerAbortError = new Error(`MIGRATION_WORKER_ABORTED:${signal}`);
+  workerAbortError = new Error(errorCode);
   for (const listener of workerAbortListeners) listener(workerAbortError);
+}
+
+function abortWorker(signal: NodeJS.Signals): void {
+  abortWorkerWithCode(`MIGRATION_WORKER_ABORTED:${signal}`);
 }
 
 function throwIfWorkerAborted(): void {
@@ -159,17 +163,39 @@ function assertHeldRegularFile(
 function assertRequestedHeldFiles(
   heldFiles: Map<OutputFileKind, HeldOutputFile>,
   files: OutputFileRequest[],
+  directoryName: string,
 ): void {
-  for (const file of files) {
-    const held = heldFiles.get(file.kind);
-    if (!held || held.name !== file.name || held.closed) {
-      throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+  try {
+    for (const file of files) {
+      const held = heldFiles.get(file.kind);
+      if (!held || held.name !== file.name || held.closed) {
+        throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+      }
+      const expectedSize = BigInt(Buffer.byteLength(file.content, 'utf8'));
+      assertHeldRegularFile(held.fd, held.identity, expectedSize);
+      const descriptor = fstatSync(held.fd, { bigint: true });
+      const directoryEntry = lstatSync(join(directoryName, file.name), {
+        bigint: true,
+      });
+      if (
+        directoryEntry.isSymbolicLink() ||
+        !directoryEntry.isFile() ||
+        directoryEntry.dev !== descriptor.dev ||
+        directoryEntry.ino !== descriptor.ino ||
+        directoryEntry.nlink !== descriptor.nlink ||
+        directoryEntry.size !== descriptor.size
+      ) {
+        throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+      }
     }
-    assertHeldRegularFile(
-      held.fd,
-      held.identity,
-      BigInt(Buffer.byteLength(file.content, 'utf8')),
-    );
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === 'MIGRATION_OUTPUT_ANCHOR_CHANGED'
+    ) {
+      throw error;
+    }
+    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
   }
 }
 
@@ -209,6 +235,16 @@ async function inventoryWorker(): Promise<void> {
   const request = await waitForMessage('inventory');
   const inventory = await inventoryUploadsFromAnchoredCwd(
     request.reportHints ?? [],
+    {
+      onProgress: async (progress) => {
+        throwIfWorkerAborted();
+        if (!process.connected) {
+          throw new Error('MIGRATION_WORKER_DISCONNECTED');
+        }
+        await send({ type: 'progress', ...progress });
+        throwIfWorkerAborted();
+      },
+    },
   );
   throwIfWorkerAborted();
   const finalRoot = lstatSync('.', { bigint: true });
@@ -340,7 +376,7 @@ async function outputWorker(): Promise<void> {
     if (!pathMatchesDirectory(stageName, stageStat)) {
       throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
     }
-    assertRequestedHeldFiles(heldFiles, requestedFiles);
+    assertRequestedHeldFiles(heldFiles, requestedFiles, stageName);
     for (const held of heldFiles.values()) {
       if (requestedKinds.has(held.kind)) continue;
       closeSync(held.fd);
@@ -369,10 +405,10 @@ async function outputWorker(): Promise<void> {
     ) {
       throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
     }
-    assertRequestedHeldFiles(heldFiles, requestedFiles);
+    assertRequestedHeldFiles(heldFiles, requestedFiles, stageName);
     renameSync(stageName, outputName);
     materialized = true;
-    assertRequestedHeldFiles(heldFiles, requestedFiles);
+    assertRequestedHeldFiles(heldFiles, requestedFiles, outputName);
     for (const file of requestedFiles) {
       const held = heldFiles.get(file.kind)!;
       closeSync(held.fd);
@@ -445,8 +481,11 @@ async function main(): Promise<void> {
 async function runWorker(): Promise<void> {
   const onSigint = () => abortWorker('SIGINT');
   const onSigterm = () => abortWorker('SIGTERM');
+  const onDisconnect = () =>
+    abortWorkerWithCode('MIGRATION_WORKER_DISCONNECTED');
   process.once('SIGINT', onSigint);
   process.once('SIGTERM', onSigterm);
+  process.once('disconnect', onDisconnect);
   let exitCode = 0;
   try {
     await main();
@@ -464,6 +503,7 @@ async function runWorker(): Promise<void> {
   } finally {
     process.off('SIGINT', onSigint);
     process.off('SIGTERM', onSigterm);
+    process.off('disconnect', onDisconnect);
     process.exitCode = exitCode;
     if (process.connected) process.disconnect();
   }

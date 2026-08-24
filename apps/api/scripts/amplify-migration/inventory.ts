@@ -19,6 +19,7 @@ import type {
 
 const UNSAFE_FORMAT_CONTROL_PATTERN =
   /[\u00ad\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|\u{e0001}|[\u{e0020}-\u{e007f}]/u;
+const HASH_CHUNK_BYTES = 1024 * 1024;
 
 export interface InventoryFileContext {
   sourceRelativeKey: string;
@@ -30,6 +31,10 @@ export interface InventorySafetyHooks {
   beforeOpen?(context: InventoryFileContext): void | Promise<void>;
   afterRead?(context: InventoryFileContext): void | Promise<void>;
   beforeFinalTreeCheck?(): void | Promise<void>;
+  onProgress?(context: {
+    phase: 'directory' | 'file' | 'chunk' | 'final-check';
+    sourceRelativeKey?: string;
+  }): void | Promise<void>;
 }
 
 interface SourceFile extends InventoryFileContext {
@@ -150,19 +155,42 @@ async function readFileForHash(
     if (!before.isFile() || !sameFileState(before, sourceFile.initialStat)) {
       throw new Error('UPLOAD_PATH_NOT_CANONICAL');
     }
-    const bytes = await handle.readFile();
+    const hash = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+    let byteSize = 0;
+    let position = 0;
+    while (true) {
+      await hooks.onProgress?.({
+        phase: 'chunk',
+        sourceRelativeKey: sourceFile.sourceRelativeKey,
+      });
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        buffer.byteLength,
+        position,
+      );
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      byteSize += bytesRead;
+      position += bytesRead;
+    }
     await hooks.afterRead?.(sourceFile);
     const after = await handle.stat({ bigint: true });
-    if (!sameFileState(before, after) || BigInt(bytes.byteLength) !== after.size) {
+    if (!sameFileState(before, after) || BigInt(byteSize) !== after.size) {
       throw new Error('UPLOAD_FILE_CHANGED');
     }
     await assertParentIdentity(sourceFile);
     return {
-      byteSize: bytes.byteLength,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
+      byteSize,
+      sha256: hash.digest('hex'),
     };
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith('UPLOAD_')) {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('UPLOAD_') ||
+        error.message.startsWith('MIGRATION_WORKER_'))
+    ) {
       throw error;
     }
     throw new Error('UPLOAD_HASH_FAILED');
@@ -174,9 +202,11 @@ async function readFileForHash(
 async function assertTreeStable(
   sourceDirectories: SourceDirectory[],
   sourceFiles: SourceFile[],
+  hooks: InventorySafetyHooks,
 ): Promise<void> {
   try {
     for (const directory of sourceDirectories) {
+      await hooks.onProgress?.({ phase: 'final-check' });
       const stat = await lstat(directory.accessPath, { bigint: true });
       const canonicalPath = await realpath(directory.accessPath);
       const entryNames = (await readdir(directory.accessPath))
@@ -193,6 +223,10 @@ async function assertTreeStable(
       }
     }
     for (const sourceFile of sourceFiles) {
+      await hooks.onProgress?.({
+        phase: 'final-check',
+        sourceRelativeKey: sourceFile.sourceRelativeKey,
+      });
       const stat = await lstat(sourceFile.accessPath, { bigint: true });
       if (
         stat.isSymbolicLink() ||
@@ -204,7 +238,11 @@ async function assertTreeStable(
       }
     }
   } catch (error) {
-    if (error instanceof Error && error.message === 'UPLOAD_TREE_CHANGED') {
+    if (
+      error instanceof Error &&
+      (error.message === 'UPLOAD_TREE_CHANGED' ||
+        error.message.startsWith('MIGRATION_WORKER_'))
+    ) {
       throw error;
     }
     throw new Error('UPLOAD_TREE_CHANGED');
@@ -247,6 +285,7 @@ async function inventoryUploadsFromRoot(
     directory: string,
     relativeSegments: string[],
   ): Promise<void> {
+    await hooks.onProgress?.({ phase: 'directory' });
     const directoryStat = await lstat(directory, { bigint: true });
     const canonicalDirectory = await realpath(directory);
     if (
@@ -265,6 +304,7 @@ async function inventoryUploadsFromRoot(
       entryNames: entries.map((entry) => entry.name),
     });
     for (const entry of entries) {
+      await hooks.onProgress?.({ phase: 'file' });
       const declaredPath = join(directory, entry.name);
       const entryStat = await lstat(declaredPath, { bigint: true });
       if (entryStat.isSymbolicLink()) {
@@ -307,6 +347,10 @@ async function inventoryUploadsFromRoot(
     compareText(left.reportKey, right.reportKey),
   );
   for (const sourceFile of sourceFiles) {
+    await hooks.onProgress?.({
+      phase: 'file',
+      sourceRelativeKey: sourceFile.sourceRelativeKey,
+    });
     if (sourceKeys.has(sourceFile.sourceRelativeKey)) {
       throw new Error('DUPLICATE_UPLOAD_KEY');
     }
@@ -334,7 +378,7 @@ async function inventoryUploadsFromRoot(
     }
   }
   await hooks.beforeFinalTreeCheck?.();
-  await assertTreeStable(sourceDirectories, sourceFiles);
+  await assertTreeStable(sourceDirectories, sourceFiles, hooks);
   return {
     sourceFiles: sourceInventory.sort((left, right) =>
       compareText(left.sourceRelativeKey, right.sourceRelativeKey),
@@ -355,6 +399,7 @@ export async function inventoryUploads(
 
 export async function inventoryUploadsFromAnchoredCwd(
   reportHints: LegacyReportAttachmentHint[],
+  hooks: InventorySafetyHooks = {},
 ): Promise<UploadInventory> {
-  return inventoryUploadsFromRoot('.', reportHints, {});
+  return inventoryUploadsFromRoot('.', reportHints, hooks);
 }

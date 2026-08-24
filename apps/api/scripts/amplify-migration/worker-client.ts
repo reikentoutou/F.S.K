@@ -230,6 +230,10 @@ class ManagedWorkerClient implements WorkerClient {
       void this.failOperation(operation, controlledError(errorCode));
       return;
     }
+    if (envelope.type === 'progress') {
+      this.resetInactivityTimer(operation);
+      return;
+    }
     if (!operation.acceptedTypes.has(envelope.type)) return;
     operation.response = envelope;
     this.completeIfReady(operation);
@@ -312,6 +316,17 @@ class ManagedWorkerClient implements WorkerClient {
     operation.resolve(operation.response ?? { type: 'acknowledged' });
   }
 
+  private resetInactivityTimer(operation: PendingOperation): void {
+    if (this.pending !== operation || operation.settled) return;
+    clearTimeout(operation.timer);
+    operation.timer = setTimeout(() => {
+      void this.failOperation(
+        operation,
+        controlledError('MIGRATION_WORKER_TIMEOUT'),
+      );
+    }, this.options.timeoutMs);
+  }
+
   private async failOperation(
     operation: PendingOperation,
     error: Error,
@@ -321,8 +336,16 @@ class ManagedWorkerClient implements WorkerClient {
     clearTimeout(operation.timer);
     this.pending = undefined;
     this.closed = true;
-    await this.terminateAndReap();
-    operation.reject(error);
+    let rejection = error;
+    try {
+      await this.terminateAndReap();
+    } catch (reapError) {
+      rejection =
+        reapError instanceof Error
+          ? reapError
+          : controlledError('MIGRATION_WORKER_REAP_FAILED');
+    }
+    operation.reject(rejection);
   }
 
   private async terminateAndReapInternal(): Promise<void> {
@@ -338,7 +361,9 @@ class ManagedWorkerClient implements WorkerClient {
     } catch {
       // The bounded wait below is the final reap attempt.
     }
-    await this.waitForReap(this.options.terminateGraceMs);
+    if (!(await this.waitForReap(this.options.terminateGraceMs))) {
+      throw controlledError('MIGRATION_WORKER_REAP_FAILED');
+    }
   }
 
   private async waitForReap(timeoutMs: number): Promise<boolean> {
