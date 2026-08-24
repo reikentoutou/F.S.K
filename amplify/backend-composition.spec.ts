@@ -155,6 +155,40 @@ const MIGRATION_APPROVAL_EVIDENCE = {
   CleanupOwner: ['reiken'],
 } as const;
 
+const MIGRATION_RETRY_APPROVAL_EVIDENCE = {
+  MigrationRetryGateStatus: ['APPROVED_PENDING_EXECUTION'],
+  MigrationRetryApprovalId: ['FSK-MIGRATION-20260824-161030-JST'],
+  MigrationRetryApprovedAtJst: ['2026-08-24 16:10:30 JST'],
+  MigrationRetryExpiresAtJst: ['2026-08-24 18:55:30 JST'],
+  MigrationRetryMonthlyCeilingJpy: ['5000'],
+  MigrationRetryExcludedStagesAndData: [
+    'real SQLite/users/bcrypt/uploads / Full backend / Hosting',
+  ],
+  MigrationRetrySourceCommit: [
+    '39e6ebae97d17ff803c4d6f3406328ddcb8594ac',
+  ],
+  MigrationRetrySourceTag: ['fsk-staging-data-api-migration-v2'],
+  MigrationRetryDeployedFoundation: [
+    'dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1',
+  ],
+  MigrationRetryTaskId: ['migration-20260824-v2'],
+  MigrationRetryOperationToken: ['eed3cfbc-bacd-4827-be79-f8828ba5226e'],
+  MigrationRetryOperationDeadlineEpoch: [
+    '1787562630 / 2026-08-24 18:10:30 JST',
+  ],
+  MigrationRetryCleanupDeadlineEpoch: [
+    '1787565330 / 2026-08-24 18:55:30 JST',
+  ],
+  'MigrationRetryTemporaryPublicCidr/Az': [
+    '10.42.4.0/24 / ap-northeast-1a',
+  ],
+  MigrationRetryApplicationRouteTableIds: [
+    'rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49',
+  ],
+  MigrationRetryCostOwner: ['reiken'],
+  MigrationRetryCleanupOwner: ['reiken'],
+} as const;
+
 const preBindingApprovalEvidence = (
   document: string,
 ): Record<string, string[]> =>
@@ -529,7 +563,7 @@ describe('staging deployment documentation contracts', () => {
     );
     expect(stages).toEqual([
       ['Foundation', 'Auth + Storage + VPC + Aurora/Data API', 'FSK-FOUNDATION-20260823-221547-JST'],
-      ['Migration', 'CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG', 'FSK-MIGRATION-20260824-145858-JST'],
+      ['Migration', 'CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG', 'FSK-MIGRATION-20260824-161030-JST'],
       ['Full backend', 'HTTP API + Kitchen/Admin/Export Functions', 'PENDING_USER_APPROVAL'],
       ['Hosting', 'Vue/PWA', 'PENDING_USER_APPROVAL'],
       ['Budget/alarms', 'Budget、费用异常检测、指标和告警', 'PENDING_USER_APPROVAL'],
@@ -567,6 +601,31 @@ describe('staging deployment documentation contracts', () => {
     expect(documentFieldValues(MIGRATION_RUNBOOK, 'NextApproval')).toEqual([
       'NEW_MIGRATION_OPERATION_REQUIRED',
     ]);
+  });
+
+  it('binds the reviewed Migration retry to a new immutable source and operation tuple', () => {
+    for (const document of [COST_APPROVAL, MIGRATION_RUNBOOK]) {
+      expect(
+        Object.fromEntries(
+          Object.keys(MIGRATION_RETRY_APPROVAL_EVIDENCE).map((field) => [
+            field,
+            documentFieldValues(document, field),
+          ]),
+        ),
+      ).toEqual(MIGRATION_RETRY_APPROVAL_EVIDENCE);
+    }
+
+    expect(
+      documentFieldValues(COST_APPROVAL, 'MigrationRetryUserApprovalStatement'),
+    ).toEqual([
+      '批准复审 705c6d7；通过后发布新的 immutable migration source，生成全新的 operation token 与截止时间，再执行一次合成 DDL/verify 和完整清理；不导入真实数据，也不启动 Full backend 或 Hosting。',
+    ]);
+    expect(
+      documentFieldValues(COST_APPROVAL, 'MigrationRetryApprovalMessageOrTaskId'),
+    ).toEqual(['Current Codex task user message: 批准']);
+    expect(
+      documentFieldValues(COST_APPROVAL, 'MigrationRetryMonthlyCeilingJpy'),
+    ).toEqual(['5000']);
   });
 
   it('binds the deployed Foundation to the exact App, source, stacks, and cost controls', () => {

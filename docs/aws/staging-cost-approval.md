@@ -90,7 +90,7 @@
 
 权威部署来自 target-account CloudShell 的 detached approved commit。首次 Amplify bootstrap job 的 commit 只显示 `HEAD`，因此在发布 Hosting 前已取消；随后关闭 Auto build，并用 `ampx pipeline-deploy` 完成 Foundation reconciliation。两个 CloudFormation 栈均为 `CREATE_COMPLETE`。
 
-只读运行态验收确认：Data API 和 deletion protection 开启；Writer 为私有、加密的 `db.serverless`，无 RDS Proxy；VPC 没有 NAT、IGW、默认公网路由或公网子网，只有一个 S3 Gateway Endpoint，数据库安全组无入站规则。CloudWatch `ServerlessDatabaseCapacity` 在 `05:47 UTC` 为 `0.0`，RDS 事件在 `05:46:48 UTC` 记录 Writer 成功暂停。Migration 第一次连接因缺少 Amazon RDS CA 信任而在 TLS 握手阶段失败；Data API 只读复查确认 `schema_migrations` 不存在，临时持续计费资源已归零，三个 Standard SSM 参数保留失败证据。新的 Migration approval 前不得重试。
+只读运行态验收确认：Data API 和 deletion protection 开启；Writer 为私有、加密的 `db.serverless`，无 RDS Proxy；VPC 没有 NAT、IGW、默认公网路由或公网子网，只有一个 S3 Gateway Endpoint，数据库安全组无入站规则。CloudWatch `ServerlessDatabaseCapacity` 在 `05:47 UTC` 为 `0.0`，RDS 事件在 `05:46:48 UTC` 记录 Writer 成功暂停。Migration 第一次连接因缺少 Amazon RDS CA 信任而在 TLS 握手阶段失败；Data API 只读复查确认 `schema_migrations` 不存在，临时持续计费资源已归零，三个 Standard SSM 参数保留失败证据。该次批准已经消费；下方独立 retry 批准只授权新的 operation tuple。
 
 Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 天生命周期；Cognito 只允许管理员创建用户、禁止 guest，只有 `ADMIN`/`KITCHEN` 两组且未 seed 用户。主栈只有两个 Amplify Branch Linker 平台 Functions，没有业务 Function、HTTP API 或 Hosting 发布。Migration worker 只在进程内读取 Secret 并构造连接串；证据没有打印或记录 Secret 值、连接串、用户名、密码、真实用户或账务 payload。
 
@@ -101,13 +101,13 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 | 写入阶段 | 资源范围 | ApprovalId |
 | --- | --- | --- |
 | Foundation | Auth + Storage + VPC + Aurora/Data API | `FSK-FOUNDATION-20260823-221547-JST` |
-| Migration | CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG | `FSK-MIGRATION-20260824-145858-JST` |
+| Migration | CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG | `FSK-MIGRATION-20260824-161030-JST` |
 | Full backend | HTTP API + Kitchen/Admin/Export Functions | `PENDING_USER_APPROVAL` |
 | Hosting | Vue/PWA | `PENDING_USER_APPROVAL` |
 | Budget/alarms | Budget、费用异常检测、指标和告警 | `PENDING_USER_APPROVAL` |
 | Destroy | App/branch/stacks/保留资源/远程 ref 的逐项销毁 | `PENDING_USER_APPROVAL` |
 
-## Migration 批准证据
+## 首次 Migration 批准与失败证据
 
 | 字段 | 值 |
 | --- | --- |
@@ -129,6 +129,34 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 | MigrationCleanupOwner | `reiken` |
 
 本次批准不改变 `MonthlyCeilingJpy=5000`，也不授权真实数据、Full backend 或 Hosting。任何 tuple、CIDR/AZ、两个应用路由表、截止时间或 owner 不一致时立即停止；临时资源必须在 cleanup deadline 前清理并取得稳定零残留证据。
+
+## Migration retry 批准证据
+
+| 字段 | 值 |
+| --- | --- |
+| MigrationRetryGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationRetryUserApprovalStatement | `批准复审 705c6d7；通过后发布新的 immutable migration source，生成全新的 operation token 与截止时间，再执行一次合成 DDL/verify 和完整清理；不导入真实数据，也不启动 Full backend 或 Hosting。` |
+| MigrationRetryApprovalMessageOrTaskId | `Current Codex task user message: 批准` |
+| MigrationRetryApprovalId | `FSK-MIGRATION-20260824-161030-JST` |
+| MigrationRetryApprovedAtJst | `2026-08-24 16:10:30 JST` |
+| MigrationRetryExpiresAtJst | `2026-08-24 18:55:30 JST` |
+| MigrationRetryMonthlyCeilingJpy | `5000` |
+| MigrationRetryExcludedStagesAndData | `real SQLite/users/bcrypt/uploads / Full backend / Hosting` |
+| MigrationRetrySourceCommit | `39e6ebae97d17ff803c4d6f3406328ddcb8594ac` |
+| MigrationRetrySourceTag | `fsk-staging-data-api-migration-v2` |
+| MigrationRetryDeployedFoundation | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1` |
+| MigrationRetryTaskId | `migration-20260824-v2` |
+| MigrationRetryOperationToken | `eed3cfbc-bacd-4827-be79-f8828ba5226e` |
+| MigrationRetryOperationDeadlineEpoch | `1787562630 / 2026-08-24 18:10:30 JST` |
+| MigrationRetryCleanupDeadlineEpoch | `1787565330 / 2026-08-24 18:55:30 JST` |
+| MigrationRetryTemporaryPublicCidr/Az | `10.42.4.0/24 / ap-northeast-1a` |
+| MigrationRetryApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
+| MigrationRetryCostOwner | `reiken` |
+| MigrationRetryCleanupOwner | `reiken` |
+| MigrationRetrySourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
+| MigrationRetryPreflight | `account 444083008754 / ap-northeast-1 / fsk-staging AutoBuild=false / Foundation CREATE_COMPLETE / Aurora available private rds-ca-rsa2048-g1 / application default routes=0 / database ingress=0 / prior paid temporary resources=0 / prior SSM failure evidence=3` |
+
+本次 retry 只授权将已复审的 migration source 以新 immutable tag 发布，并在同一 Foundation 上执行一次合成 DDL apply、第二次 no-op、schema verify 和完整 cleanup。不得移动旧 Foundation tag，不得部署或更新 Foundation，不得导入真实数据，也不得启动 Full backend、Hosting、Budget/alarms 或销毁阶段。
 
 ## 固定批准边界
 

@@ -2,7 +2,7 @@
 
 ## 0. 边界与责任
 
-本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。当前 `GateStatus=MIGRATION_FAILED_CLEANUP_BLOCKED`；第 7 节记录的批准已消费且不得复用，新的 immutable source、operation tuple 和独立批准完成前只能做只读诊断。
+本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。首次 operation 在 TLS 阶段失败且批准已消费；当前 `MigrationRetryGateStatus=APPROVED_PENDING_EXECUTION`，只能使用下方新 immutable source 与 operation tuple。
 
 允许的临时拓扑只有：普通 CloudShell control session、VPC CloudShell worker session、带完整 ownership tuple 的单个运维 SG/数据库 ingress、IGW、public subnet/route table、EIP、NAT，以及两个 application route table 上的临时默认路由。长期状态仍是无 NAT、无 Interface Endpoint、无 `5432` ingress。
 
@@ -13,6 +13,30 @@
 - 三个临时 SSM `String` parameters 只传 operation state/status、持久化 cleanup failure latch 和非敏感资源 ID。worker 只能在临时 NAT 就绪后访问它们。它们不是长期 endpoint 的替代品，最终必须删除。
 
 Migration ApprovalId 必须分别给出：account `444083008754`、region `ap-northeast-1`、已部署 Foundation commit/tag、独立且不可变的 migration source commit/tag、TaskId、UUIDv4 OperationToken、operation deadline、稍晚的 cleanup deadline、临时 public CIDR/AZ、两个 application route table IDs、CostOwner 和 CleanupOwner。OperationToken 是非秘密所有权证据，不是授权凭据。
+
+| 字段 | 值 |
+| --- | --- |
+| MigrationRetryGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationRetryApprovalId | `FSK-MIGRATION-20260824-161030-JST` |
+| MigrationRetryApprovedAtJst | `2026-08-24 16:10:30 JST` |
+| MigrationRetryExpiresAtJst | `2026-08-24 18:55:30 JST` |
+| MigrationRetryMonthlyCeilingJpy | `5000` |
+| MigrationRetryExcludedStagesAndData | `real SQLite/users/bcrypt/uploads / Full backend / Hosting` |
+| MigrationRetrySourceCommit | `39e6ebae97d17ff803c4d6f3406328ddcb8594ac` |
+| MigrationRetrySourceTag | `fsk-staging-data-api-migration-v2` |
+| MigrationRetryDeployedFoundation | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1` |
+| MigrationRetryTaskId | `migration-20260824-v2` |
+| MigrationRetryOperationToken | `eed3cfbc-bacd-4827-be79-f8828ba5226e` |
+| MigrationRetryOperationDeadlineEpoch | `1787562630 / 2026-08-24 18:10:30 JST` |
+| MigrationRetryCleanupDeadlineEpoch | `1787565330 / 2026-08-24 18:55:30 JST` |
+| MigrationRetryTemporaryPublicCidr/Az | `10.42.4.0/24 / ap-northeast-1a` |
+| MigrationRetryApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
+| MigrationRetryCostOwner | `reiken` |
+| MigrationRetryCleanupOwner | `reiken` |
+| MigrationRetrySourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
+| MigrationRetryPreflight | `account 444083008754 / ap-northeast-1 / fsk-staging AutoBuild=false / Foundation CREATE_COMPLETE / Aurora available private rds-ca-rsa2048-g1 / application default routes=0 / database ingress=0 / prior paid temporary resources=0 / prior SSM failure evidence=3` |
+
+control 与 worker 的环境变量必须逐字匹配此表；任一字段漂移立即停止。旧 `fsk-staging-data-api-foundation-v1` 只保留为已部署 Foundation 证据，不得移动。
 
 ## 1. 远程源码和初始残留门
 
@@ -1387,4 +1411,4 @@ fsk_control_run_migration() {
 | CostOwner | `reiken` |
 | CleanupOwner | `reiken` |
 
-本次一次性批准已消费且 migration 失败，不能复用 operation token。失败 worker、默认路由和全部持续计费临时资源已删除；三个 Standard SSM 参数只保留非敏感失败终态 `FAILED:WORKER_EXIT_1`、`cleanupFailed=true`、`CLEANUP_BLOCKED:EXIT_1`。新的 immutable commit/tag、operation token、初始残留复验和独立 Migration 批准完成前，不得重跑 migration，也不得开始 Full backend。
+首次一次性批准已消费且 migration 失败，不能复用 operation token。失败 worker、默认路由和全部持续计费临时资源已删除；三个 Standard SSM 参数只保留非敏感失败终态 `FAILED:WORKER_EXIT_1`、`cleanupFailed=true`、`CLEANUP_BLOCKED:EXIT_1`。新的 retry approval 已在本手册开头绑定；只有其 source、tuple、初始残留复验全部一致时才可重跑，且仍不得开始 Full backend 或 Hosting。
