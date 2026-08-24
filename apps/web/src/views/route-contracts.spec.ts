@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   kitchenHomePath,
   kitchenReportMode,
-} from './wm/DailyFormView.vue';
+} from './kitchen/KitchenReportView.vue';
 import {
   ownerDailyPath,
   ownerReportMode,

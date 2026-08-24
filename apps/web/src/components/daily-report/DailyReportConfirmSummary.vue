@@ -2,6 +2,7 @@
 import DailyReportSection from './DailyReportSection.vue';
 
 const props = defineProps<{
+  variant?: 'admin' | 'kitchen';
   preview: {
     imosSalesYen: number;
     totalSalesYen: number;
@@ -36,7 +37,13 @@ function yen(n: number): string {
     <header class="intro">
       <p class="eyebrow">提出前の確認</p>
       <h2 class="title">入力内容の確認</h2>
-      <p class="lede">問題なければ下部の「提出する」で確定してください。</p>
+      <p class="lede">
+        {{
+          props.variant === 'kitchen'
+            ? '入力内容を確認してください。提出後の修正は老板へ依頼してください。'
+            : '問題なければ下部の「提出する」で確定してください。'
+        }}
+      </p>
     </header>
 
     <DailyReportSection v-if="showWebmasterRow" title="提出元">

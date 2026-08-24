@@ -36,4 +36,13 @@ describe('useDailyReportFormState staff meals', () => {
     expect(state.form.staffMealCashYen).toBe(0);
     expect(state.form.staffMealAlipayYen).toBe(0);
   });
+
+  it('clears a stale responsible person when a kitchen route resets without a default', () => {
+    const state = useDailyReportFormState();
+    state.form.responsiblePersonId = 'removed-person';
+
+    state.reset();
+
+    expect(state.form.responsiblePersonId).toBe('');
+  });
 });

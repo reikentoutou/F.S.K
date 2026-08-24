@@ -14,6 +14,9 @@ function form(overrides: Partial<ValidationForm> = {}): ValidationForm {
     responsiblePersonId: 'person-1',
     startStr: '09:00',
     endStr: '18:00',
+    previousImosBalanceYen: 10_000,
+    currentImosBalanceYen: 20_000,
+    newageYen: 8_000,
     cashInDrawerYen: 20_000,
     expenseYen: 0,
     expenseReason: '',
@@ -53,5 +56,25 @@ describe('daily report staff meal validation', () => {
         form: form({ staffMealAlipayYen: 2_000_000_001 }),
       }),
     ).toBe('网管餐費は0〜2,000,000,000円の整数で入力してください');
+  });
+
+  it.each([
+    'previousImosBalanceYen',
+    'currentImosBalanceYen',
+    'newageYen',
+    'cashInDrawerYen',
+    'expenseYen',
+  ] as const)('enforces the shared yen maximum for %s', (field) => {
+    const invalid = form({
+      [field]: MAX_DAILY_REPORT_AMOUNT_YEN + 1,
+      expenseReason: '消耗品',
+    });
+
+    expect(validateDailyReportGoToConfirm({ form: invalid })).toBe(
+      '金額は0〜2,000,000,000円の整数で入力してください',
+    );
+    expect(validateDailyReportSubmit({ form: invalid })).toBe(
+      '金額は0〜2,000,000,000円の整数で入力してください',
+    );
   });
 });

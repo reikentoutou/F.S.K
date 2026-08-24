@@ -21,13 +21,13 @@ export function createAppRouter(history: RouterHistory) {
       {
         path: '/kitchen',
         name: 'kitchen-home',
-        component: () => import('@/views/wm/WmHomeView.vue'),
+        component: () => import('@/views/kitchen/KitchenHomeView.vue'),
         meta: { role: 'KITCHEN' },
       },
       {
         path: '/kitchen/report/:date/:shiftId',
         name: 'kitchen-report',
-        component: () => import('@/views/wm/DailyFormView.vue'),
+        component: () => import('@/views/kitchen/KitchenReportView.vue'),
         meta: { role: 'KITCHEN' },
       },
       {
