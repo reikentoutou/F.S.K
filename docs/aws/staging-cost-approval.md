@@ -169,6 +169,35 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 
 本次 retry 已消费：immutable source 通过 CAS 发布，但 worker launcher 被误写入 detached checkout，clean-worktree guard 在 `pnpm install`、Secret 读取、数据库 URL 构造和 migration 之前安全停止。control 清理初期因 CloudShell ENI 尚占用临时 SG 记录 sticky failure latch，worker environment 删除并传播后所有计费资源和临时访问均归零；三个 Standard SSM 参数保留非敏感失败证据。不得复用该 token，也不得启动 Full backend、Hosting、Budget/alarms 或销毁阶段。
 
+## 第三次 Migration 批准证据
+
+| 字段 | 值 |
+| --- | --- |
+| MigrationThirdGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationThirdUserApprovalStatement | `那你执行` |
+| MigrationThirdApprovalMessageOrTaskId | `Current Codex task user message: 那你执行` |
+| MigrationThirdApprovedScope | `review/publish immutable v3 source; synthetic migration apply/no-op/verify; complete cleanup` |
+| MigrationThirdApprovalId | `FSK-MIGRATION-20260824-164444-JST` |
+| MigrationThirdApprovedAtJst | `2026-08-24 16:44:44 JST` |
+| MigrationThirdExpiresAtJst | `2026-08-24 19:44:44 JST` |
+| MigrationThirdMonthlyCeilingJpy | `5000` |
+| MigrationThirdExcludedStagesAndData | `real SQLite/users/bcrypt/uploads / Full backend / Hosting` |
+| MigrationThirdSourceCommit | `0ecdf20fdcf35d9e27901629eaa7392d22ed64bc` |
+| MigrationThirdSourceTag | `fsk-staging-data-api-migration-v3` |
+| MigrationThirdDeployedFoundation | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1` |
+| MigrationThirdTaskId | `migration-20260824-v3` |
+| MigrationThirdOperationToken | `18de3631-f7d7-4a57-b631-82cc81eae261` |
+| MigrationThirdOperationDeadlineEpoch | `1787564684 / 2026-08-24 18:44:44 JST` |
+| MigrationThirdCleanupDeadlineEpoch | `1787568284 / 2026-08-24 19:44:44 JST` |
+| MigrationThirdTemporaryPublicCidr/Az | `10.42.4.0/24 / ap-northeast-1a` |
+| MigrationThirdApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
+| MigrationThirdCostOwner | `reiken` |
+| MigrationThirdCleanupOwner | `reiken` |
+| MigrationThirdSourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
+| MigrationThirdPreflight | `local check:all PASS / ENI wait regression PASS / remote v3 tag absent / remote staging still v2 source` |
+
+用户的“那你执行”承接紧邻的第三次执行方案：复审并发布新的 immutable source，使用新 tuple 执行一次合成 apply/no-op/verify 和完整清理。月治理上限仍为 `5000`；真实数据、Full backend、Hosting、Budget/alarms 和 Destroy 均不在范围内。
+
 ## 固定批准边界
 
 - account `444083008754`、region `ap-northeast-1`、独立 `fsk-staging` App 和 `staging` branch；Auto build 默认关闭。

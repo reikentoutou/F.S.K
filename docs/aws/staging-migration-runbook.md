@@ -49,6 +49,35 @@ Migration ApprovalId 必须分别给出：account `444083008754`、region `ap-no
 
 control 与 worker 的环境变量必须逐字匹配此表；任一字段漂移立即停止。旧 `fsk-staging-data-api-foundation-v1` 只保留为已部署 Foundation 证据，不得移动。
 
+### 第三次 Migration 批准
+
+| 字段 | 值 |
+| --- | --- |
+| MigrationThirdGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationThirdUserApprovalStatement | `那你执行` |
+| MigrationThirdApprovalMessageOrTaskId | `Current Codex task user message: 那你执行` |
+| MigrationThirdApprovedScope | `review/publish immutable v3 source; synthetic migration apply/no-op/verify; complete cleanup` |
+| MigrationThirdApprovalId | `FSK-MIGRATION-20260824-164444-JST` |
+| MigrationThirdApprovedAtJst | `2026-08-24 16:44:44 JST` |
+| MigrationThirdExpiresAtJst | `2026-08-24 19:44:44 JST` |
+| MigrationThirdMonthlyCeilingJpy | `5000` |
+| MigrationThirdExcludedStagesAndData | `real SQLite/users/bcrypt/uploads / Full backend / Hosting` |
+| MigrationThirdSourceCommit | `0ecdf20fdcf35d9e27901629eaa7392d22ed64bc` |
+| MigrationThirdSourceTag | `fsk-staging-data-api-migration-v3` |
+| MigrationThirdDeployedFoundation | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1` |
+| MigrationThirdTaskId | `migration-20260824-v3` |
+| MigrationThirdOperationToken | `18de3631-f7d7-4a57-b631-82cc81eae261` |
+| MigrationThirdOperationDeadlineEpoch | `1787564684 / 2026-08-24 18:44:44 JST` |
+| MigrationThirdCleanupDeadlineEpoch | `1787568284 / 2026-08-24 19:44:44 JST` |
+| MigrationThirdTemporaryPublicCidr/Az | `10.42.4.0/24 / ap-northeast-1a` |
+| MigrationThirdApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
+| MigrationThirdCostOwner | `reiken` |
+| MigrationThirdCleanupOwner | `reiken` |
+| MigrationThirdSourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
+| MigrationThirdPreflight | `local check:all PASS / ENI wait regression PASS / remote v3 tag absent / remote staging still v2 source` |
+
+本次批准承接紧邻的执行说明：只发布已复审的 ENI-safe source，生成新的 operation 并执行合成 migration apply、第二次 no-op、schema verify 和完整 cleanup。worker launcher/log 必须在 checkout 外；worker environment 删除后，control 必须等关联 ENI 为零才删除临时 SG。不得导入真实数据，不得启动 Full backend、Hosting、Budget/alarms 或 Destroy。
+
 ## 1. 远程源码和初始残留门
 
 control 和 worker 都只接受独立的 immutable migration source tag、remote `staging` 和批准的 migration source commit 三者精确相等。clone/fetch 后使用 detached HEAD；origin URL 不得含 credentials，工作树必须 clean。已部署 Foundation 的 commit/tag 只用于核对现有 stack，不可作为 migration source 的隐式默认值；在 Amplify Auto build 关闭的前提下更新 migration source tag/`staging` 只发布源码，不触发 Foundation 重新部署。

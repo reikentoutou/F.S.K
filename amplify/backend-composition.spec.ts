@@ -209,6 +209,40 @@ const MIGRATION_RETRY_EXECUTION_EVIDENCE = {
   MigrationRetryNextApproval: ['NEW_MIGRATION_OPERATION_REQUIRED'],
 } as const;
 
+const MIGRATION_THIRD_APPROVAL_EVIDENCE = {
+  MigrationThirdGateStatus: ['APPROVED_PENDING_EXECUTION'],
+  MigrationThirdApprovalId: ['FSK-MIGRATION-20260824-164444-JST'],
+  MigrationThirdApprovedAtJst: ['2026-08-24 16:44:44 JST'],
+  MigrationThirdExpiresAtJst: ['2026-08-24 19:44:44 JST'],
+  MigrationThirdMonthlyCeilingJpy: ['5000'],
+  MigrationThirdExcludedStagesAndData: [
+    'real SQLite/users/bcrypt/uploads / Full backend / Hosting',
+  ],
+  MigrationThirdSourceCommit: [
+    '0ecdf20fdcf35d9e27901629eaa7392d22ed64bc',
+  ],
+  MigrationThirdSourceTag: ['fsk-staging-data-api-migration-v3'],
+  MigrationThirdDeployedFoundation: [
+    'dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1',
+  ],
+  MigrationThirdTaskId: ['migration-20260824-v3'],
+  MigrationThirdOperationToken: ['18de3631-f7d7-4a57-b631-82cc81eae261'],
+  MigrationThirdOperationDeadlineEpoch: [
+    '1787564684 / 2026-08-24 18:44:44 JST',
+  ],
+  MigrationThirdCleanupDeadlineEpoch: [
+    '1787568284 / 2026-08-24 19:44:44 JST',
+  ],
+  'MigrationThirdTemporaryPublicCidr/Az': [
+    '10.42.4.0/24 / ap-northeast-1a',
+  ],
+  MigrationThirdApplicationRouteTableIds: [
+    'rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49',
+  ],
+  MigrationThirdCostOwner: ['reiken'],
+  MigrationThirdCleanupOwner: ['reiken'],
+} as const;
+
 const preBindingApprovalEvidence = (
   document: string,
 ): Record<string, string[]> =>
@@ -657,6 +691,31 @@ describe('staging deployment documentation contracts', () => {
         ),
       ).toEqual(MIGRATION_RETRY_EXECUTION_EVIDENCE);
     }
+  });
+
+  it('binds the approved third Migration attempt to the reviewed ENI-safe source and a fresh tuple', () => {
+    for (const document of [COST_APPROVAL, MIGRATION_RUNBOOK]) {
+      expect(
+        Object.fromEntries(
+          Object.keys(MIGRATION_THIRD_APPROVAL_EVIDENCE).map((field) => [
+            field,
+            documentFieldValues(document, field),
+          ]),
+        ),
+      ).toEqual(MIGRATION_THIRD_APPROVAL_EVIDENCE);
+    }
+
+    expect(
+      documentFieldValues(COST_APPROVAL, 'MigrationThirdUserApprovalStatement'),
+    ).toEqual(['那你执行']);
+    expect(
+      documentFieldValues(COST_APPROVAL, 'MigrationThirdApprovalMessageOrTaskId'),
+    ).toEqual(['Current Codex task user message: 那你执行']);
+    expect(
+      documentFieldValues(COST_APPROVAL, 'MigrationThirdApprovedScope'),
+    ).toEqual([
+      'review/publish immutable v3 source; synthetic migration apply/no-op/verify; complete cleanup',
+    ]);
   });
 
   it('binds the deployed Foundation to the exact App, source, stacks, and cost controls', () => {
