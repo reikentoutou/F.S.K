@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -74,14 +74,18 @@ async function productionFiles(directory: string): Promise<string[]> {
   for (const entry of entries) {
     if (
       [
+        '.agents',
         '.amplify',
         '.git',
         '.superpowers',
+        '.worktrees',
         'coverage',
         'dist',
         'docs',
         'fixtures',
+        'graphify-out',
         'node_modules',
+        'skills',
         'test',
         'tests',
       ].includes(entry.name)
@@ -95,6 +99,7 @@ async function productionFiles(directory: string): Promise<string[]> {
       continue;
     }
 
+    if (['amplify_outputs.json', 'skills-lock.json'].includes(entry.name)) continue;
     if (/\.(spec|test)\.[cm]?[jt]sx?$/.test(entry.name)) continue;
     if (/\.(?:[cm]?[jt]sx?|css|html|json|vue|ya?ml)$/.test(entry.name)) {
       files.push(path);
@@ -279,6 +284,48 @@ describe('Home Screen Web App shell', () => {
       ]),
     );
     await expectNoProhibitedPwaBehavior(files);
+  });
+
+  it('ignores local/generated repository trees but still rejects the same behavior in production files', async () => {
+    const fixtureRoot = await mkdtemp(join(tmpdir(), 'fsk-pwa-repository-'));
+    generatedDirectories.push(fixtureRoot);
+    const ignoredDirectories = [
+      '.agents',
+      '.amplify',
+      '.git',
+      '.superpowers',
+      '.worktrees',
+      'coverage',
+      'dist',
+      'docs',
+      'fixtures',
+      'graphify-out',
+      'node_modules',
+      'skills',
+      'test',
+      'tests',
+    ];
+    const forbiddenSource = 'navigator.serviceWorker.register("/sw.js");';
+
+    await Promise.all(
+      ignoredDirectories.map(async (directory) => {
+        const ignoredRoot = join(fixtureRoot, directory);
+        await mkdir(ignoredRoot, { recursive: true });
+        await writeFile(join(ignoredRoot, 'forbidden.ts'), forbiddenSource);
+      }),
+    );
+    await writeFile(join(fixtureRoot, 'skills-lock.json'), forbiddenSource);
+    await writeFile(join(fixtureRoot, 'amplify_outputs.json'), forbiddenSource);
+    await mkdir(join(fixtureRoot, 'src'), { recursive: true });
+    const productionPath = join(fixtureRoot, 'src/runtime.ts');
+    await writeFile(productionPath, 'export const runtime = "online";');
+
+    const safeFiles = await productionFiles(fixtureRoot);
+    expect(safeFiles.map((path) => path.slice(fixtureRoot.length + 1))).toEqual(['src/runtime.ts']);
+    await expectNoProhibitedPwaBehavior(safeFiles);
+
+    await writeFile(productionPath, forbiddenSource);
+    await expect(expectNoProhibitedPwaBehavior(await productionFiles(fixtureRoot))).rejects.toThrow();
   });
 
   it(
