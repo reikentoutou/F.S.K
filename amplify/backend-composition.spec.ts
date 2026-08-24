@@ -824,8 +824,8 @@ describe('active DynamoDB backend composition', () => {
         isolatedOutdirExistsAfterCleanup: false,
         stackArtifactIds: ['amplify-testappid-production-branch-bd754b1915'],
         stackNames: ['amplify-testappid-production-branch-bd754b1915'],
-        templateCount: 11,
-        nestedStackCount: 10,
+        templateCount: 10,
+        nestedStackCount: 9,
         appSyncCount: 1,
         tableCount: 4,
         dynamoTableTypes: [
@@ -1037,13 +1037,13 @@ describe('active DynamoDB backend composition', () => {
         updateReplacePolicy: 'Retain',
         versioningConfiguration: { Status: 'Enabled' },
       });
-      expect(
-        evidence.activeNestedStacks.map(
-          ({ logicalId }: { logicalId: string }) => logicalId,
-        ),
-      ).toEqual(
-        expect.arrayContaining(['auth', 'data', 'storage', 'function']),
+      const activeNestedStackNames = evidence.activeNestedStacks.map(
+        ({ logicalId }: { logicalId: string }) => logicalId,
       );
+      expect(activeNestedStackNames).toEqual(
+        expect.arrayContaining(['auth', 'data', 'storage']),
+      );
+      expect(activeNestedStackNames).not.toContain('function');
       for (const stack of evidence.activeNestedStacks) {
         expect(stack.tags).toEqual(
           expect.arrayContaining([
