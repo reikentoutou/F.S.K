@@ -173,7 +173,7 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 
 | 字段 | 值 |
 | --- | --- |
-| MigrationThirdGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationThirdGateStatus | `MIGRATION_FAILED_CLEANUP_PASS` |
 | MigrationThirdUserApprovalStatement | `那你执行` |
 | MigrationThirdApprovalMessageOrTaskId | `Current Codex task user message: 那你执行` |
 | MigrationThirdApprovedScope | `review/publish immutable v3 source; synthetic migration apply/no-op/verify; complete cleanup` |
@@ -193,8 +193,16 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 | MigrationThirdApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
 | MigrationThirdCostOwner | `reiken` |
 | MigrationThirdCleanupOwner | `reiken` |
-| MigrationThirdSourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
-| MigrationThirdPreflight | `local check:all PASS / ENI wait regression PASS / remote v3 tag absent / remote staging still v2 source` |
+| MigrationThirdSourcePublication | `REMOTE_CAS_PASS / staging + fsk-staging-data-api-migration-v3 = 0ecdf20fdcf35d9e27901629eaa7392d22ed64bc` |
+| MigrationThirdPreflight | `account/region PASS / AutoBuild=false / initial cost resources, routes, DB ingress and v3 SSM path all 0 / schema_migrations ABSENT` |
+| MigrationThirdExecutionResult | `NOT_RUN / fresh VPC CloudShell stopped at pnpm install before Secret value read or database migration` |
+| MigrationThirdDatabaseDdlState | `Data API after cleanup: public.schema_migrations ABSENT` |
+| MigrationThirdWorkerEnvironment | `fsk-migrate-20260824-v3 / deleted` |
+| MigrationThirdStableZeroEvidence | `STABLE_ZERO_OBSERVATIONS=7 / FINAL_PARAMETER_PATH_RESIDUAL_COUNT=0` |
+| MigrationThirdFinalResidualCount | `SG=0 / SUBNET=0 / RTB=0 / IGW=0 / EIP=0 / NAT_ACTIVE=0 / DB_INGRESS=0 / APP_DEFAULT_ROUTES=0 / SSM=0` |
+| MigrationThirdFailureRootCause | `fresh VPC CloudShell did not provide pnpm; worker failed with exit 127 before dependency install and migration` |
+| MigrationThirdCleanupIntervention | `control was already in cleanup; operator TERM interrupted it, then exact-tuple CleanupOwner recovery completed stable zero` |
+| MigrationThirdNextApproval | `NEW_MIGRATION_OPERATION_REQUIRED` |
 
 用户的“那你执行”承接紧邻的第三次执行方案：复审并发布新的 immutable source，使用新 tuple 执行一次合成 apply/no-op/verify 和完整清理。月治理上限仍为 `5000`；真实数据、Full backend、Hosting、Budget/alarms 和 Destroy 均不在范围内。
 

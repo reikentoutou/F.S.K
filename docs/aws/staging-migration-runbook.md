@@ -53,7 +53,7 @@ control 与 worker 的环境变量必须逐字匹配此表；任一字段漂移�
 
 | 字段 | 值 |
 | --- | --- |
-| MigrationThirdGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationThirdGateStatus | `MIGRATION_FAILED_CLEANUP_PASS` |
 | MigrationThirdUserApprovalStatement | `那你执行` |
 | MigrationThirdApprovalMessageOrTaskId | `Current Codex task user message: 那你执行` |
 | MigrationThirdApprovedScope | `review/publish immutable v3 source; synthetic migration apply/no-op/verify; complete cleanup` |
@@ -73,8 +73,16 @@ control 与 worker 的环境变量必须逐字匹配此表；任一字段漂移�
 | MigrationThirdApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
 | MigrationThirdCostOwner | `reiken` |
 | MigrationThirdCleanupOwner | `reiken` |
-| MigrationThirdSourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
-| MigrationThirdPreflight | `local check:all PASS / ENI wait regression PASS / remote v3 tag absent / remote staging still v2 source` |
+| MigrationThirdSourcePublication | `REMOTE_CAS_PASS / staging + fsk-staging-data-api-migration-v3 = 0ecdf20fdcf35d9e27901629eaa7392d22ed64bc` |
+| MigrationThirdPreflight | `account/region PASS / AutoBuild=false / initial cost resources, routes, DB ingress and v3 SSM path all 0 / schema_migrations ABSENT` |
+| MigrationThirdExecutionResult | `NOT_RUN / fresh VPC CloudShell stopped at pnpm install before Secret value read or database migration` |
+| MigrationThirdDatabaseDdlState | `Data API after cleanup: public.schema_migrations ABSENT` |
+| MigrationThirdWorkerEnvironment | `fsk-migrate-20260824-v3 / deleted` |
+| MigrationThirdStableZeroEvidence | `STABLE_ZERO_OBSERVATIONS=7 / FINAL_PARAMETER_PATH_RESIDUAL_COUNT=0` |
+| MigrationThirdFinalResidualCount | `SG=0 / SUBNET=0 / RTB=0 / IGW=0 / EIP=0 / NAT_ACTIVE=0 / DB_INGRESS=0 / APP_DEFAULT_ROUTES=0 / SSM=0` |
+| MigrationThirdFailureRootCause | `fresh VPC CloudShell did not provide pnpm; worker failed with exit 127 before dependency install and migration` |
+| MigrationThirdCleanupIntervention | `control was already in cleanup; operator TERM interrupted it, then exact-tuple CleanupOwner recovery completed stable zero` |
+| MigrationThirdNextApproval | `NEW_MIGRATION_OPERATION_REQUIRED` |
 
 本次批准承接紧邻的执行说明：只发布已复审的 ENI-safe source，生成新的 operation 并执行合成 migration apply、第二次 no-op、schema verify 和完整 cleanup。worker launcher/log 必须在 checkout 外；worker environment 删除后，control 必须等关联 ENI 为零才删除临时 SG。不得导入真实数据，不得启动 Full backend、Hosting、Budget/alarms 或 Destroy。
 
@@ -805,6 +813,141 @@ fsk_worker_exit() {
   exit "$original_status"
 }
 
+fsk_load_foundation_database_context() {
+  local stack_name="${FSK_FOUNDATION_STACK_NAME:-FskStagingFoundation}"
+  local secret_arn cluster_arn database_name cluster_id cluster_json
+  local cluster_values endpoint port instance_id subnet_group_name
+  local instance_json subnet_group_json ca_identifier
+  secret_arn="$(
+    fsk_run_before_migration_deadline aws cloudformation describe-stacks \
+      --region ap-northeast-1 --stack-name "$stack_name" \
+      --query 'Stacks[0].Outputs[?OutputKey==`AuroraSecretArn`].OutputValue | [0]' \
+      --output text
+  )" || return $?
+  cluster_arn="$(
+    fsk_run_before_migration_deadline aws cloudformation describe-stacks \
+      --region ap-northeast-1 --stack-name "$stack_name" \
+      --query 'Stacks[0].Outputs[?OutputKey==`AuroraClusterArn`].OutputValue | [0]' \
+      --output text
+  )" || return $?
+  database_name="$(
+    fsk_run_before_migration_deadline aws cloudformation describe-stacks \
+      --region ap-northeast-1 --stack-name "$stack_name" \
+      --query 'Stacks[0].Outputs[?OutputKey==`DatabaseName`].OutputValue | [0]' \
+      --output text
+  )" || return $?
+  case "$secret_arn" in
+    "arn:aws:secretsmanager:ap-northeast-1:${FSK_AWS_ACCOUNT_ID}:secret:"*) ;;
+    *) echo 'FOUNDATION_SECRET_ARN_INVALID_STOP' >&2; return 1 ;;
+  esac
+  case "$cluster_arn" in
+    "arn:aws:rds:ap-northeast-1:${FSK_AWS_ACCOUNT_ID}:cluster:"*) ;;
+    *) echo 'FOUNDATION_CLUSTER_ARN_INVALID_STOP' >&2; return 1 ;;
+  esac
+  test "$database_name" = fsk_staging
+  cluster_id="${cluster_arn##*:cluster:}"
+  test -n "$cluster_id"
+  cluster_json="$(
+    fsk_run_before_migration_deadline aws rds describe-db-clusters \
+      --region ap-northeast-1 --db-cluster-identifier "$cluster_id" \
+      --output json
+  )" || return $?
+  cluster_values="$(
+    FSK_CLUSTER_JSON="$cluster_json" \
+    FSK_EXPECTED_CLUSTER_ARN="$cluster_arn" \
+    FSK_EXPECTED_DATABASE_NAME="$database_name" \
+    FSK_EXPECTED_DATABASE_SG_ID="$FSK_DB_SECURITY_GROUP_ID" \
+    node -e '
+      const input = JSON.parse(process.env.FSK_CLUSTER_JSON ?? "");
+      if (!Array.isArray(input.DBClusters) || input.DBClusters.length !== 1) process.exit(2);
+      const cluster = input.DBClusters[0];
+      const writers = (cluster.DBClusterMembers ?? []).filter(
+        (member) => member?.IsClusterWriter === true,
+      );
+      const securityGroups = (cluster.VpcSecurityGroups ?? []).map(
+        (entry) => entry?.VpcSecurityGroupId,
+      );
+      if (cluster.DBClusterArn !== process.env.FSK_EXPECTED_CLUSTER_ARN ||
+          cluster.DatabaseName !== process.env.FSK_EXPECTED_DATABASE_NAME ||
+          cluster.Status !== "available" || typeof cluster.Endpoint !== "string" ||
+          !cluster.Endpoint || cluster.Port !== 5432 || writers.length !== 1 ||
+          typeof writers[0].DBInstanceIdentifier !== "string" ||
+          typeof cluster.DBSubnetGroup !== "string" || !cluster.DBSubnetGroup ||
+          !securityGroups.includes(process.env.FSK_EXPECTED_DATABASE_SG_ID)) process.exit(2);
+      process.stdout.write([
+        cluster.Endpoint,
+        String(cluster.Port),
+        writers[0].DBInstanceIdentifier,
+        cluster.DBSubnetGroup,
+      ].join("\t"));
+    '
+  )" || return $?
+  IFS=$'\t' read -r endpoint port instance_id subnet_group_name <<< "$cluster_values"
+  test -n "$endpoint"
+  test "$port" = 5432
+  test -n "$instance_id"
+  test -n "$subnet_group_name"
+  instance_json="$(
+    fsk_run_before_migration_deadline aws rds describe-db-instances \
+      --region ap-northeast-1 --db-instance-identifier "$instance_id" \
+      --output json
+  )" || return $?
+  subnet_group_json="$(
+    fsk_run_before_migration_deadline aws rds describe-db-subnet-groups \
+      --region ap-northeast-1 --db-subnet-group-name "$subnet_group_name" \
+      --output json
+  )" || return $?
+  ca_identifier="$(
+    FSK_INSTANCE_JSON="$instance_json" \
+    FSK_SUBNET_GROUP_JSON="$subnet_group_json" \
+    FSK_EXPECTED_INSTANCE_ID="$instance_id" \
+    FSK_EXPECTED_SUBNET_GROUP_NAME="$subnet_group_name" \
+    FSK_EXPECTED_VPC_ID="$FSK_VPC_ID" \
+    node -e '
+      const instances = JSON.parse(process.env.FSK_INSTANCE_JSON ?? "").DBInstances;
+      const groups = JSON.parse(process.env.FSK_SUBNET_GROUP_JSON ?? "").DBSubnetGroups;
+      if (!Array.isArray(instances) || instances.length !== 1 ||
+          !Array.isArray(groups) || groups.length !== 1) process.exit(2);
+      const instance = instances[0];
+      const group = groups[0];
+      const ca = instance?.CertificateDetails?.CAIdentifier;
+      if (instance.DBInstanceIdentifier !== process.env.FSK_EXPECTED_INSTANCE_ID ||
+          instance.PubliclyAccessible !== false || typeof ca !== "string" || !ca ||
+          group.DBSubnetGroupName !== process.env.FSK_EXPECTED_SUBNET_GROUP_NAME ||
+          group.VpcId !== process.env.FSK_EXPECTED_VPC_ID) process.exit(2);
+      process.stdout.write(ca);
+    '
+  )" || return $?
+  FSK_AURORA_SECRET_ARN="$secret_arn"
+  FSK_DB_ENDPOINT="$endpoint"
+  FSK_DB_PORT="$port"
+  FSK_DATABASE_NAME="$database_name"
+  FSK_RDS_CA_IDENTIFIER="$ca_identifier"
+  export FSK_AURORA_SECRET_ARN FSK_DB_ENDPOINT FSK_DB_PORT
+  export FSK_DATABASE_NAME FSK_RDS_CA_IDENTIFIER
+}
+
+fsk_prepare_pnpm_runtime() {
+  local expected_version actual_version
+  expected_version="$(
+    node -e '
+      const value = require("./package.json").packageManager;
+      const match = /^pnpm@([0-9]+\.[0-9]+\.[0-9]+)(?:\+sha512\.[0-9a-f]+)?$/.exec(value ?? "");
+      if (!match) process.exit(2);
+      process.stdout.write(match[1]);
+    '
+  )" || return $?
+  test "$expected_version" = 9.15.0
+  : "${FSK_PNPM_BIN_DIR:=$HOME/.local/bin}"
+  case "$FSK_PNPM_BIN_DIR" in /*) ;; *) return 1 ;; esac
+  mkdir -p "$FSK_PNPM_BIN_DIR"
+  fsk_run_before_migration_deadline corepack enable \
+    --install-directory "$FSK_PNPM_BIN_DIR"
+  export PATH="$FSK_PNPM_BIN_DIR:$PATH"
+  actual_version="$(fsk_run_before_migration_deadline pnpm --version)" || return $?
+  test "$actual_version" = "$expected_version"
+}
+
 fsk_prepare_rds_ca_trust() {
   : "${FSK_RDS_CA_IDENTIFIER:?RDS CA identifier required}"
   : "${FSK_RDS_CA_BUNDLE_PATH:=$PWD/amplify/database/certificates/rds-ca-rsa2048-g1-ap-northeast-1.pem}"
@@ -895,7 +1038,9 @@ fsk_worker_run() {
   test "$FSK_MIGRATION_SHELL_ROLE" = worker
   test "$(git rev-parse HEAD)" = "$FSK_MIGRATION_SOURCE_COMMIT"
   test -z "$(git status --short)"
+  fsk_load_foundation_database_context
   fsk_prepare_rds_ca_trust
+  fsk_prepare_pnpm_runtime
   fsk_run_before_migration_deadline pnpm install --frozen-lockfile
   fsk_worker_run_database_migration
 }

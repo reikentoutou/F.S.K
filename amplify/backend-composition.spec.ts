@@ -210,7 +210,7 @@ const MIGRATION_RETRY_EXECUTION_EVIDENCE = {
 } as const;
 
 const MIGRATION_THIRD_APPROVAL_EVIDENCE = {
-  MigrationThirdGateStatus: ['APPROVED_PENDING_EXECUTION'],
+  MigrationThirdGateStatus: ['MIGRATION_FAILED_CLEANUP_PASS'],
   MigrationThirdApprovalId: ['FSK-MIGRATION-20260824-164444-JST'],
   MigrationThirdApprovedAtJst: ['2026-08-24 16:44:44 JST'],
   MigrationThirdExpiresAtJst: ['2026-08-24 19:44:44 JST'],
@@ -241,6 +241,32 @@ const MIGRATION_THIRD_APPROVAL_EVIDENCE = {
   ],
   MigrationThirdCostOwner: ['reiken'],
   MigrationThirdCleanupOwner: ['reiken'],
+  MigrationThirdSourcePublication: [
+    'REMOTE_CAS_PASS / staging + fsk-staging-data-api-migration-v3 = 0ecdf20fdcf35d9e27901629eaa7392d22ed64bc',
+  ],
+  MigrationThirdPreflight: [
+    'account/region PASS / AutoBuild=false / initial cost resources, routes, DB ingress and v3 SSM path all 0 / schema_migrations ABSENT',
+  ],
+  MigrationThirdExecutionResult: [
+    'NOT_RUN / fresh VPC CloudShell stopped at pnpm install before Secret value read or database migration',
+  ],
+  MigrationThirdDatabaseDdlState: [
+    'Data API after cleanup: public.schema_migrations ABSENT',
+  ],
+  MigrationThirdWorkerEnvironment: ['fsk-migrate-20260824-v3 / deleted'],
+  MigrationThirdStableZeroEvidence: [
+    'STABLE_ZERO_OBSERVATIONS=7 / FINAL_PARAMETER_PATH_RESIDUAL_COUNT=0',
+  ],
+  MigrationThirdFinalResidualCount: [
+    'SG=0 / SUBNET=0 / RTB=0 / IGW=0 / EIP=0 / NAT_ACTIVE=0 / DB_INGRESS=0 / APP_DEFAULT_ROUTES=0 / SSM=0',
+  ],
+  MigrationThirdFailureRootCause: [
+    'fresh VPC CloudShell did not provide pnpm; worker failed with exit 127 before dependency install and migration',
+  ],
+  MigrationThirdCleanupIntervention: [
+    'control was already in cleanup; operator TERM interrupted it, then exact-tuple CleanupOwner recovery completed stable zero',
+  ],
+  MigrationThirdNextApproval: ['NEW_MIGRATION_OPERATION_REQUIRED'],
 } as const;
 
 const preBindingApprovalEvidence = (
@@ -967,6 +993,8 @@ pnpm() {
   test "$NODE_EXTRA_CA_CERTS" = "$FSK_EXPECTED_CA_PATH"
 }
 fsk_run_before_migration_deadline() { "$@"; }
+fsk_load_foundation_database_context() { :; }
+fsk_prepare_pnpm_runtime() { :; }
 fsk_worker_run_database_migration() {
   test "$NODE_EXTRA_CA_CERTS" = "$FSK_EXPECTED_CA_PATH"
   node -e '
@@ -1005,6 +1033,119 @@ fsk_worker_run
       subject:
         'C=US\nO=Amazon Web Services\\, Inc.\nOU=Amazon RDS\nST=WA\nCN=Amazon RDS ap-northeast-1 Root CA RSA2048 G1\nL=Seattle',
     });
+  });
+
+  it('bootstraps the repository-pinned pnpm in a fresh CloudShell worker', () => {
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'fsk-pnpm-'));
+    let preparePnpm = '';
+    try {
+      preparePnpm = extractBashFunction(
+        MIGRATION_RUNBOOK,
+        'fsk_prepare_pnpm_runtime',
+      );
+    } catch {
+      // RED proves the fresh-worker pnpm bootstrap is not implemented yet.
+    }
+    const script = `set -euo pipefail
+corepack() {
+  test "$1" = enable
+  test "$2" = --install-directory
+  mkdir -p "$3"
+  cat > "$3/pnpm" <<'PNPM'
+#!/usr/bin/env bash
+printf '9.15.0\n'
+PNPM
+  chmod 700 "$3/pnpm"
+}
+fsk_run_before_migration_deadline() { "$@"; }
+${preparePnpm}
+FSK_PNPM_BIN_DIR="$FSK_TEST_PNPM_BIN_DIR"
+fsk_prepare_pnpm_runtime
+test "$(command -v pnpm)" = "$FSK_TEST_PNPM_BIN_DIR/pnpm"
+printf 'PNPM_VERSION=%s\n' "$(pnpm --version)"
+`;
+
+    try {
+      const result = spawnSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FSK_TEST_PNPM_BIN_DIR: join(temporaryDirectory, 'bin'),
+        },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe('PNPM_VERSION=9.15.0\n');
+    } finally {
+      rmSync(temporaryDirectory, { force: true, recursive: true });
+    }
+  });
+
+  it('fails closed when Foundation database context lookup fails', () => {
+    let loadContext = '';
+    try {
+      loadContext = extractBashFunction(
+        MIGRATION_RUNBOOK,
+        'fsk_load_foundation_database_context',
+      );
+    } catch {
+      // RED proves the worker still relies on an ad-hoc launcher lookup.
+    }
+    const script = `set -euo pipefail
+aws() { return 47; }
+fsk_run_before_migration_deadline() { "$@"; }
+${loadContext}
+FSK_VPC_ID=vpc-0123456789abcdef0
+FSK_DB_SECURITY_GROUP_ID=sg-0123456789abcdef0
+fsk_load_foundation_database_context
+`;
+    const result = spawnSync('bash', ['-c', script], {
+      encoding: 'utf8',
+      env: process.env,
+    });
+
+    expect(result.status).toBe(47);
+    expect(`${result.stdout}${result.stderr}`).not.toContain('secret');
+  });
+
+  it('loads and validates the private Foundation database context without printing the Secret ARN', () => {
+    const script = `set -euo pipefail
+aws() {
+  if [[ "$*" == *AuroraSecretArn* ]]; then
+    printf 'arn:aws:secretsmanager:ap-northeast-1:444083008754:secret:fsk-test\n'
+  elif [[ "$*" == *AuroraClusterArn* ]]; then
+    printf 'arn:aws:rds:ap-northeast-1:444083008754:cluster:fsk-test\n'
+  elif [[ "$*" == *DatabaseName* ]]; then
+    printf 'fsk_staging\n'
+  elif [[ "$*" == *'rds describe-db-clusters'* ]]; then
+    printf '%s\n' '{"DBClusters":[{"DBClusterArn":"arn:aws:rds:ap-northeast-1:444083008754:cluster:fsk-test","DatabaseName":"fsk_staging","Status":"available","Endpoint":"private.cluster.local","Port":5432,"DBClusterMembers":[{"DBInstanceIdentifier":"fsk-writer","IsClusterWriter":true}],"DBSubnetGroup":"fsk-private","VpcSecurityGroups":[{"VpcSecurityGroupId":"sg-0123456789abcdef0"}]}]}'
+  elif [[ "$*" == *'rds describe-db-instances'* ]]; then
+    printf '%s\n' '{"DBInstances":[{"DBInstanceIdentifier":"fsk-writer","PubliclyAccessible":false,"CertificateDetails":{"CAIdentifier":"rds-ca-rsa2048-g1"}}]}'
+  elif [[ "$*" == *'rds describe-db-subnet-groups'* ]]; then
+    printf '%s\n' '{"DBSubnetGroups":[{"DBSubnetGroupName":"fsk-private","VpcId":"vpc-0123456789abcdef0"}]}'
+  else
+    return 91
+  fi
+}
+fsk_run_before_migration_deadline() { "$@"; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_load_foundation_database_context')}
+FSK_AWS_ACCOUNT_ID=444083008754
+FSK_VPC_ID=vpc-0123456789abcdef0
+FSK_DB_SECURITY_GROUP_ID=sg-0123456789abcdef0
+fsk_load_foundation_database_context
+printf '%s/%s/%s/%s\n' "$FSK_DB_ENDPOINT" "$FSK_DB_PORT" \
+  "$FSK_DATABASE_NAME" "$FSK_RDS_CA_IDENTIFIER"
+`;
+    const result = spawnSync('bash', ['-c', script], {
+      encoding: 'utf8',
+      env: process.env,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(
+      'private.cluster.local/5432/fsk_staging/rds-ca-rsa2048-g1\n',
+    );
+    expect(result.stdout).not.toContain('secretsmanager');
   });
 
   it('rejects an invalid RDS CA guard before pnpm or migration starts', () => {
@@ -1051,6 +1192,8 @@ pnpm() {
   return 99
 }
 fsk_run_before_migration_deadline() { "$@"; }
+fsk_load_foundation_database_context() { :; }
+fsk_prepare_pnpm_runtime() { :; }
 fsk_worker_run_database_migration() {
   printf 'MIGRATION_CALLED'
   return 98
