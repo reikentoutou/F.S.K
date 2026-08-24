@@ -380,6 +380,9 @@ exit "$status"
 
 describe('active DynamoDB backend composition', () => {
   it('keeps active backend local imports resolvable by the Amplify cloud assembly', () => {
+    const backendPackage = JSON.parse(
+      readFileSync(join(process.cwd(), 'amplify/package.json'), 'utf8'),
+    ) as Record<string, unknown>;
     const activeBackendFiles = [
       'amplify/backend.ts',
       'amplify/auth/resource.ts',
@@ -389,16 +392,18 @@ describe('active DynamoDB backend composition', () => {
       'amplify/infrastructure/application-config.ts',
     ];
 
-    const unresolvedJavaScriptSpecifiers = activeBackendFiles.flatMap(
+    const invalidLocalSpecifiers = activeBackendFiles.flatMap(
       (relativePath) => {
         const source = readFileSync(join(process.cwd(), relativePath), 'utf8');
-        return [...source.matchAll(/(?:from\s+|import\()\s*['"](\.[^'"]+\.js)['"]/g)].map(
-          ([, specifier]) => `${relativePath}:${specifier}`,
-        );
+        return [...source.matchAll(/(?:from\s+|import\()\s*['"](\.[^'"]+)['"]/g)]
+          .map(([, specifier]) => specifier)
+          .filter((specifier) => !specifier.endsWith('.js'))
+          .map((specifier) => `${relativePath}:${specifier}`);
       },
     );
 
-    expect(unresolvedJavaScriptSpecifiers).toEqual([]);
+    expect(backendPackage).toEqual({ type: 'module' });
+    expect(invalidLocalSpecifiers).toEqual([]);
   });
 
   it('isolates synth from caller CDK_OUTDIR while validating the active DynamoDB composition', () => {
