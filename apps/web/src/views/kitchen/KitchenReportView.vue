@@ -6,6 +6,7 @@ import { dailyReportsRepository } from '@/data/daily-reports';
 import { DataRepositoryError } from '@/data/errors';
 import { todayTokyo } from '@/utils/tokyo';
 import type { KitchenContext } from './KitchenHomeView.vue';
+import type { SubmissionStatus } from './submission-state';
 
 export type KitchenReportMode = 'create' | null;
 
@@ -16,6 +17,24 @@ export function kitchenReportMode(routeName: unknown): KitchenReportMode {
 export const kitchenHomePath = '/kitchen';
 export const KITCHEN_BUSINESS_DATE_CHANGED_MESSAGE =
   '营业日已更新，请返回厨房首页重新选择班次';
+
+export function isKitchenHeaderBackDisabled(
+  status: SubmissionStatus,
+): boolean {
+  return status === 'submitting';
+}
+
+export async function handleKitchenHeaderBack(
+  status: SubmissionStatus,
+  actions: { edit(): void; goHome(): unknown },
+): Promise<void> {
+  if (isKitchenHeaderBackDisabled(status)) return;
+  if (status === 'confirming' || status === 'failed' || status === 'unknown') {
+    actions.edit();
+    return;
+  }
+  await actions.goHome();
+}
 
 export function isCurrentKitchenBusinessDate(
   businessDate: string,
@@ -309,6 +328,13 @@ async function submit(): Promise<void> {
   confirmationMessage.value = '';
   await submissionController.submit();
 }
+
+async function handleHeaderBackClick(): Promise<void> {
+  await handleKitchenHeaderBack(submission.value.status, {
+    edit: backToForm,
+    goHome: () => router.replace(kitchenHomePath),
+  });
+}
 </script>
 
 <template>
@@ -316,13 +342,8 @@ async function submit(): Promise<void> {
     <header class="bar">
       <el-button
         link
-        @click="
-          submission.status === 'confirming' ||
-          submission.status === 'failed' ||
-          submission.status === 'unknown'
-            ? backToForm()
-            : router.replace(kitchenHomePath)
-        "
+        :disabled="isKitchenHeaderBackDisabled(submission.status)"
+        @click="handleHeaderBackClick"
       >
         {{
           submission.status === 'confirming' ||

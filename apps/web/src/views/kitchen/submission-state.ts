@@ -84,6 +84,7 @@ export function createKitchenSubmissionController<TDraft, TResult>(
   let result: TResult | null = null;
   let message = '';
   let attachmentsPrepared = false;
+  let generation = 0;
 
   function snapshot(): KitchenSubmissionSnapshot<TDraft, TResult> {
     return { state, draft: options.draft, result, message };
@@ -123,16 +124,36 @@ export function createKitchenSubmissionController<TDraft, TResult>(
 
     state = submitting;
     message = '';
+    const attemptGeneration = generation;
     publish();
 
     try {
       if (!attachmentsPrepared) {
         await options.prepareAttachments();
+        if (
+          generation !== attemptGeneration ||
+          state.status !== 'submitting'
+        ) {
+          return;
+        }
         attachmentsPrepared = true;
       }
-      result = await options.create();
+      const created = await options.create();
+      if (
+        generation !== attemptGeneration ||
+        state.status !== 'submitting'
+      ) {
+        return;
+      }
+      result = created;
       state = transitionSubmissionState(state, 'SUCCEED');
     } catch (error) {
+      if (
+        generation !== attemptGeneration ||
+        state.status !== 'submitting'
+      ) {
+        return;
+      }
       const failure = options.classifyFailure(error);
       message = failure.message;
       state = transitionSubmissionState(state, failure.event);
@@ -141,6 +162,7 @@ export function createKitchenSubmissionController<TDraft, TResult>(
   }
 
   function reset(): void {
+    generation += 1;
     state = initialSubmissionState();
     result = null;
     message = '';

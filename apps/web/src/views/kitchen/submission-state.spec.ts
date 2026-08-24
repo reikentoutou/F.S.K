@@ -8,10 +8,12 @@ import {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const classifyFailure = (error: unknown) => ({
@@ -141,6 +143,74 @@ describe('kitchen submission state', () => {
     expect(prepareAttachments).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
   });
+
+  it('invalidates a pending attachment preparation on reset without creating or republishing stale state', async () => {
+    const attachment = deferred<void>();
+    const create = vi.fn();
+    const snapshots: string[] = [];
+    const controller = createKitchenSubmissionController({
+      draft: { businessDate: '2026-08-24' },
+      validate: () => null,
+      prepareAttachments: () => attachment.promise,
+      create,
+      classifyFailure,
+      onChange: (snapshot) => snapshots.push(snapshot.state.status),
+    });
+    controller.confirm();
+    const pending = controller.submit();
+    expect(controller.snapshot().state.status).toBe('submitting');
+
+    controller.reset();
+    const publishCountAfterReset = snapshots.length;
+    attachment.resolve();
+    await pending;
+
+    expect(create).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({
+      state: { status: 'editing' },
+      result: null,
+      message: '',
+    });
+    expect(snapshots).toHaveLength(publishCountAfterReset);
+    expect(snapshots.at(-1)).toBe('editing');
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'ignores a stale create %s after reset',
+    async (settlement) => {
+      const response = deferred<{ reportKey: string }>();
+      const snapshots: string[] = [];
+      const controller = createKitchenSubmissionController({
+        draft: { businessDate: '2026-08-24' },
+        validate: () => null,
+        prepareAttachments: vi.fn().mockResolvedValue(undefined),
+        create: () => response.promise,
+        classifyFailure,
+        onChange: (snapshot) => snapshots.push(snapshot.state.status),
+      });
+      controller.confirm();
+      const pending = controller.submit();
+      await Promise.resolve();
+      expect(controller.snapshot().state.status).toBe('submitting');
+
+      controller.reset();
+      const publishCountAfterReset = snapshots.length;
+      if (settlement === 'resolve') {
+        response.resolve({ reportKey: 'stale-report' });
+      } else {
+        response.reject('stale-failure');
+      }
+      await pending;
+
+      expect(controller.snapshot()).toMatchObject({
+        state: { status: 'editing' },
+        result: null,
+        message: '',
+      });
+      expect(snapshots).toHaveLength(publishCountAfterReset);
+      expect(snapshots.at(-1)).toBe('editing');
+    },
+  );
 
   it('stores only the create response on success and needs no query capability', async () => {
     const response = {

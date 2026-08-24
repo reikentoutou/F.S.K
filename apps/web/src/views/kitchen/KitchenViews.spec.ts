@@ -14,6 +14,8 @@ import {
   kitchenReportMode,
   isCurrentKitchenBusinessDate,
   kitchenBusinessDateSubmissionError,
+  handleKitchenHeaderBack,
+  isKitchenHeaderBackDisabled,
   kitchenSubmissionFailure,
   loadKitchenReportContext,
   uploadKitchenReportAttachment,
@@ -212,6 +214,17 @@ describe('kitchen create-only views', () => {
       message:
         '结果不确定，请勿反复修改数据，重试会检查同一营业日和班次冲突',
     });
+  });
+
+  it('disables and ignores the header back action while submission is pending', async () => {
+    const edit = vi.fn();
+    const goHome = vi.fn();
+
+    expect(isKitchenHeaderBackDisabled('submitting')).toBe(true);
+    await handleKitchenHeaderBack('submitting', { edit, goHome });
+
+    expect(edit).not.toHaveBeenCalled();
+    expect(goHome).not.toHaveBeenCalled();
   });
 
   it('imports no OWNER repository and contains no report read/update/delete call', () => {
