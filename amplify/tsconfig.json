@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "target": "ES2022",
+    "noEmit": true,
     "types": ["node", "aws-lambda"]
   },
   "include": ["./**/*.ts"]

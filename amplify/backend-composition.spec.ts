@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -376,6 +377,101 @@ exit "$status"
     rmSync(fixtureDirectory, { force: true, recursive: true });
   }
 };
+
+describe('active DynamoDB backend composition', () => {
+  it('synthesizes Cognito-default AppSync with exactly four DynamoDB tables and no legacy Foundation', () => {
+    const backendUrl = pathToFileURL(
+      join(process.cwd(), 'amplify/backend.ts'),
+    ).href;
+    const marker = 'ACTIVE_BACKEND_SYNTH=';
+    const script = `(async () => {
+  const active = await import(${JSON.stringify(backendUrl)});
+  if (!active.backend) {
+    process.stdout.write(${JSON.stringify(marker)} + JSON.stringify({ hasBackend: false }) + '\\n');
+    return;
+  }
+  const { Template } = await import('aws-cdk-lib/assertions');
+  active.backend.stack.node.root.synth({ errorOnDuplicateSynth: false });
+  const templates = [
+    Template.fromStack(active.backend.stack).toJSON(),
+    Template.fromStack(active.backend.auth.stack).toJSON(),
+    Template.fromStack(active.backend.data.stack).toJSON(),
+    Template.fromStack(active.backend.storage.stack).toJSON(),
+    ...Object.values(active.backend.data.resources.nestedStacks).map((stack) =>
+      Template.fromStack(stack).toJSON(),
+    ),
+  ];
+  const resources = templates.flatMap((template) => Object.values(template.Resources ?? {}));
+  const resourceTypes = resources.map((resource) => resource.Type);
+  const [api] = resources.filter((resource) => resource.Type === 'AWS::AppSync::GraphQLApi');
+  const [identityPool] = resources.filter((resource) => resource.Type === 'AWS::Cognito::IdentityPool');
+  const dynamoTableTypes = resourceTypes.filter(
+    (type) => type === 'AWS::DynamoDB::Table' || type === 'Custom::AmplifyDynamoDBTable',
+  );
+  const lambdaEvidence = JSON.stringify(
+    resources.filter((resource) => resource.Type === 'AWS::Lambda::Function'),
+  ).toLowerCase();
+  process.stdout.write(${JSON.stringify(marker)} + JSON.stringify({
+    hasBackend: true,
+    appSyncCount: resourceTypes.filter((type) => type === 'AWS::AppSync::GraphQLApi').length,
+    tableCount: dynamoTableTypes.length,
+    dynamoTableTypes,
+    authenticationType: api?.Properties?.AuthenticationType,
+    additionalAuthenticationProviders: api?.Properties?.AdditionalAuthenticationProviders,
+    allowUnauthenticatedIdentities: identityPool?.Properties?.AllowUnauthenticatedIdentities,
+    ec2Types: resourceTypes.filter((type) => type.startsWith('AWS::EC2::')),
+    rdsTypes: resourceTypes.filter((type) => type.startsWith('AWS::RDS::')),
+    secretCount: resourceTypes.filter((type) => type === 'AWS::SecretsManager::Secret').length,
+    hasRdsData: JSON.stringify(templates).toLowerCase().includes('rds-data'),
+    hasPostgresFunction: lambdaEvidence.includes('postgres'),
+  }) + '\\n');
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});`;
+    const result = spawnSync('pnpm', ['exec', 'tsx', '--eval', script], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        AWS_DEFAULT_REGION: 'ap-northeast-1',
+        AWS_REGION: 'ap-northeast-1',
+        CDK_CONTEXT_JSON: JSON.stringify({
+          'amplify-backend-name': 'production',
+          'amplify-backend-namespace': 'test-app-id',
+          'amplify-backend-type': 'branch',
+        }),
+      },
+      timeout: 60_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const evidenceLine = result.stdout
+      .split('\n')
+      .find((line) => line.startsWith(marker));
+    expect(evidenceLine, result.stdout).toBeDefined();
+    expect(JSON.parse(evidenceLine?.slice(marker.length) ?? '{}')).toEqual({
+      hasBackend: true,
+      appSyncCount: 1,
+      tableCount: 4,
+      dynamoTableTypes: [
+        'Custom::AmplifyDynamoDBTable',
+        'Custom::AmplifyDynamoDBTable',
+        'Custom::AmplifyDynamoDBTable',
+        'Custom::AmplifyDynamoDBTable',
+      ],
+      authenticationType: 'AMAZON_COGNITO_USER_POOLS',
+      additionalAuthenticationProviders: [
+        { AuthenticationType: 'AWS_IAM' },
+      ],
+      allowUnauthenticatedIdentities: false,
+      ec2Types: [],
+      rdsTypes: [],
+      secretCount: 0,
+      hasRdsData: false,
+      hasPostgresFunction: false,
+    });
+  });
+});
 
 describe('foundation backend composition', () => {
   it('exports exactly the approved foundation resource set', () => {
