@@ -9,6 +9,7 @@ dist/
 apps/api/uploads/
 
 amplify_outputs.json
+apps/web/public/amplify_outputs.json
 .amplify/
 amplify/.env*
 amplify/database/tmp/

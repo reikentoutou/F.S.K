@@ -21,14 +21,6 @@ export default defineConfig({
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
       },
-      '/auth': {
-        target: 'http://127.0.0.1:3000',
-        changeOrigin: true,
-      },
-      '/setup': {
-        target: 'http://127.0.0.1:3000',
-        changeOrigin: true,
-      },
       '/analytics': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
@@ -40,11 +32,6 @@ export default defineConfig({
       '/uploads': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
-      },
-      '^/wm/api': {
-        target: 'http://127.0.0.1:3000',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/wm\/api/, ''),
       },
     },
   },

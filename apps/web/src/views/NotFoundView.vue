@@ -6,12 +6,12 @@ const router = useRouter();
 const auth = useAuthStore();
 
 function goHome() {
-  if (auth.token && auth.user?.role === 'ADMIN') {
-    void router.replace('/admin');
+  if (auth.user?.role === 'OWNER') {
+    void router.replace('/owner');
     return;
   }
-  if (auth.token) {
-    void router.replace('/wm');
+  if (auth.user?.role === 'KITCHEN') {
+    void router.replace('/kitchen');
     return;
   }
   void router.replace('/login');
@@ -20,7 +20,7 @@ function goHome() {
 
 <template>
   <div class="wrap">
-    <h1>ページが見つかりません</h1>
+    <h1 class="title">ページが見つかりません</h1>
     <p class="lead">URL をご確認ください。</p>
     <el-button type="primary" @click="goHome">トップへ</el-button>
   </div>
@@ -32,7 +32,7 @@ function goHome() {
   margin: 48px auto;
   padding: 0 16px;
 }
-h1 {
+.title {
   font-size: 1.35rem;
   font-weight: 700;
   margin: 0 0 12px;

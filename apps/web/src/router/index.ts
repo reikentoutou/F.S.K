@@ -1,79 +1,65 @@
 import { createRouter, createWebHistory } from 'vue-router';
+
 import { useAuthStore } from '@/stores/auth';
-import { useSetupStore } from '@/stores/setup';
+import { authorizeNavigation } from './authorization';
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
-      path: '/setup',
-      name: 'setup',
-      component: () => import('@/views/SetupView.vue'),
-    },
-    {
-      path: '/service-unavailable',
-      name: 'service-unavailable',
-      component: () => import('@/views/ServiceUnavailableView.vue'),
-    },
-    {
       path: '/login',
       name: 'login',
       component: () => import('@/views/LoginView.vue'),
+      meta: { public: true },
     },
     {
-      path: '/wm',
-      name: 'wm',
+      path: '/kitchen',
+      name: 'kitchen-home',
       component: () => import('@/views/wm/WmHomeView.vue'),
-      meta: { role: 'WEBMASTER' },
+      meta: { role: 'KITCHEN' },
     },
     {
-      path: '/wm/report/:date/:shiftId',
-      name: 'wm-report',
+      path: '/kitchen/report/:date/:shiftId',
+      name: 'kitchen-report',
       component: () => import('@/views/wm/DailyFormView.vue'),
-      meta: { role: 'WEBMASTER' },
+      meta: { role: 'KITCHEN' },
     },
     {
-      path: '/wm/report/edit/:id',
-      name: 'wm-report-edit',
-      component: () => import('@/views/wm/DailyFormView.vue'),
-      meta: { role: 'WEBMASTER' },
-    },
-    {
-      path: '/admin/report/new',
-      name: 'admin-report-new',
+      path: '/owner/report/new',
+      name: 'owner-report-new',
       component: () => import('@/views/admin/AdminReportFormView.vue'),
-      meta: { role: 'ADMIN' },
+      meta: { role: 'OWNER' },
     },
     {
-      path: '/admin/report/:id',
-      name: 'admin-report-edit',
+      path: '/owner/report/:id',
+      name: 'owner-report-edit',
       component: () => import('@/views/admin/AdminReportFormView.vue'),
-      meta: { role: 'ADMIN' },
+      meta: { role: 'OWNER' },
     },
     {
-      path: '/admin',
+      path: '/owner',
       component: () => import('@/views/admin/AdminShellView.vue'),
-      meta: { role: 'ADMIN' },
+      meta: { role: 'OWNER' },
       children: [
-        { path: '', name: 'admin', redirect: '/admin/daily' },
+        { path: '', name: 'owner-home', redirect: '/owner/daily' },
         {
           path: 'daily',
-          name: 'admin-daily',
+          name: 'owner-daily',
           component: () => import('@/views/admin/AdminDailyView.vue'),
         },
         {
           path: 'settings',
-          name: 'admin-settings',
+          name: 'owner-settings',
           component: () => import('@/views/admin/AdminSettingsView.vue'),
         },
         {
           path: 'analytics',
-          name: 'admin-analytics',
+          name: 'owner-analytics',
           component: () => import('@/views/admin/AnalyticsView.vue'),
         },
         {
           path: 'backup',
-          name: 'admin-backup',
+          name: 'owner-backup',
           component: () => import('@/views/admin/AdminBackupView.vue'),
         },
       ],
@@ -88,44 +74,23 @@ const router = createRouter({
 });
 
 router.beforeEach(async (to) => {
-  const setup = useSetupStore();
-  if (setup.setupCompleted === null) {
-    await setup.fetchStatus();
-  }
-  if (setup.statusFetchFailed) {
-    if (to.name === 'service-unavailable') return true;
-    return {
-      name: 'service-unavailable',
-      query: to.fullPath && to.fullPath !== '/' ? { redirect: to.fullPath } : {},
-    };
-  }
-  if (
-    !setup.setupCompleted &&
-    to.name !== 'setup' &&
-    to.name !== 'service-unavailable'
-  ) {
-    return { name: 'setup' };
-  }
-  if (setup.setupCompleted && to.name === 'setup') {
-    return { name: 'login' };
-  }
   const auth = useAuthStore();
-  /** 未ログインでよいルート（末尾の catch-all `not-found` を含む） */
-  const publicRouteNames = new Set([
-    'login',
-    'setup',
-    'service-unavailable',
-    'not-found',
-  ]);
-  if (typeof to.name === 'string' && publicRouteNames.has(to.name)) {
-    return true;
+  if (!to.meta.public) {
+    try {
+      await auth.restoreSession();
+    } catch {
+      return { name: 'login', query: { redirect: to.fullPath } };
+    }
   }
-  if (!auth.token) return { name: 'login', query: { redirect: to.fullPath } };
-  const need = to.meta.role;
-  if (need && auth.user?.role !== need) {
-    return auth.user?.role === 'ADMIN' ? { name: 'admin' } : { name: 'wm' };
-  }
-  return true;
+
+  return authorizeNavigation(
+    {
+      path: to.fullPath,
+      isPublic: to.meta.public === true,
+      requiredRole: to.meta.role,
+    },
+    auth.user,
+  );
 });
 
 export default router;
