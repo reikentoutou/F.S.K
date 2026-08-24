@@ -20,7 +20,6 @@ export interface AnalyticsReport extends DailyReportRawAmounts {
 
 export interface CalculatedAnalyticsReport extends AnalyticsReport {
   registerFloatYen: number;
-  durationMinutes: number;
   imosSalesYen: number;
   cashDepositYen: number;
   totalSalesYen: number;
@@ -80,13 +79,10 @@ function addReport(
   aggregate.staffMealTotalYen += report.staffMealTotalYen;
 }
 
-function durationMinutes(start: number, end: number): number {
-  return end >= start ? end - start : 24 * 60 - start + end;
-}
-
 export function buildReportAnalytics(
   reports: readonly AnalyticsReport[],
   registerFloatYen: number,
+  shiftSortOrders: ReadonlyMap<string, number>,
 ): ReportAnalytics {
   const rows = reports
     .map((report): CalculatedAnalyticsReport => {
@@ -94,24 +90,19 @@ export function buildReportAnalytics(
       return {
         ...report,
         registerFloatYen,
-        durationMinutes: durationMinutes(
-          report.startMinuteOfDay,
-          report.endMinuteOfDay,
-        ),
         ...totals,
       };
     })
-    .sort(
-      (left, right) =>
-        left.businessDate.localeCompare(right.businessDate) ||
-        left.startMinuteOfDay - right.startMinuteOfDay ||
-        left.shiftId.localeCompare(right.shiftId),
-    );
+    .sort((left, right) => compareReportRows(left, right, shiftSortOrders));
 
   const totals = emptyAggregate();
   const shifts = new Map<
     string,
-    ShiftReportAggregate & { firstStartMinuteOfDay: number }
+    ShiftReportAggregate & {
+      sortOrder: number | undefined;
+      firstBusinessDate: string;
+      firstStartMinuteOfDay: number;
+    }
   >();
 
   for (const row of rows) {
@@ -121,29 +112,75 @@ export function buildReportAnalytics(
       aggregate = {
         shiftId: row.shiftId,
         shiftName: row.shiftNameSnapshot,
+        sortOrder: shiftSortOrders.get(row.shiftId),
+        firstBusinessDate: row.businessDate,
         firstStartMinuteOfDay: row.startMinuteOfDay,
         ...emptyAggregate(),
       };
       shifts.set(row.shiftId, aggregate);
     }
-    aggregate.firstStartMinuteOfDay = Math.min(
-      aggregate.firstStartMinuteOfDay,
-      row.startMinuteOfDay,
-    );
     addReport(aggregate, row);
   }
 
   const byShift = [...shifts.values()]
-    .sort(
-      (left, right) =>
-        left.firstStartMinuteOfDay - right.firstStartMinuteOfDay ||
-        left.shiftId.localeCompare(right.shiftId),
-    )
-    .map(({ firstStartMinuteOfDay: _firstStartMinuteOfDay, ...aggregate }) =>
-      aggregate,
+    .sort(compareShiftAggregates)
+    .map(
+      ({
+        sortOrder: _sortOrder,
+        firstBusinessDate: _firstBusinessDate,
+        firstStartMinuteOfDay: _firstStartMinuteOfDay,
+        ...aggregate
+      }) => aggregate,
     );
 
   return { totals, byShift, rows };
+}
+
+function compareOptionalSortOrder(
+  left: number | undefined,
+  right: number | undefined,
+): number {
+  if (left !== undefined && right !== undefined) return left - right;
+  if (left !== undefined) return -1;
+  if (right !== undefined) return 1;
+  return 0;
+}
+
+function compareReportRows(
+  left: CalculatedAnalyticsReport,
+  right: CalculatedAnalyticsReport,
+  shiftSortOrders: ReadonlyMap<string, number>,
+): number {
+  return (
+    left.businessDate.localeCompare(right.businessDate) ||
+    compareOptionalSortOrder(
+      shiftSortOrders.get(left.shiftId),
+      shiftSortOrders.get(right.shiftId),
+    ) ||
+    left.startMinuteOfDay - right.startMinuteOfDay ||
+    left.shiftId.localeCompare(right.shiftId) ||
+    left.reportKey.localeCompare(right.reportKey)
+  );
+}
+
+function compareShiftAggregates(
+  left: ShiftReportAggregate & {
+    sortOrder: number | undefined;
+    firstBusinessDate: string;
+    firstStartMinuteOfDay: number;
+  },
+  right: ShiftReportAggregate & {
+    sortOrder: number | undefined;
+    firstBusinessDate: string;
+    firstStartMinuteOfDay: number;
+  },
+): number {
+  return (
+    compareOptionalSortOrder(left.sortOrder, right.sortOrder) ||
+    left.firstBusinessDate.localeCompare(right.firstBusinessDate) ||
+    left.firstStartMinuteOfDay - right.firstStartMinuteOfDay ||
+    left.shiftId.localeCompare(right.shiftId)
+  );
 }
 
 export function actualSalesBarData(

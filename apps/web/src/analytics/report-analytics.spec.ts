@@ -10,12 +10,19 @@ import {
   type AnalyticsReport,
   type ReportAggregate,
 } from './report-analytics';
+import { DataRepositoryError } from '@/data/errors';
 import { todayTokyo } from '@/utils/tokyo';
 import * as analyticsView from '@/views/admin/AnalyticsView.vue';
 
 const repositoryMocks = vi.hoisted(() => ({
   listByBusinessDate: vi.fn(),
   getSetting: vi.fn(),
+  listShifts: vi.fn(),
+}));
+
+const downloadMocks = vi.hoisted(() => ({
+  buildReportCsv: vi.fn(() => '\ufeffcsv'),
+  downloadCsvFile: vi.fn(),
 }));
 
 vi.mock('@/data/daily-reports', () => ({
@@ -27,6 +34,7 @@ vi.mock('@/data/daily-reports', () => ({
 vi.mock('@/data/master-data', () => ({
   ownerMasterDataRepository: {
     getSetting: repositoryMocks.getSetting,
+    listShifts: repositoryMocks.listShifts,
   },
 }));
 
@@ -37,26 +45,38 @@ vi.mock('@/composables/useEchartsBarChart', () => ({
   }),
 }));
 
+vi.mock('@/export/report-csv', () => downloadMocks);
+
 interface AnalyticsLoader {
   loadOwnerAnalytics(options: {
     period: 'day' | 'week' | 'month' | 'quarter' | 'year';
     anchorDate: string;
     listByBusinessDate(date: string): Promise<Array<AnalyticsReport | null>>;
     getSetting(id: string): Promise<{ registerFloatAmount: number }>;
+    listShifts(): Promise<
+      Array<{ id: string; sortOrder: number } | null>
+    >;
+    isCurrent?: () => boolean;
   }): Promise<{
     range: { start: string; end: string };
     registerFloatAmount: number;
     analytics: ReturnType<typeof buildReportAnalytics>;
   }>;
+  ownerAnalyticsErrorMessage(error: unknown): string;
+  analyticsCsvFilename(selection: {
+    period: 'day' | 'week' | 'month' | 'quarter' | 'year';
+    range: { start: string; end: string };
+  }): string;
 }
 
 const viewLoader = analyticsView as unknown as AnalyticsLoader;
 
 const Passthrough = defineComponent({
-  props: { label: String },
+  props: { label: String, title: String },
   setup(props, { slots, attrs }) {
     return () =>
       h('div', attrs, [
+        props.title ? h('h3', props.title) : null,
         props.label ? h('strong', props.label) : null,
         slots.default?.(),
         slots.empty?.(),
@@ -153,6 +173,11 @@ const zeroAggregate: ReportAggregate = {
   staffMealTotalYen: 0,
 };
 
+const defaultShiftSortOrders = new Map([
+  ['day', 1],
+  ['night', 2],
+]);
+
 describe('report analytics', () => {
   it('calculates every row with the shared domain contract before accumulating period totals', () => {
     const result = buildReportAnalytics(
@@ -177,6 +202,7 @@ describe('report analytics', () => {
         }),
       ],
       5_000,
+      defaultShiftSortOrders,
     );
 
     expect(result.totals).toEqual({
@@ -225,6 +251,7 @@ describe('report analytics', () => {
         }),
       ],
       5_000,
+      defaultShiftSortOrders,
     );
 
     expect(result.byShift).toEqual([
@@ -244,9 +271,10 @@ describe('report analytics', () => {
     ]);
   });
 
-  it('keeps overnight reports in their business day and derives their duration across midnight', () => {
+  it('orders known shifts by master sort order and unknown history by time/id while preserving overnight labels', () => {
     const result = buildReportAnalytics(
       [
+        report(),
         report({
           reportKey: '2026-08-24#night',
           shiftId: 'night',
@@ -255,19 +283,52 @@ describe('report analytics', () => {
           endMinuteOfDay: 6 * 60,
           timeRangeLabelSnapshot: '22:00–06:00',
         }),
+        report({
+          reportKey: '2026-08-24#unknown-b',
+          shiftId: 'unknown-b',
+          shiftNameSnapshot: '历史乙班',
+          startMinuteOfDay: 21 * 60,
+        }),
+        report({
+          reportKey: '2026-08-24#unknown-a',
+          shiftId: 'unknown-a',
+          shiftNameSnapshot: '历史甲班',
+          startMinuteOfDay: 21 * 60,
+        }),
       ],
       5_000,
+      new Map([
+        ['night', 1],
+        ['day', 2],
+      ]),
     );
 
-    expect(result.rows[0]).toMatchObject({
-      businessDate: '2026-08-24',
-      timeRangeLabelSnapshot: '22:00–06:00',
-      durationMinutes: 8 * 60,
-    });
+    expect(
+      result.rows.map((row) => [row.shiftId, row.timeRangeLabelSnapshot]),
+    ).toEqual([
+      ['night', '22:00–06:00'],
+      ['day', '08:00–20:00'],
+      ['unknown-a', '08:00–20:00'],
+      ['unknown-b', '08:00–20:00'],
+    ]);
+    expect(result.byShift.map((shift) => shift.shiftId)).toEqual([
+      'night',
+      'day',
+      'unknown-a',
+      'unknown-b',
+    ]);
+    expect(actualSalesBarData(result.byShift).categories).toEqual([
+      '夜班',
+      '白班',
+      '历史甲班',
+      '历史乙班',
+    ]);
   });
 
   it('returns stable empty totals and no shift or detail rows', () => {
-    expect(buildReportAnalytics([], 5_000)).toEqual({
+    expect(
+      buildReportAnalytics([], 5_000, defaultShiftSortOrders),
+    ).toEqual({
       totals: zeroAggregate,
       byShift: [],
       rows: [],
@@ -275,10 +336,15 @@ describe('report analytics', () => {
   });
 
   it('builds the actual-sales chart only from totalSalesYen so Alipay meal changes do not affect it', () => {
-    const first = buildReportAnalytics([report()], 5_000);
+    const first = buildReportAnalytics(
+      [report()],
+      5_000,
+      defaultShiftSortOrders,
+    );
     const changedAlipay = buildReportAnalytics(
       [report({ staffMealAlipayYen: 9_999 })],
       5_000,
+      defaultShiftSortOrders,
     );
 
     expect(actualSalesBarData(first.byShift)).toEqual({
@@ -315,6 +381,11 @@ describe('OWNER analytics page', () => {
     repositoryMocks.getSetting.mockResolvedValue({
       registerFloatAmount: 5_000,
     });
+    repositoryMocks.listShifts.mockResolvedValue([
+      { id: 'day', sortOrder: 1, active: true },
+    ]);
+    downloadMocks.buildReportCsv.mockClear();
+    downloadMocks.downloadCsvFile.mockClear();
   });
 
   it('reads the selected Tokyo period through daily indexes and renders domain-derived totals', async () => {
@@ -328,6 +399,9 @@ describe('OWNER analytics page', () => {
       anchorDate: '2026-08-24',
       listByBusinessDate: fixedList,
       getSetting: vi.fn().mockResolvedValue({ registerFloatAmount: 5_000 }),
+      listShifts: vi.fn().mockResolvedValue([
+        { id: 'day', sortOrder: 1, active: true },
+      ]),
     });
 
     expect(fixedList.mock.calls).toEqual([
@@ -371,6 +445,205 @@ describe('OWNER analytics page', () => {
     expect(visible).toContain('100 円');
     expect(visible).toContain('网管餐費合計');
     expect(visible).toContain('600 円');
+  });
+
+  it('fails closed when AppSetting/default is missing without reading or returning reports', async () => {
+    const missing = new DataRepositoryError('DATA_NOT_FOUND');
+    const listByBusinessDate = vi.fn().mockResolvedValue([report()]);
+
+    await expect(
+      viewLoader.loadOwnerAnalytics({
+        period: 'week',
+        anchorDate: '2026-08-24',
+        listByBusinessDate,
+        getSetting: vi.fn().mockRejectedValue(missing),
+        listShifts: vi.fn().mockResolvedValue([]),
+      }),
+    ).rejects.toBe(missing);
+    expect(listByBusinessDate).not.toHaveBeenCalled();
+  });
+
+  it('loads active and inactive shift masters and applies their explicit sort order', async () => {
+    const listShifts = vi.fn().mockResolvedValue([
+      { id: 'day', sortOrder: 20, active: true },
+      { id: 'night', sortOrder: 10, active: false },
+    ]);
+    const loaded = await viewLoader.loadOwnerAnalytics({
+      period: 'day',
+      anchorDate: '2026-08-24',
+      getSetting: vi.fn().mockResolvedValue({ registerFloatAmount: 5_000 }),
+      listShifts,
+      listByBusinessDate: vi.fn().mockResolvedValue([
+        report(),
+        report({
+          reportKey: '2026-08-24#night',
+          shiftId: 'night',
+          shiftNameSnapshot: '夜班',
+          startMinuteOfDay: 22 * 60,
+          endMinuteOfDay: 6 * 60,
+          timeRangeLabelSnapshot: '22:00–06:00',
+        }),
+      ]),
+    });
+
+    expect(listShifts).toHaveBeenCalledOnce();
+    expect(loaded.analytics.rows.map((row) => row.shiftId)).toEqual([
+      'night',
+      'day',
+    ]);
+  });
+
+  it('renders single-day shift details in master order with the overnight label intact', async () => {
+    repositoryMocks.listShifts.mockResolvedValue([
+      { id: 'day', sortOrder: 20, active: true },
+      { id: 'night', sortOrder: 10, active: false },
+    ]);
+    const currentBusinessDate = todayTokyo();
+    repositoryMocks.listByBusinessDate.mockImplementation(
+      async (date: string) =>
+        date === currentBusinessDate
+          ? [
+              report({ reportKey: `${date}#day`, businessDate: date }),
+              report({
+                reportKey: `${date}#night`,
+                businessDate: date,
+                shiftId: 'night',
+                shiftNameSnapshot: '夜班',
+                startMinuteOfDay: 22 * 60,
+                endMinuteOfDay: 6 * 60,
+                timeRangeLabelSnapshot: '22:00–06:00',
+              }),
+            ]
+          : [],
+    );
+    const root = await renderAnalyticsView();
+
+    root.querySelector<HTMLButtonElement>('[data-testid="period-change"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await nextTick();
+    const visible = root.textContent ?? '';
+
+    expect(visible.indexOf('夜班')).toBeLessThan(visible.indexOf('白班'));
+    expect(visible).toContain('22:00–06:00');
+  });
+
+  it('stops a stale generation before starting the next ten-day batch', async () => {
+    let current = true;
+    let releaseFirstBatch!: (rows: AnalyticsReport[]) => void;
+    const firstBatch = new Promise<AnalyticsReport[]>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+    const listByBusinessDate = vi.fn(() => firstBatch);
+
+    const pending = viewLoader.loadOwnerAnalytics({
+      period: 'month',
+      anchorDate: '2026-08-15',
+      getSetting: vi.fn().mockResolvedValue({ registerFloatAmount: 5_000 }),
+      listShifts: vi.fn().mockResolvedValue([]),
+      listByBusinessDate,
+      isCurrent: () => current,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(listByBusinessDate).toHaveBeenCalledTimes(10);
+
+    current = false;
+    releaseFirstBatch([]);
+
+    await expect(pending).rejects.toMatchObject({
+      message: 'ANALYTICS_LOAD_ABORTED',
+    });
+    expect(listByBusinessDate).toHaveBeenCalledTimes(10);
+  });
+
+  it('propagates a current repository failure without converting it into an abort', async () => {
+    const failure = new DataRepositoryError('DATA_NETWORK_ERROR');
+
+    await expect(
+      viewLoader.loadOwnerAnalytics({
+        period: 'day',
+        anchorDate: '2026-08-24',
+        getSetting: vi.fn().mockResolvedValue({ registerFloatAmount: 5_000 }),
+        listShifts: vi.fn().mockResolvedValue([]),
+        listByBusinessDate: vi.fn().mockRejectedValue(failure),
+        isCurrent: () => true,
+      }),
+    ).rejects.toBe(failure);
+  });
+
+  it('does not start report reads when the generation expires during shift metadata loading', async () => {
+    let current = true;
+    let releaseShifts!: (
+      shifts: Array<{ id: string; sortOrder: number }>,
+    ) => void;
+    const shifts = new Promise<Array<{ id: string; sortOrder: number }>>(
+      (resolve) => {
+        releaseShifts = resolve;
+      },
+    );
+    const listByBusinessDate = vi.fn();
+    const pending = viewLoader.loadOwnerAnalytics({
+      period: 'day',
+      anchorDate: '2026-08-24',
+      getSetting: vi.fn().mockResolvedValue({ registerFloatAmount: 5_000 }),
+      listShifts: () => shifts,
+      listByBusinessDate,
+      isCurrent: () => current,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    current = false;
+    releaseShifts([]);
+
+    await expect(pending).rejects.toMatchObject({
+      message: 'ANALYTICS_LOAD_ABORTED',
+    });
+    expect(listByBusinessDate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      new DataRepositoryError('DATA_NOT_FOUND'),
+      'レジ底銭設定が見つかりません。設定画面で登録してください',
+    ],
+    [
+      new DataRepositoryError('DATA_UNAUTHORIZED'),
+      '权限不足，请重新以老板账号登录',
+    ],
+    [
+      new DataRepositoryError('DATA_PAGINATION_FAILED'),
+      '分页读取失败，请重试',
+    ],
+    [
+      new DataRepositoryError('DATA_NETWORK_ERROR'),
+      '网络异常，请确认连接后重试',
+    ],
+  ])('maps metadata/read failures to a stable OWNER message', (error, message) => {
+    expect(viewLoader.ownerAnalyticsErrorMessage(error)).toBe(message);
+  });
+
+  it('downloads with the last loaded period/range snapshot even before a new watcher starts', async () => {
+    repositoryMocks.listByBusinessDate.mockResolvedValue([]);
+    const root = await renderAnalyticsView();
+    const expectedRange = tokyoPeriodRange('week', todayTokyo());
+    let releasePending!: (rows: AnalyticsReport[]) => void;
+    const pending = new Promise<AnalyticsReport[]>((resolve) => {
+      releasePending = resolve;
+    });
+    repositoryMocks.listByBusinessDate.mockImplementation(() => pending);
+
+    root.querySelector<HTMLButtonElement>('[data-testid="period-change"]')?.click();
+    const csvButton = [...root.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('CSV を出力'),
+    );
+    csvButton?.click();
+
+    expect(downloadMocks.downloadCsvFile).toHaveBeenCalledWith(
+      '\ufeffcsv',
+      `aggregate-week-${expectedRange.start}-${expectedRange.end}.csv`,
+    );
+
+    releasePending([]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
   it('disables CSV export while a changed period is still loading', async () => {

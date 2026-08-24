@@ -22,7 +22,9 @@ export const REPORT_CSV_HEADERS = [
 ] as const;
 
 function protectFormula(value: string): string {
-  return /^[\t ]*[=+\-@]/u.test(value) ? `'${value}` : value;
+  return /^[\p{White_Space}\p{Cc}]*[=+\-@]/u.test(value)
+    ? `'${value}`
+    : value;
 }
 
 function csvCell(value: string | number | null | undefined): string {

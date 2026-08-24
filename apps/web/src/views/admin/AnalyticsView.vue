@@ -16,6 +16,48 @@ export interface OwnerAnalyticsLoadOptions {
     businessDate: string,
   ): Promise<Array<AnalyticsReport | null>>;
   getSetting(id: string): Promise<{ registerFloatAmount: number }>;
+  listShifts(): Promise<Array<{ id: string; sortOrder: number } | null>>;
+  isCurrent?: () => boolean;
+}
+
+function assertAnalyticsLoadCurrent(options: OwnerAnalyticsLoadOptions): void {
+  if (options.isCurrent?.() === false) {
+    throw new Error('ANALYTICS_LOAD_ABORTED');
+  }
+}
+
+export interface LoadedAnalyticsSelection {
+  period: AnalyticsPeriod;
+  range: { start: string; end: string };
+}
+
+export function analyticsCsvFilename(
+  selection: LoadedAnalyticsSelection,
+): string {
+  return `aggregate-${selection.period}-${selection.range.start}-${selection.range.end}.csv`;
+}
+
+export function ownerAnalyticsErrorMessage(error: unknown): string {
+  if (!(error instanceof DataRepositoryError)) {
+    if (error instanceof Error && error.message.startsWith('BUSINESS_DATE_')) {
+      return '集計期間は最大366日まで指定できます';
+    }
+    return '集計データの読み込みに失敗しました';
+  }
+  switch (error.code) {
+    case 'DATA_UNAUTHORIZED':
+      return '权限不足，请重新以老板账号登录';
+    case 'DATA_PAGINATION_FAILED':
+      return '分页读取失败，请重试';
+    case 'DATA_NETWORK_ERROR':
+      return '网络异常，请确认连接后重试';
+    case 'DATA_NOT_FOUND':
+      return 'レジ底銭設定が見つかりません。設定画面で登録してください';
+    case 'DATA_CONFLICT':
+      return '数据发生冲突，请刷新后重试';
+    default:
+      return '集計データの読み込みに失敗しました';
+  }
 }
 
 export async function loadOwnerAnalytics(
@@ -25,26 +67,31 @@ export async function loadOwnerAnalytics(
   registerFloatAmount: number;
   analytics: ReportAnalytics;
 }> {
+  assertAnalyticsLoadCurrent(options);
   const range = tokyoPeriodRange(options.period, options.anchorDate);
   const dates = businessDateRange(range.start, range.end);
-  const setting = await options.getSetting('default').catch((error: unknown) => {
-    if (
-      error instanceof DataRepositoryError &&
-      error.code === 'DATA_NOT_FOUND'
-    ) {
-      return null;
-    }
-    throw error;
-  });
+  const setting = await options.getSetting('default');
+  assertAnalyticsLoadCurrent(options);
+  const shifts = await options.listShifts();
+  assertAnalyticsLoadCurrent(options);
+  const shiftSortOrders = new Map(
+    shifts
+      .filter((shift): shift is { id: string; sortOrder: number } =>
+        shift !== null,
+      )
+      .map((shift) => [shift.id, shift.sortOrder] as const),
+  );
   const reports: AnalyticsReport[] = [];
 
   for (let index = 0; index < dates.length; index += 10) {
+    assertAnalyticsLoadCurrent(options);
     const batch = dates.slice(index, index + 10);
     const results = await Promise.all(
       batch.map((businessDate) =>
         options.listByBusinessDate(businessDate),
       ),
     );
+    assertAnalyticsLoadCurrent(options);
     reports.push(
       ...results
         .flat()
@@ -52,11 +99,16 @@ export async function loadOwnerAnalytics(
     );
   }
 
-  const registerFloatAmount = setting?.registerFloatAmount ?? 0;
+  const registerFloatAmount = setting.registerFloatAmount;
+  assertAnalyticsLoadCurrent(options);
   return {
     range,
     registerFloatAmount,
-    analytics: buildReportAnalytics(reports, registerFloatAmount),
+    analytics: buildReportAnalytics(
+      reports,
+      registerFloatAmount,
+      shiftSortOrders,
+    ),
   };
 }
 </script>
@@ -77,6 +129,7 @@ const anchorDate = shallowRef(todayTokyo());
 const loading = shallowRef(false);
 const range = shallowRef<{ start: string; end: string } | null>(null);
 const analytics = shallowRef<ReportAnalytics | null>(null);
+const loadedSelection = shallowRef<LoadedAnalyticsSelection | null>(null);
 let loadGeneration = 0;
 
 const chartEl = useTemplateRef<HTMLDivElement>('chartEl');
@@ -93,29 +146,6 @@ const headline = computed(() => {
 const dayRows = computed(() =>
   period.value === 'day' ? (analytics.value?.rows ?? []) : [],
 );
-
-function ownerAnalyticsErrorMessage(error: unknown): string {
-  if (!(error instanceof DataRepositoryError)) {
-    if (error instanceof Error && error.message.startsWith('BUSINESS_DATE_')) {
-      return '集計期間は最大366日まで指定できます';
-    }
-    return '集計データの読み込みに失敗しました';
-  }
-  switch (error.code) {
-    case 'DATA_UNAUTHORIZED':
-      return '权限不足，请重新以老板账号登录';
-    case 'DATA_PAGINATION_FAILED':
-      return '分页读取失败，请重试';
-    case 'DATA_NETWORK_ERROR':
-      return '网络异常，请确认连接后重试';
-    case 'DATA_NOT_FOUND':
-      return '未找到指定数据，可能已被修改';
-    case 'DATA_CONFLICT':
-      return '数据发生冲突，请刷新后重试';
-    default:
-      return '集計データの読み込みに失敗しました';
-  }
-}
 
 function formatJaDate(value: string): string {
   const [year, month, day] = value.split('-').map(Number);
@@ -135,26 +165,36 @@ function renderChart(value: ReportAnalytics): void {
 
 async function load(): Promise<void> {
   const generation = ++loadGeneration;
+  const requestedPeriod = period.value;
+  const requestedAnchorDate = anchorDate.value;
+  loadedSelection.value = null;
   loading.value = true;
   try {
     const loaded = await loadOwnerAnalytics({
-      period: period.value,
-      anchorDate: anchorDate.value,
+      period: requestedPeriod,
+      anchorDate: requestedAnchorDate,
       listByBusinessDate: (businessDate) =>
         dailyReportsRepository.listByBusinessDate(
           businessDate,
         ) as Promise<Array<AnalyticsReport | null>>,
       getSetting: (id) => ownerMasterDataRepository.getSetting(id),
+      listShifts: () => ownerMasterDataRepository.listShifts(),
+      isCurrent: () => generation === loadGeneration,
     });
     if (generation !== loadGeneration) return;
     range.value = loaded.range;
     analytics.value = loaded.analytics;
+    loadedSelection.value = {
+      period: requestedPeriod,
+      range: loaded.range,
+    };
     await nextTick();
     if (generation === loadGeneration) renderChart(loaded.analytics);
   } catch (error: unknown) {
     if (generation !== loadGeneration) return;
     range.value = null;
     analytics.value = null;
+    loadedSelection.value = null;
     ElMessage.error(ownerAnalyticsErrorMessage(error));
   } finally {
     if (generation === loadGeneration) loading.value = false;
@@ -162,10 +202,10 @@ async function load(): Promise<void> {
 }
 
 function downloadCsv(): void {
-  if (!analytics.value) return;
+  if (!analytics.value || !loadedSelection.value) return;
   downloadCsvFile(
     buildReportCsv(analytics.value.rows),
-    `aggregate-${period.value}-${anchorDate.value}.csv`,
+    analyticsCsvFilename(loadedSelection.value),
   );
 }
 
@@ -204,7 +244,7 @@ watch([period, anchorDate], () => void load(), { immediate: true });
           <el-button :loading="loading" @click="load">再集計</el-button>
           <el-button
             type="primary"
-            :disabled="!analytics || loading"
+            :disabled="!analytics || !loadedSelection || loading"
             @click="downloadCsv"
           >
             CSV を出力

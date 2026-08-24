@@ -10,12 +10,31 @@ export function useEchartsBarChart(
   chartEl: Readonly<Ref<HTMLDivElement | null>>,
 ) {
   const chart = shallowRef<echarts.ECharts | null>(null);
+  let chartHost: HTMLDivElement | null = null;
+  let resizeListenerAttached = false;
+
+  function disposeChart(): void {
+    chart.value?.dispose();
+    chart.value = null;
+    chartHost = null;
+  }
 
   function ensureChart(): echarts.ECharts | null {
-    if (!chartEl.value) return null;
+    const nextHost = chartEl.value;
+    if (!nextHost) {
+      disposeChart();
+      return null;
+    }
+    if (chart.value && chartHost !== nextHost) {
+      disposeChart();
+    }
     if (!chart.value) {
-      chart.value = echarts.init(chartEl.value);
-      window.addEventListener('resize', resize);
+      chart.value = echarts.init(nextHost);
+      chartHost = nextHost;
+      if (!resizeListenerAttached) {
+        window.addEventListener('resize', resize);
+        resizeListenerAttached = true;
+      }
     }
     return chart.value;
   }
@@ -43,9 +62,11 @@ export function useEchartsBarChart(
   }
 
   onBeforeUnmount(() => {
-    window.removeEventListener('resize', resize);
-    chart.value?.dispose();
-    chart.value = null;
+    if (resizeListenerAttached) {
+      window.removeEventListener('resize', resize);
+      resizeListenerAttached = false;
+    }
+    disposeChart();
   });
 
   return { setBarData, resize };
