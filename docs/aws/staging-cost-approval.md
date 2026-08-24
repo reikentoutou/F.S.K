@@ -5,7 +5,7 @@
 | 字段 | 值 |
 | --- | --- |
 | Gate | 首次 staging AWS 写入 |
-| GateStatus | `APPROVED_FOUNDATION` |
+| GateStatus | `FOUNDATION_DEPLOYED_VERIFIED` |
 | ApprovalId | `FSK-FOUNDATION-20260823-221547-JST` |
 | Approver | `reiken` |
 | ApprovedAtJst | `2026-08-23 22:15:47 JST` |
@@ -16,7 +16,7 @@
 | Git deployment point | `fsk-staging-data-api-foundation-v1` |
 | MonthlyCeilingJpy | `5000` |
 
-`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。本记录只批准 Foundation：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。完整 backend、Hosting、Budget/alarms、Destroy、Migration 和真实数据迁移均未批准；本文也不表示已经发生 AWS 写入。
+`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。Foundation 已按本页批准范围完成部署和只读验收：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。完整 backend、Hosting、Budget/alarms、Destroy、Migration 和真实数据迁移仍未批准，也未执行。
 
 ## 成本模型
 
@@ -42,14 +42,14 @@
 
 | 成本项 | 阶段 | 计费驱动与边界 | 部署日价格证据 | 部署后实际复查 |
 | --- | --- | --- | --- | --- |
-| Aurora Serverless v2 活跃 ACU | Foundation | `0–1 ACU`；按活跃 ACU 秒计费；空闲必须实测回到 0 | `AWS Price List APN1 Aurora PostgreSQL ServerlessV2Usage: US$0.15/ACU-hour` | `PENDING_DEPLOYMENT` |
-| Aurora 数据库存储/I/O/自动备份 | Foundation | `fsk_staging` 合成数据；备份保留 14 天 | `AWS Price List APN1: US$0.12/GB-month; US$0.24/million I/O; US$0.023/backup GB-month over allocation` | `PENDING_DEPLOYMENT` |
+| Aurora Serverless v2 活跃 ACU | Foundation | `0–1 ACU`；按活跃 ACU 秒计费；空闲必须实测回到 0 | `AWS Price List APN1 Aurora PostgreSQL ServerlessV2Usage: US$0.15/ACU-hour` | `DEPLOYED_VERIFIED: 0.0 ACU observed at 2026-08-24 05:47 UTC` |
+| Aurora 数据库存储/I/O/自动备份 | Foundation | `fsk_staging` 合成数据；备份保留 14 天 | `AWS Price List APN1: US$0.12/GB-month; US$0.24/million I/O; US$0.023/backup GB-month over allocation` | `DEPLOYED: one encrypted Aurora cluster and one db.serverless writer; no data migration` |
 | Aurora final snapshot | Destroy | 仅在单独批准的销毁流程创建；按 GB-month 持续计费 | `PENDING_RATE_LOOKUP` | `PENDING_DESTROY_GATE` |
-| S3 Gateway VPC Endpoint | Foundation | 无固定小时费；仍计算 S3 请求和传输 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
-| Cognito | Foundation | 仅合成 staging 用户；按当期 MAU 规则复核 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
-| S3 对象、请求和版本 | Foundation/Hosting | pending、test、migration 使用短生命周期；正式对象及版本可能持续保留 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
-| Secrets Manager | Foundation/Full backend | Aurora generated Secret 的 secret-month 和 API 调用 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
-| Amplify 平台 custom-resource Functions/Logs | Foundation | branch linker/provider 的部署调用、执行时间和日志 | `PENDING_RATE_LOOKUP` | `PENDING_DEPLOYMENT` |
+| S3 Gateway VPC Endpoint | Foundation | 无固定小时费；仍计算 S3 请求和传输 | `PENDING_RATE_LOOKUP` | `DEPLOYED_VERIFIED: exactly one Gateway endpoint; no Interface endpoint` |
+| Cognito | Foundation | 仅合成 staging 用户；按当期 MAU 规则复核 | `PENDING_RATE_LOOKUP` | `DEPLOYED: admin-created users only; no guest identities; no users seeded` |
+| S3 对象、请求和版本 | Foundation/Hosting | pending、test、migration 使用短生命周期；正式对象及版本可能持续保留 | `PENDING_RATE_LOOKUP` | `DEPLOYED: private, versioned, retained; no uploads migrated` |
+| Secrets Manager | Foundation/Full backend | Aurora generated Secret 的 secret-month 和 API 调用 | `PENDING_RATE_LOOKUP` | `DEPLOYED: generated Aurora Secret; value not read or recorded` |
+| Amplify 平台 custom-resource Functions/Logs | Foundation | branch linker/provider 的部署调用、执行时间和日志 | `PENDING_RATE_LOOKUP` | `DEPLOYED_VERIFIED: exactly two platform linker/provider Functions` |
 | CloudShell VPC 临时 NAT/IGW/EIP/运维 SG | Migration | 只在批准窗口内存在；从创建到稳定零残留计费 | `PENDING_RATE_LOOKUP` | `PENDING_MIGRATION` |
 | RDS Data API calls | Full backend | 参数化语句、事务和返回数据量；不建立业务 TCP 连接池 | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
 | API Gateway HTTP API | Full backend | Kitchen/Admin API 请求和数据传输 | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
@@ -59,6 +59,40 @@
 | Budgets、Cost Anomaly Detection、alarms | Budget/alarms | 预算、通知、指标和日志；单独写入批准 | `PENDING_RATE_LOOKUP` | `PENDING_BUDGET_GATE` |
 
 持续网络固定为：无 NAT Gateway、无 Interface Endpoint、无数据库 `5432` ingress。Migration 可在审批窗口内创建带 operation token 的临时 NAT/IGW/EIP 和临时运维 SG；临时状态参数只能经该临时出口访问，并在稳定零残留确认前删除。任何长期网络资源都会使批准立即失效。
+
+## Foundation 部署执行证据
+
+| 字段 | 值 |
+| --- | --- |
+| DeploymentStatus | `FOUNDATION_DEPLOYED_VERIFIED` |
+| DeployedAtUtc | `2026-08-24 05:44:30 UTC` |
+| AWS Account | `444083008754` |
+| Region | `ap-northeast-1` |
+| AmplifyAppId | `d2ztmb4nlq3clr` |
+| AmplifyBranch | `staging` |
+| DeployedCommit | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715` |
+| DeployedTag | `fsk-staging-data-api-foundation-v1` |
+| FoundationStackStatus | `FskStagingFoundation / CREATE_COMPLETE` |
+| AmplifyStackStatus | `amplify-d2ztmb4nlq3clr-staging-branch-08a82c5fa9 / CREATE_COMPLETE` |
+| AutoBuild | `false` |
+| InitialHostingJobStatus | `1 / CANCELLED / commit HEAD` |
+| AuroraEngineVersion | `aurora-postgresql 18.4` |
+| AuroraAcuRange | `0–1 ACU` |
+| AuroraAutoPauseSeconds | `300` |
+| AuroraIdleObservedAcu | `0.0 at 2026-08-24 05:47:00 UTC` |
+| PersistentNatGateways | `0` |
+| PersistentInternetGateways | `0` |
+| PersistentInterfaceEndpoints | `0` |
+| DatabaseIngressRuleCount | `0` |
+| HostingStatus | `NOT_DEPLOYED` |
+| MigrationStatus | `NOT_RUN` |
+| FullBackendStatus | `NOT_DEPLOYED` |
+
+权威部署来自 target-account CloudShell 的 detached approved commit。首次 Amplify bootstrap job 的 commit 只显示 `HEAD`，因此在发布 Hosting 前已取消；随后关闭 Auto build，并用 `ampx pipeline-deploy` 完成 Foundation reconciliation。两个 CloudFormation 栈均为 `CREATE_COMPLETE`。
+
+只读运行态验收确认：Data API 和 deletion protection 开启；Writer 为私有、加密的 `db.serverless`，无 RDS Proxy；VPC 没有 NAT、IGW、默认公网路由或公网子网，只有一个 S3 Gateway Endpoint，数据库安全组无入站规则。CloudWatch `ServerlessDatabaseCapacity` 在 `05:47 UTC` 为 `0.0`，RDS 事件在 `05:46:48 UTC` 记录 Writer 成功暂停。
+
+Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 天生命周期；Cognito 只允许管理员创建用户、禁止 guest，只有 `ADMIN`/`KITCHEN` 两组且未 seed 用户。主栈只有两个 Amplify Branch Linker 平台 Functions，没有业务 Function、HTTP API 或 Hosting 发布。证据未读取或记录 Secret 值、连接串、token、真实用户或账务 payload。
 
 ## 六个独立写入阶段
 

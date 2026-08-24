@@ -482,9 +482,9 @@ describe('foundation backend composition', () => {
 });
 
 describe('staging deployment documentation contracts', () => {
-  it('approves only Foundation while keeping the other five write stages pending', () => {
+  it('records a verified Foundation deployment while keeping the other five write stages pending', () => {
     expect(documentFieldValues(COST_APPROVAL, 'GateStatus')).toEqual([
-      'APPROVED_FOUNDATION',
+      'FOUNDATION_DEPLOYED_VERIFIED',
     ]);
     expect(documentFieldValues(COST_APPROVAL, 'LowUseMonthlyJpy')).toContain(
       '约 ¥1,000',
@@ -511,6 +511,43 @@ describe('staging deployment documentation contracts', () => {
       ['Budget/alarms', 'Budget、费用异常检测、指标和告警', 'PENDING_USER_APPROVAL'],
       ['Destroy', 'App/branch/stacks/保留资源/远程 ref 的逐项销毁', 'PENDING_USER_APPROVAL'],
     ]);
+  });
+
+  it('binds the deployed Foundation to the exact App, source, stacks, and cost controls', () => {
+    const expectedEvidence = {
+      DeploymentStatus: ['FOUNDATION_DEPLOYED_VERIFIED'],
+      DeployedAtUtc: ['2026-08-24 05:44:30 UTC'],
+      AmplifyAppId: ['d2ztmb4nlq3clr'],
+      AmplifyBranch: ['staging'],
+      DeployedCommit: ['dcff57ebc9bc6d77fbb51072b996834f5a5ca715'],
+      DeployedTag: ['fsk-staging-data-api-foundation-v1'],
+      FoundationStackStatus: ['FskStagingFoundation / CREATE_COMPLETE'],
+      AmplifyStackStatus: [
+        'amplify-d2ztmb4nlq3clr-staging-branch-08a82c5fa9 / CREATE_COMPLETE',
+      ],
+      AutoBuild: ['false'],
+      InitialHostingJobStatus: ['1 / CANCELLED / commit HEAD'],
+      AuroraEngineVersion: ['aurora-postgresql 18.4'],
+      AuroraAcuRange: ['0–1 ACU'],
+      AuroraAutoPauseSeconds: ['300'],
+      AuroraIdleObservedAcu: ['0.0 at 2026-08-24 05:47:00 UTC'],
+      PersistentNatGateways: ['0'],
+      PersistentInternetGateways: ['0'],
+      PersistentInterfaceEndpoints: ['0'],
+      DatabaseIngressRuleCount: ['0'],
+      HostingStatus: ['NOT_DEPLOYED'],
+      MigrationStatus: ['NOT_RUN'],
+      FullBackendStatus: ['NOT_DEPLOYED'],
+    };
+
+    expect(
+      Object.fromEntries(
+        Object.keys(expectedEvidence).map((field) => [
+          field,
+          documentFieldValues(COST_APPROVAL, field),
+        ]),
+      ),
+    ).toEqual(expectedEvidence);
   });
 
   it('binds every required Foundation approval evidence field exactly', () => {

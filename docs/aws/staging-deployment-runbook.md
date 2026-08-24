@@ -4,7 +4,7 @@
 
 本文是长期 stage/gate 编排器，不承载临时网络或数据库操作。Migration 的 control/worker、临时 NAT/IGW/EIP、临时运维 SG、数据库 migration、失败恢复和清理只按 [`staging-migration-runbook.md`](./staging-migration-runbook.md) 执行。
 
-当前成本门见 [`staging-cost-approval.md`](./staging-cost-approval.md)：`GateStatus=NOT_APPROVED`。本文中的命令只是获得相应阶段批准后的执行模板；当前不得执行任何 AWS 或远程 Git 写入。
+当前成本门见 [`staging-cost-approval.md`](./staging-cost-approval.md)：`GateStatus=FOUNDATION_DEPLOYED_VERIFIED`。Foundation 已按批准范围执行并验收；本文其余命令仍只是获得对应独立批准后的执行模板，当前不得执行 Migration、Full backend、Hosting、Budget/alarms 或 Destroy 写入。
 
 长期架构固定为：
 
@@ -21,7 +21,7 @@
 
 | 顺序 | 阶段 | 写入范围 | 当前状态 |
 | --- | --- | --- | --- |
-| 1 | Foundation | App/branch、Auth、Storage、VPC、Aurora/Data API | `PENDING_USER_APPROVAL` |
+| 1 | Foundation | App/branch、Auth、Storage、VPC、Aurora/Data API | `COMPLETE_VERIFIED / FSK-FOUNDATION-20260823-221547-JST` |
 | 2 | Migration | CloudShell VPC、临时网络/运维访问、临时状态、DDL | `PENDING_USER_APPROVAL` |
 | 3 | Full backend | HTTP API、Kitchen/Admin/Export Functions、最小 IAM | `PENDING_USER_APPROVAL` |
 | 4 | Hosting | Vue/PWA build 和 delivery | `PENDING_USER_APPROVAL` |
@@ -127,6 +127,21 @@ git switch RE/amplify-gen2-staging-implementation
 ```
 
 验证 stack outputs 和合成资源：Aurora private、Data API enabled、`0–1 ACU`、无 Proxy/长期网络；S3 private/versioned/retained；Cognito 禁止 self sign-up 和 guest；仅两个平台 custom-resource Functions，无业务 Functions。`amplify_outputs.json` 只核对且保持 ignored。
+
+### 3.1 已执行证据（2026-08-24）
+
+- target account/region：`444083008754` / `ap-northeast-1`；App `d2ztmb4nlq3clr`，branch `staging`，Auto build 为 `false`。
+- remote annotated tag peeled commit、remote `staging` branch 和 detached CloudShell HEAD 均为 `dcff57ebc9bc6d77fbb51072b996834f5a5ca715`。
+- 首次 Hosting/bootstrap job `1` 的 commit 显示 `HEAD`，已取消为 `CANCELLED`；没有发布 Hosting。权威 `pipeline-deploy` 于 `2026-08-24 05:44:30 UTC` 完成。
+- `FskStagingFoundation` 和 `amplify-d2ztmb4nlq3clr-staging-branch-08a82c5fa9` 均为 `CREATE_COMPLETE`。
+- Aurora PostgreSQL `18.4`：Data API、deletion protection、storage encryption 开启；`0–1 ACU`、Auto Pause `300s`、私有 `db.serverless` Writer、无 RDS Proxy。CloudWatch 在 `05:47 UTC` 实测 `0.0 ACU`，RDS 事件确认成功暂停。
+- 持续网络：NAT `0`、IGW `0`、Interface Endpoint `0`、数据库 ingress `0`；4 个 subnet 均无 public-IP auto assign；只有一个 S3 Gateway Endpoint。
+- Storage：public block 全开、bucket policy 非 public、SSE-S3、versioning enabled、Deletion/UpdateReplace policy 为 `Retain`；三个临时 prefix 均 7 天过期。
+- Cognito：管理员创建用户 only、guest `false`、无 email/phone alias/auto verification、恢复方式 `admin_only`；只有 `ADMIN`、`KITCHEN` group，未 seed 用户。
+- 主栈只有两个 Amplify Branch Linker 平台 Lambda；没有业务 Functions、HTTP API、Migration、真实 SQLite/users/uploads 或 Secret 值读取。
+- `apps/web/public/amplify_outputs.json` 只在 CloudShell 临时 checkout 生成并核对；仓库仍忽略该文件。
+
+Foundation 在此暂停。进入下一阶段必须取得单独 Migration ApprovalId；本次 Foundation ApprovalId 不授权任何后续写入。
 
 ## 4. Migration
 
