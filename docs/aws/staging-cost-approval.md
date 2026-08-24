@@ -16,7 +16,7 @@
 | Git deployment point | `fsk-staging-data-api-foundation-v1` |
 | MonthlyCeilingJpy | `5000` |
 
-`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。Foundation 已按本页批准范围完成部署和只读验收：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。完整 backend、Hosting、Budget/alarms、Destroy、Migration 和真实数据迁移仍未批准，也未执行。
+`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。Foundation 已按本页批准范围完成部署和只读验收：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。Migration 已获得一次性批准，只允许在下方绑定的 operation tuple 和截止时间内执行合成 DDL/verify 并立即清理；完整 backend、Hosting、Budget/alarms、Destroy 和真实数据迁移仍未批准，也未执行。
 
 ## 成本模型
 
@@ -101,11 +101,34 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 | 写入阶段 | 资源范围 | ApprovalId |
 | --- | --- | --- |
 | Foundation | Auth + Storage + VPC + Aurora/Data API | `FSK-FOUNDATION-20260823-221547-JST` |
-| Migration | CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG | `PENDING_USER_APPROVAL` |
+| Migration | CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG | `FSK-MIGRATION-20260824-145858-JST` |
 | Full backend | HTTP API + Kitchen/Admin/Export Functions | `PENDING_USER_APPROVAL` |
 | Hosting | Vue/PWA | `PENDING_USER_APPROVAL` |
 | Budget/alarms | Budget、费用异常检测、指标和告警 | `PENDING_USER_APPROVAL` |
 | Destroy | App/branch/stacks/保留资源/远程 ref 的逐项销毁 | `PENDING_USER_APPROVAL` |
+
+## Migration 批准证据
+
+| 字段 | 值 |
+| --- | --- |
+| MigrationUserApprovalStatement | `批准在已部署的 FSK staging Foundation 上创建带 operation token 的临时 CloudShell VPC 出口和运维 5432 访问，执行合成数据库 migration/verify 后立即清理；不导入真实 SQLite、用户、bcrypt hash 或 uploads。` |
+| MigrationApprovalMessageOrTaskId | `Codex task user message at 2026-08-24 14:58:58 JST` |
+| MigrationApprovalId | `FSK-MIGRATION-20260824-145858-JST` |
+| MigrationApprovedStage | `Migration` |
+| MigrationApprovedAtJst | `2026-08-24 14:58:58 JST` |
+| MigrationExpiresAtJst | `2026-08-24 17:43:58 JST` |
+| MigrationApprovedCommit | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715` |
+| MigrationApprovedTag | `fsk-staging-data-api-foundation-v1` |
+| MigrationTaskId | `migration-20260824` |
+| MigrationOperationToken | `c4c4eb7f-5665-4039-975f-554f36a8fae0` |
+| MigrationOperationDeadlineEpoch | `1787558338 / 2026-08-24 16:58:58 JST` |
+| MigrationCleanupDeadlineEpoch | `1787561038 / 2026-08-24 17:43:58 JST` |
+| MigrationTemporaryPublicCidr/Az | `10.42.4.0/24 / ap-northeast-1a` |
+| MigrationApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
+| MigrationCostOwner | `reiken` |
+| MigrationCleanupOwner | `reiken` |
+
+本次批准不改变 `MonthlyCeilingJpy=5000`，也不授权真实数据、Full backend 或 Hosting。任何 tuple、CIDR/AZ、两个应用路由表、截止时间或 owner 不一致时立即停止；临时资源必须在 cleanup deadline 前清理并取得稳定零残留证据。
 
 ## 固定批准边界
 

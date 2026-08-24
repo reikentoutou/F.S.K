@@ -131,6 +131,24 @@ const FOUNDATION_APPROVAL_EVIDENCE = {
   CleanupOwner: ['reiken', 'reiken'],
 };
 
+const MIGRATION_APPROVAL_EVIDENCE = {
+  GateStatus: ['APPROVED_MIGRATION'],
+  MigrationApprovalId: ['FSK-MIGRATION-20260824-145858-JST'],
+  'FoundationCommit/Tag/RemoteBranch': [
+    'dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1 / staging',
+  ],
+  TaskId: ['migration-20260824'],
+  OperationToken: ['c4c4eb7f-5665-4039-975f-554f36a8fae0'],
+  OperationDeadlineEpoch: ['1787558338 / 2026-08-24 16:58:58 JST'],
+  CleanupDeadlineEpoch: ['1787561038 / 2026-08-24 17:43:58 JST'],
+  'TemporaryPublicCidr/Az': ['10.42.4.0/24 / ap-northeast-1a'],
+  ApplicationRouteTableIds: [
+    'rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49',
+  ],
+  CostOwner: ['reiken'],
+  CleanupOwner: ['reiken'],
+} as const;
+
 const preBindingApprovalEvidence = (
   document: string,
 ): Record<string, string[]> =>
@@ -482,7 +500,7 @@ describe('foundation backend composition', () => {
 });
 
 describe('staging deployment documentation contracts', () => {
-  it('records a verified Foundation deployment while keeping the other five write stages pending', () => {
+  it('records a verified Foundation deployment and an approved Migration while keeping the other four write stages pending', () => {
     expect(documentFieldValues(COST_APPROVAL, 'GateStatus')).toEqual([
       'FOUNDATION_DEPLOYED_VERIFIED',
     ]);
@@ -505,11 +523,34 @@ describe('staging deployment documentation contracts', () => {
     );
     expect(stages).toEqual([
       ['Foundation', 'Auth + Storage + VPC + Aurora/Data API', 'FSK-FOUNDATION-20260823-221547-JST'],
-      ['Migration', 'CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG', 'PENDING_USER_APPROVAL'],
+      ['Migration', 'CloudShell VPC + 临时 NAT/IGW/EIP + 临时运维 SG', 'FSK-MIGRATION-20260824-145858-JST'],
       ['Full backend', 'HTTP API + Kitchen/Admin/Export Functions', 'PENDING_USER_APPROVAL'],
       ['Hosting', 'Vue/PWA', 'PENDING_USER_APPROVAL'],
       ['Budget/alarms', 'Budget、费用异常检测、指标和告警', 'PENDING_USER_APPROVAL'],
       ['Destroy', 'App/branch/stacks/保留资源/远程 ref 的逐项销毁', 'PENDING_USER_APPROVAL'],
+    ]);
+  });
+
+  it('binds the Migration approval to the exact source, operation tuple, network scope, deadlines, and owners', () => {
+    expect(
+      Object.fromEntries(
+        Object.keys(MIGRATION_APPROVAL_EVIDENCE).map((field) => [
+          field,
+          documentFieldValues(MIGRATION_RUNBOOK, field),
+        ]),
+      ),
+    ).toEqual(MIGRATION_APPROVAL_EVIDENCE);
+
+    expect(documentFieldValues(COST_APPROVAL, 'MigrationApprovalId')).toEqual([
+      'FSK-MIGRATION-20260824-145858-JST',
+    ]);
+    expect(
+      documentFieldValues(COST_APPROVAL, 'MigrationUserApprovalStatement'),
+    ).toEqual([
+      '批准在已部署的 FSK staging Foundation 上创建带 operation token 的临时 CloudShell VPC 出口和运维 5432 访问，执行合成数据库 migration/verify 后立即清理；不导入真实 SQLite、用户、bcrypt hash 或 uploads。',
+    ]);
+    expect(documentFieldValues(COST_APPROVAL, 'MigrationStatus')).toEqual([
+      'NOT_RUN',
     ]);
   });
 

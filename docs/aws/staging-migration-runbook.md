@@ -2,7 +2,7 @@
 
 ## 0. 边界与责任
 
-本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。当前 `GateStatus=NOT_APPROVED`，不得执行下列 AWS 写入命令。
+本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。当前 `GateStatus=APPROVED_MIGRATION`，只允许按第 7 节绑定的 exact operation tuple、网络范围和截止时间执行；任何不一致立即停止。
 
 允许的临时拓扑只有：普通 CloudShell control session、VPC CloudShell worker session、带完整 ownership tuple 的单个运维 SG/数据库 ingress、IGW、public subnet/route table、EIP、NAT，以及两个 application route table 上的临时默认路由。长期状态仍是无 NAT、无 Interface Endpoint、无 `5432` ingress。
 
@@ -1347,12 +1347,15 @@ fsk_control_run_migration() {
 
 | 证据字段 | 值 |
 | --- | --- |
-| MigrationApprovalId | `PENDING_USER_APPROVAL` |
-| FoundationCommit/Tag/RemoteBranch | `PENDING_MIGRATION` |
-| TaskId | `PENDING_MIGRATION` |
-| OperationToken | `PENDING_MIGRATION` |
-| OperationDeadlineEpoch | `PENDING_USER_APPROVAL` |
-| CleanupDeadlineEpoch | `PENDING_USER_APPROVAL` |
+| GateStatus | `APPROVED_MIGRATION` |
+| MigrationApprovalId | `FSK-MIGRATION-20260824-145858-JST` |
+| FoundationCommit/Tag/RemoteBranch | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1 / staging` |
+| TaskId | `migration-20260824` |
+| OperationToken | `c4c4eb7f-5665-4039-975f-554f36a8fae0` |
+| OperationDeadlineEpoch | `1787558338 / 2026-08-24 16:58:58 JST` |
+| CleanupDeadlineEpoch | `1787561038 / 2026-08-24 17:43:58 JST` |
+| TemporaryPublicCidr/Az | `10.42.4.0/24 / ap-northeast-1a` |
+| ApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
 | ControlActor/WatchdogPid | `PENDING_MIGRATION` |
 | WorkerEnvironmentId | `PENDING_MIGRATION` |
 | TemporaryResourceIds | `PENDING_MIGRATION` |
@@ -1363,7 +1366,7 @@ fsk_control_run_migration() {
 | WorkerEnvironmentDeleted | `PENDING_MIGRATION` |
 | StableZeroObservations/Duration | `PENDING_MIGRATION` |
 | FinalResidualCount | `PENDING_MIGRATION` |
-| CostOwner | `PENDING_USER_APPROVAL` |
-| CleanupOwner | `PENDING_USER_APPROVAL` |
+| CostOwner | `reiken` |
+| CleanupOwner | `reiken` |
 
-任何 cleanup 查询失败、未知 owner、deadline 超时或残留非零都写 `BLOCKED`，保留费用责任并停止 Full backend。当前没有 AWS 资源已创建，也没有 Migration 获得批准。
+任何 cleanup 查询失败、未知 owner、deadline 超时或残留非零都写 `BLOCKED`，保留费用责任并停止 Full backend。Migration 已获得上述一次性批准；写入开始前仍须复验初始残留为 0，且当前尚未创建本次 Migration 临时资源。
