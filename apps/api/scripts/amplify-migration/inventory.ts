@@ -5,6 +5,8 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path
 import type {
   AttachmentManifestEntry,
   LegacyReportAttachmentHint,
+  SourceUploadEvidence,
+  UploadInventory,
 } from './contracts';
 
 const UNSAFE_FORMAT_CONTROL_PATTERN =
@@ -19,14 +21,21 @@ export interface InventoryFileContext {
 export interface InventorySafetyHooks {
   beforeOpen?(context: InventoryFileContext): void | Promise<void>;
   afterRead?(context: InventoryFileContext): void | Promise<void>;
+  beforeFinalTreeCheck?(): void | Promise<void>;
 }
 
 interface SourceFile extends InventoryFileContext {
   canonicalParent: string;
   parentDevice: bigint;
   parentInode: bigint;
-  fileDevice: bigint;
-  fileInode: bigint;
+  initialStat: BigIntStats;
+}
+
+interface SourceDirectory {
+  declaredPath: string;
+  canonicalPath: string;
+  initialStat: BigIntStats;
+  entryNames: string[];
 }
 
 function compareText(left: string, right: string): number {
@@ -129,11 +138,7 @@ async function readFileForHash(
       constants.O_RDONLY | constants.O_NOFOLLOW,
     );
     const before = await handle.stat({ bigint: true });
-    if (
-      !before.isFile() ||
-      before.dev !== sourceFile.fileDevice ||
-      before.ino !== sourceFile.fileInode
-    ) {
+    if (!before.isFile() || !sameFileState(before, sourceFile.initialStat)) {
       throw new Error('UPLOAD_PATH_NOT_CANONICAL');
     }
     const bytes = await handle.readFile();
@@ -157,31 +162,60 @@ async function readFileForHash(
   }
 }
 
+async function assertTreeStable(
+  sourceDirectories: SourceDirectory[],
+  sourceFiles: SourceFile[],
+): Promise<void> {
+  try {
+    for (const directory of sourceDirectories) {
+      const stat = await lstat(directory.declaredPath, { bigint: true });
+      const canonicalPath = await realpath(directory.declaredPath);
+      const entryNames = (await readdir(directory.declaredPath))
+        .sort(compareText);
+      if (
+        stat.isSymbolicLink() ||
+        !stat.isDirectory() ||
+        canonicalPath !== directory.canonicalPath ||
+        !sameFileState(stat, directory.initialStat) ||
+        entryNames.length !== directory.entryNames.length ||
+        entryNames.some((name, index) => name !== directory.entryNames[index])
+      ) {
+        throw new Error('UPLOAD_TREE_CHANGED');
+      }
+    }
+    for (const sourceFile of sourceFiles) {
+      const stat = await lstat(sourceFile.declaredPath, { bigint: true });
+      if (
+        stat.isSymbolicLink() ||
+        !stat.isFile() ||
+        (await realpath(sourceFile.declaredPath)) !== sourceFile.canonicalPath ||
+        !sameFileState(stat, sourceFile.initialStat)
+      ) {
+        throw new Error('UPLOAD_TREE_CHANGED');
+      }
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'UPLOAD_TREE_CHANGED') {
+      throw error;
+    }
+    throw new Error('UPLOAD_TREE_CHANGED');
+  }
+}
+
 function targetEntries(
   sourceFile: SourceFile,
   hash: { byteSize: number; sha256: string },
   reportKeys: string[],
 ): AttachmentManifestEntry[] {
   const fileName = safeFileName(sourceFile.sourceRelativeKey);
-  if (reportKeys.length === 0) {
-    return [
-      {
-        sourceRelativeKey: sourceFile.sourceRelativeKey,
-        objectKey: `migration/orphans/${hash.sha256}-${fileName}`,
-        ...hash,
-        linkedReportKeys: [],
-        orphan: true,
-      },
-    ];
-  }
+  if (reportKeys.length === 0) return [];
   return reportKeys.map((reportKey) => {
     assertSafeReportKey(reportKey);
     return {
       sourceRelativeKey: sourceFile.sourceRelativeKey,
       objectKey: `migration/daily-reports/${reportKey}/${hash.sha256}-${fileName}`,
       ...hash,
-      linkedReportKeys: [reportKey],
-      orphan: false,
+      reportKey,
     };
   });
 }
@@ -190,7 +224,7 @@ export async function inventoryUploads(
   uploadsPath: string,
   reportHints: LegacyReportAttachmentHint[],
   hooks: InventorySafetyHooks = {},
-): Promise<AttachmentManifestEntry[]> {
+): Promise<UploadInventory> {
   const declaredRoot = resolve(uploadsPath);
   const rootStat = await lstat(declaredRoot, { bigint: true }).catch(() => null);
   if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
@@ -198,12 +232,26 @@ export async function inventoryUploads(
   }
   const canonicalRoot = await realpath(declaredRoot);
   const sourceFiles: SourceFile[] = [];
+  const sourceDirectories: SourceDirectory[] = [];
 
   async function walk(directory: string): Promise<void> {
     const directoryStat = await lstat(directory, { bigint: true });
     const canonicalDirectory = await realpath(directory);
+    if (
+      directoryStat.isSymbolicLink() ||
+      !directoryStat.isDirectory() ||
+      isOutside(canonicalRoot, canonicalDirectory)
+    ) {
+      throw new Error('UPLOAD_PATH_NOT_CANONICAL');
+    }
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => compareText(left.name, right.name));
+    sourceDirectories.push({
+      declaredPath: directory,
+      canonicalPath: canonicalDirectory,
+      initialStat: directoryStat,
+      entryNames: entries.map((entry) => entry.name),
+    });
     for (const entry of entries) {
       const declaredPath = resolve(directory, entry.name);
       const entryStat = await lstat(declaredPath, { bigint: true });
@@ -224,8 +272,7 @@ export async function inventoryUploads(
           canonicalParent: canonicalDirectory,
           parentDevice: directoryStat.dev,
           parentInode: directoryStat.ino,
-          fileDevice: entryStat.dev,
-          fileInode: entryStat.ino,
+          initialStat: entryStat,
         });
       } else {
         throw new Error('UPLOAD_PATH_NOT_CANONICAL');
@@ -236,7 +283,8 @@ export async function inventoryUploads(
   await walk(declaredRoot);
   const sourceKeys = new Set<string>();
   const targetKeys = new Set<string>();
-  const inventory: AttachmentManifestEntry[] = [];
+  const sourceInventory: SourceUploadEvidence[] = [];
+  const targetAttachments: AttachmentManifestEntry[] = [];
   const sortedHints = [...reportHints].sort((left, right) =>
     compareText(left.reportKey, right.reportKey),
   );
@@ -254,15 +302,27 @@ export async function inventoryUploads(
       ),
     ];
     const hash = await readFileForHash(sourceFile, hooks);
+    sourceInventory.push({
+      sourceRelativeKey: sourceFile.sourceRelativeKey,
+      ...hash,
+      linkedReportKeys,
+    });
     for (const entry of targetEntries(sourceFile, hash, linkedReportKeys)) {
       if (targetKeys.has(entry.objectKey)) {
         throw new Error('DUPLICATE_UPLOAD_KEY');
       }
       targetKeys.add(entry.objectKey);
-      inventory.push(entry);
+      targetAttachments.push(entry);
     }
   }
-  return inventory.sort((left, right) =>
-    compareText(left.objectKey, right.objectKey),
-  );
+  await hooks.beforeFinalTreeCheck?.();
+  await assertTreeStable(sourceDirectories, sourceFiles);
+  return {
+    sourceFiles: sourceInventory.sort((left, right) =>
+      compareText(left.sourceRelativeKey, right.sourceRelativeKey),
+    ),
+    targetAttachments: targetAttachments.sort((left, right) =>
+      compareText(left.objectKey, right.objectKey),
+    ),
+  };
 }

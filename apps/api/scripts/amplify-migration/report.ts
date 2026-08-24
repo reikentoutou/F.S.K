@@ -10,6 +10,7 @@ import type {
   MigrationSummary,
   MigrationConflict,
   MigrationWarning,
+  SourceUploadEvidence,
 } from './contracts';
 
 const rawFields: Array<keyof DailyReportRawAmounts> = [
@@ -79,6 +80,7 @@ export function buildMigrationSummary(input: {
   responsiblePersonCount: number;
   appSetting: AppSettingRecord;
   reports: DailyReportRecord[];
+  sourceFiles: SourceUploadEvidence[];
   attachments: AttachmentManifestEntry[];
   warnings: MigrationWarning[];
   conflicts: MigrationConflict[];
@@ -118,7 +120,19 @@ export function buildMigrationSummary(input: {
       attachments: input.attachments.length,
     },
     amounts: { byBusinessDate, global },
-    attachmentSummary: {
+    sourceUploadSummary: {
+      count: input.sourceFiles.length,
+      totalBytes: input.sourceFiles.reduce((sum, entry) => {
+        const next = sum + entry.byteSize;
+        if (!Number.isSafeInteger(next)) throw new Error('MIGRATION_SUM_OVERFLOW');
+        return next;
+      }, 0),
+      hashes: input.sourceFiles.map(({ sourceRelativeKey, sha256 }) => ({
+        sourceRelativeKey,
+        sha256,
+      })),
+    },
+    targetAttachmentSummary: {
       count: input.attachments.length,
       totalBytes: input.attachments.reduce((sum, entry) => {
         const next = sum + entry.byteSize;
@@ -132,9 +146,9 @@ export function buildMigrationSummary(input: {
     },
     warnings: input.warnings,
     conflicts: input.conflicts,
-    orphans: input.attachments
-      .filter((entry) => entry.orphan)
-      .map((entry) => entry.objectKey),
+    orphans: input.sourceFiles
+      .filter((entry) => entry.linkedReportKeys.length === 0)
+      .map(({ linkedReportKeys: _linkedReportKeys, ...entry }) => entry),
   };
 }
 

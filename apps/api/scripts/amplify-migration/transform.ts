@@ -1,13 +1,27 @@
 import {
+  closeSync,
+  constants,
+  fstatSync,
+  ftruncateSync,
+  fsyncSync,
   lstatSync,
-  mkdtempSync,
+  mkdirSync,
+  openSync,
   realpathSync,
-  renameSync,
-  rmSync,
+  rmdirSync,
+  unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   assertDailyReportRawAmounts,
@@ -44,6 +58,7 @@ interface LegacyDailyReportRow {
   expenseReason: unknown;
   staffMealCashYen: unknown;
   staffMealAlipayYen: unknown;
+  status: unknown;
   createdByUserId: unknown;
   updatedAt: unknown;
   username: unknown;
@@ -71,14 +86,6 @@ function compareText(left: string, right: string): number {
 
 function sourceString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`INVALID_SQLITE_SOURCE_FIELD:${field}`);
-  }
-  return value;
-}
-
-function sourceNullableString(value: unknown, field: string): string | null {
-  if (value === null) return null;
-  if (typeof value !== 'string') {
     throw new Error(`INVALID_SQLITE_SOURCE_FIELD:${field}`);
   }
   return value;
@@ -112,7 +119,8 @@ function sourceBoolean(value: unknown, field: string): boolean {
   return value === 1;
 }
 
-const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
+const MIN_TARGET_DATE_EPOCH_MS = -62_135_596_800_000;
+const MAX_TARGET_DATE_EPOCH_MS = 253_402_300_799_999;
 const EXPLICITLY_ZONED_ISO_TIMESTAMP =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(?:Z|[+-](\d{2}):(\d{2}))$/u;
 
@@ -145,6 +153,7 @@ function isValidExplicitIsoTimestamp(value: string): boolean {
     31,
   ];
   return (
+    year >= 1 &&
     month >= 1 &&
     month <= 12 &&
     day >= 1 &&
@@ -161,8 +170,8 @@ export function normalizeLegacySubmittedAt(value: unknown): string {
   if (
     typeof value === 'number' &&
     Number.isSafeInteger(value) &&
-    value >= -MAX_DATE_EPOCH_MS &&
-    value <= MAX_DATE_EPOCH_MS
+    value >= MIN_TARGET_DATE_EPOCH_MS &&
+    value <= MAX_TARGET_DATE_EPOCH_MS
   ) {
     return new Date(value).toISOString();
   }
@@ -173,10 +182,26 @@ export function normalizeLegacySubmittedAt(value: unknown): string {
     throw new Error('INVALID_SQLITE_SOURCE_FIELD:DailyReport.updatedAt');
   }
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
+  const epochMilliseconds = parsed.getTime();
+  if (
+    Number.isNaN(epochMilliseconds) ||
+    epochMilliseconds < MIN_TARGET_DATE_EPOCH_MS ||
+    epochMilliseconds > MAX_TARGET_DATE_EPOCH_MS
+  ) {
     throw new Error('INVALID_SQLITE_SOURCE_FIELD:DailyReport.updatedAt');
   }
   return parsed.toISOString();
+}
+
+function normalizeExpenseReason(value: unknown, expenseYen: number): string | null {
+  if (value !== null && typeof value !== 'string') {
+    throw new Error('INVALID_SQLITE_SOURCE_FIELD:DailyReport.expenseReason');
+  }
+  const normalized = value?.trim() || null;
+  if (expenseYen > 0 && normalized === null) {
+    throw new Error('INVALID_SQLITE_SOURCE_FIELD:DailyReport.expenseReason');
+  }
+  return normalized;
 }
 
 function queryRows<T>(database: DatabaseSync, sql: string): T[] {
@@ -262,7 +287,7 @@ function readSource(sqlitePath: string): {
         report."previousImosBalanceYen", report."currentImosBalanceYen",
         report."newageYen", report."cashTotalYen", report."expenseYen",
         report."expenseReason", report."staffMealCashYen",
-        report."staffMealAlipayYen", report."createdByUserId",
+        report."staffMealAlipayYen", report."status", report."createdByUserId",
         report."updatedAt", user."username"
       FROM "DailyReport" AS report
       LEFT JOIN "User" AS user ON user."id" = report."createdByUserId"
@@ -333,6 +358,14 @@ function readSource(sqlitePath: string): {
         ),
       };
       assertDailyReportRawAmounts(raw);
+      if (row.status !== 'approved') {
+        throw new Error('INVALID_SQLITE_SOURCE_FIELD:DailyReport.status');
+      }
+      const startMinuteOfDay = sourceMinute(row.startMinuteOfDay);
+      const endMinuteOfDay = sourceMinute(row.endMinuteOfDay);
+      if (startMinuteOfDay === endMinuteOfDay) {
+        throw new Error('INVALID_SQLITE_SOURCE_FIELD:DailyReport.timeRange');
+      }
       return {
         sourceId,
         record: {
@@ -348,16 +381,16 @@ function readSource(sqlitePath: string): {
             row.responsiblePersonSnapshot,
             'DailyReport.responsiblePersonSnapshot',
           ),
-          startMinuteOfDay: sourceMinute(row.startMinuteOfDay),
-          endMinuteOfDay: sourceMinute(row.endMinuteOfDay),
+          startMinuteOfDay,
+          endMinuteOfDay,
           timeRangeLabelSnapshot: sourceString(
             row.timeRangeLabelSnapshot,
             'DailyReport.timeRangeLabelSnapshot',
           ),
           ...raw,
-          expenseReason: sourceNullableString(
+          expenseReason: normalizeExpenseReason(
             row.expenseReason,
-            'DailyReport.expenseReason',
+            raw.expenseYen,
           ),
           attachmentKeys: [],
           submittedAt: normalizeLegacySubmittedAt(row.updatedAt),
@@ -394,17 +427,18 @@ export async function createMigrationBundle(
 ): Promise<MigrationBundle> {
   const source = readSource(sqlitePath);
   const conflicts = reportKeyConflicts(source.reports);
-  const attachments = await inventoryUploads(
+  const uploadInventory = await inventoryUploads(
     uploadsPath,
     source.reports.map((report) => ({
       legacyReportId: report.sourceId,
       reportKey: report.record.reportKey,
     })),
   );
+  const attachments = uploadInventory.targetAttachments;
   const dailyReports = source.reports.map(({ record }) => ({
     ...record,
     attachmentKeys: attachments
-      .filter((entry) => entry.linkedReportKeys.includes(record.reportKey))
+      .filter((entry) => entry.reportKey === record.reportKey)
       .map((entry) => entry.objectKey),
   }));
   const warnings = source.reports.map(({ sourceId }) => ({
@@ -416,6 +450,7 @@ export async function createMigrationBundle(
     responsiblePersonCount: source.responsiblePersons.length,
     appSetting: source.appSetting,
     reports: dailyReports,
+    sourceFiles: uploadInventory.sourceFiles,
     attachments,
     warnings,
     conflicts,
@@ -459,9 +494,9 @@ function parseCliArguments(args: string[]): CliArguments {
     throw new Error('MIGRATION_ARGUMENT_REQUIRED');
   }
   return {
-    sqlitePath: values.get('--sqlite')!,
-    uploadsPath: values.get('--uploads')!,
-    outputPath: values.get('--out')!,
+    sqlitePath: resolve(values.get('--sqlite')!),
+    uploadsPath: resolve(values.get('--uploads')!),
+    outputPath: resolve(values.get('--out')!),
   };
 }
 
@@ -531,6 +566,9 @@ interface OutputSafetyContext {
 export interface DryRunSafetyHooks {
   beforeOutputWrite?(context: { outputParent: string }): void | Promise<void>;
   beforeOutputCommit?(context: { outputParent: string }): void | Promise<void>;
+  beforeAnchoredFileWrite?(context: {
+    outputParent: string;
+  }): void | Promise<void>;
 }
 
 function pathIdentity(path: string, kind: 'file' | 'directory'): PathIdentity {
@@ -621,50 +659,283 @@ function createOutputSafetyContext(
   };
 }
 
-function assertOutputSafety(context: OutputSafetyContext): void {
-  let currentParent: PathIdentity;
+interface HeldOutputFile {
+  name: string;
+  fd: number;
+  device: bigint;
+  inode: bigint;
+}
+
+interface AnchoredOutput {
+  originalCwd: string;
+  outputName: string;
+  directory: PathIdentity;
+  directoryFd: number;
+  report: HeldOutputFile;
+  status: HeldOutputFile;
+  bundle?: HeldOutputFile;
+}
+
+function sameDeviceAndInode(
+  left: { dev: bigint; ino: bigint },
+  right: { device: bigint; inode: bigint },
+): boolean {
+  return left.dev === right.device && left.ino === right.inode;
+}
+
+function openHeldOutputFile(name: string): HeldOutputFile {
+  const fd = openSync(
+    name,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW,
+    0o600,
+  );
+  const stat = fstatSync(fd, { bigint: true });
+  if (!stat.isFile() || stat.nlink !== 1n || stat.size !== 0n) {
+    closeSync(fd);
+    throw new Error('MIGRATION_OUTPUT_ANCHOR_FAILED');
+  }
+  return { name, fd, device: stat.dev, inode: stat.ino };
+}
+
+function closeHeldOutputFile(file: HeldOutputFile | undefined): void {
+  if (!file) return;
+  try {
+    closeSync(file.fd);
+  } catch {
+    // Preserve the primary migration result or failure.
+  }
+}
+
+function createAnchoredOutput(context: OutputSafetyContext): AnchoredOutput {
+  const originalCwd = process.cwd();
+  const outputName = basename(context.outputPath);
+  let createdDirectory = false;
+  let enteredDirectory = false;
+  let directoryFd: number | undefined;
+  let report: HeldOutputFile | undefined;
+  let status: HeldOutputFile | undefined;
+  try {
+    process.chdir(context.outputParent.canonicalPath);
+    const parentStat = lstatSync('.', { bigint: true });
+    if (
+      !parentStat.isDirectory() ||
+      !sameDeviceAndInode(parentStat, context.outputParent)
+    ) {
+      throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
+    }
+    mkdirSync(outputName, { mode: 0o700 });
+    createdDirectory = true;
+    process.chdir(outputName);
+    enteredDirectory = true;
+    const directory = pathIdentity('.', 'directory');
+    if (directory.canonicalPath !== context.outputPath) {
+      throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
+    }
+    assertOutputDoesNotOverlap(
+      directory.canonicalPath,
+      context.sqliteSource,
+      context.uploadsSource,
+      context.repositoryRoot,
+    );
+    directoryFd = openSync(
+      '.',
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    report = openHeldOutputFile('migration-report.json');
+    status = openHeldOutputFile('migration-status.json');
+    replaceHeldOutputFile(
+      status,
+      `${JSON.stringify({ status: 'in-progress', errorCode: null }, null, 2)}\n`,
+    );
+    return {
+      originalCwd,
+      outputName,
+      directory,
+      directoryFd,
+      report,
+      status,
+    };
+  } catch (error) {
+    closeHeldOutputFile(report);
+    closeHeldOutputFile(status);
+    if (directoryFd !== undefined) closeSync(directoryFd);
+    try {
+      if (enteredDirectory) {
+        for (const name of ['migration-report.json', 'migration-status.json']) {
+          try {
+            unlinkSync(name);
+          } catch {
+            // Best-effort cleanup within the anchored directory.
+          }
+        }
+        process.chdir('..');
+      }
+      if (createdDirectory) rmdirSync(outputName);
+    } catch {
+      // A safely isolated empty orphan is preferable to path-based cleanup.
+    } finally {
+      process.chdir(originalCwd);
+    }
+    throw error;
+  }
+}
+
+function assertCurrentOutputAnchor(anchor: AnchoredOutput): void {
+  const current = lstatSync('.', { bigint: true });
+  const held = fstatSync(anchor.directoryFd, { bigint: true });
+  if (
+    !current.isDirectory() ||
+    !held.isDirectory() ||
+    current.dev !== held.dev ||
+    current.ino !== held.ino ||
+    !sameDeviceAndInode(held, anchor.directory)
+  ) {
+    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+  }
+}
+
+function writeHeldOutputFile(file: HeldOutputFile, content: string): void {
+  const before = fstatSync(file.fd, { bigint: true });
+  if (!before.isFile() || !sameDeviceAndInode(before, file)) {
+    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+  }
+  writeFileSync(file.fd, content, { encoding: 'utf8' });
+  fsyncSync(file.fd);
+  const after = fstatSync(file.fd, { bigint: true });
+  if (!after.isFile() || !sameDeviceAndInode(after, file)) {
+    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+  }
+}
+
+function replaceHeldOutputFile(file: HeldOutputFile, content: string): void {
+  const before = fstatSync(file.fd, { bigint: true });
+  if (!before.isFile() || !sameDeviceAndInode(before, file)) {
+    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+  }
+  const bytes = Buffer.from(content, 'utf8');
+  ftruncateSync(file.fd, 0);
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    offset += writeSync(
+      file.fd,
+      bytes,
+      offset,
+      bytes.byteLength - offset,
+      offset,
+    );
+  }
+  fsyncSync(file.fd);
+  const after = fstatSync(file.fd, { bigint: true });
+  if (
+    !after.isFile() ||
+    !sameDeviceAndInode(after, file) ||
+    after.size !== BigInt(bytes.byteLength)
+  ) {
+    throw new Error('MIGRATION_OUTPUT_ANCHOR_CHANGED');
+  }
+}
+
+function assertHeldFilePath(file: HeldOutputFile): void {
+  const stat = lstatSync(file.name, { bigint: true });
+  if (
+    stat.isSymbolicLink() ||
+    !stat.isFile() ||
+    !sameDeviceAndInode(stat, file)
+  ) {
+    throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
+  }
+}
+
+function assertAnchoredOutputStillDeclared(
+  context: OutputSafetyContext,
+  anchor: AnchoredOutput,
+): void {
+  let declaredDirectory: PathIdentity;
   let declaredParent: PathIdentity;
   let currentSqlite: PathIdentity;
   let currentUploads: PathIdentity;
   try {
-    currentParent = pathIdentity(
-      context.outputParent.canonicalPath,
-      'directory',
-    );
+    assertCurrentOutputAnchor(anchor);
+    declaredDirectory = pathIdentity(context.outputPath, 'directory');
     declaredParent = pathIdentity(dirname(context.outputPath), 'directory');
     currentSqlite = pathIdentity(context.sqliteSource.canonicalPath, 'file');
     currentUploads = pathIdentity(
       context.uploadsSource.canonicalPath,
       'directory',
     );
+    assertHeldFilePath(anchor.report);
+    assertHeldFilePath(anchor.status);
+    if (anchor.bundle) assertHeldFilePath(anchor.bundle);
   } catch {
     throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
   }
   if (
-    !samePathIdentity(currentParent, context.outputParent) ||
+    !samePathIdentity(declaredDirectory, anchor.directory) ||
     !samePathIdentity(declaredParent, context.outputParent) ||
     !samePathIdentity(currentSqlite, context.sqliteSource) ||
-    !samePathIdentity(currentUploads, context.uploadsSource) ||
-    canonicalFuturePath(context.outputPath) !== context.outputPath
+    !samePathIdentity(currentUploads, context.uploadsSource)
   ) {
     throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
   }
   assertOutputDoesNotOverlap(
-    context.outputPath,
+    declaredDirectory.canonicalPath,
     currentSqlite,
     currentUploads,
     context.repositoryRoot,
   );
+}
+
+function closeAnchoredOutput(anchor: AnchoredOutput): void {
+  closeHeldOutputFile(anchor.bundle);
+  closeHeldOutputFile(anchor.report);
+  closeHeldOutputFile(anchor.status);
   try {
-    lstatSync(context.outputPath);
-    throw new Error('MIGRATION_OUTPUT_ALREADY_EXISTS');
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === 'MIGRATION_OUTPUT_ALREADY_EXISTS'
-    ) {
-      throw error;
+    closeSync(anchor.directoryFd);
+  } catch {
+    // Preserve the primary migration result or failure.
+  }
+  process.chdir(anchor.originalCwd);
+}
+
+function cleanupAnchoredOutput(anchor: AnchoredOutput): void {
+  for (const file of [anchor.bundle, anchor.report, anchor.status]) {
+    if (!file) continue;
+    try {
+      unlinkSync(file.name);
+    } catch {
+      // Do not follow a changed external pathname during cleanup.
     }
+  }
+  try {
+    fsyncSync(anchor.directoryFd);
+  } catch {
+    // Cleanup is best effort after a terminal failure.
+  }
+  closeHeldOutputFile(anchor.bundle);
+  closeHeldOutputFile(anchor.report);
+  closeHeldOutputFile(anchor.status);
+  try {
+    closeSync(anchor.directoryFd);
+  } catch {
+    // Continue restoring cwd; the migration is already terminal.
+  }
+  try {
+    process.chdir('..');
+    const child = lstatSync(anchor.outputName, { bigint: true });
+    if (
+      child.isDirectory() &&
+      !child.isSymbolicLink() &&
+      sameDeviceAndInode(child, anchor.directory)
+    ) {
+      rmdirSync(anchor.outputName);
+    }
+  } catch {
+    // A safely isolated orphan is allowed if its anchored identity changed.
+  } finally {
+    process.chdir(anchor.originalCwd);
   }
 }
 
@@ -675,63 +946,68 @@ export async function runDryRunCli(
 ): Promise<void> {
   const parsed = parseCliArguments(args);
   const safety = createOutputSafetyContext(parsed, repositoryRoot);
-
+  const anchor = createAnchoredOutput(safety);
+  let preserveOutput = false;
   let bundle: MigrationBundle | undefined;
   let summary: MigrationSummary;
   let terminalError: MigrationReportKeyConflictError | undefined;
   try {
-    bundle = await createMigrationBundle(parsed.sqlitePath, parsed.uploadsPath);
-    summary = bundle.sourceSummary;
-  } catch (error) {
-    if (!(error instanceof MigrationReportKeyConflictError)) throw error;
-    summary = error.summary;
-    terminalError = error;
-  }
-  const temporaryOutput = mkdtempSync(join(tmpdir(), 'fsk-migration-output-'));
-  try {
-    const temporaryIdentity = pathIdentity(temporaryOutput, 'directory');
-    assertOutputDoesNotOverlap(
-      temporaryIdentity.canonicalPath,
-      safety.sqliteSource,
-      safety.uploadsSource,
-      repositoryRoot,
-    );
     await hooks.beforeOutputWrite?.({
       outputParent: safety.outputParent.canonicalPath,
     });
-    assertOutputSafety(safety);
-    if (bundle) {
-      writeFileSync(
-        join(temporaryOutput, 'migration-bundle.json'),
-        serializeMigrationBundle(bundle),
-        { mode: 0o600, flag: 'wx' },
-      );
+    assertCurrentOutputAnchor(anchor);
+    try {
+      bundle = await createMigrationBundle(parsed.sqlitePath, parsed.uploadsPath);
+      summary = bundle.sourceSummary;
+    } catch (error) {
+      if (!(error instanceof MigrationReportKeyConflictError)) throw error;
+      summary = error.summary;
+      terminalError = error;
     }
-    writeFileSync(
-      join(temporaryOutput, 'migration-report.json'),
-      serializeMigrationReport(summary),
-      { mode: 0o600, flag: 'wx' },
-    );
     await hooks.beforeOutputCommit?.({
       outputParent: safety.outputParent.canonicalPath,
     });
-    assertOutputSafety(safety);
-    if (
-      !samePathIdentity(
-        pathIdentity(temporaryOutput, 'directory'),
-        temporaryIdentity,
-      )
-    ) {
-      throw new Error('MIGRATION_OUTPUT_PATH_CHANGED');
+    assertCurrentOutputAnchor(anchor);
+    if (bundle) {
+      anchor.bundle = openHeldOutputFile('migration-bundle.json');
     }
-    renameSync(temporaryOutput, safety.outputPath);
-    if (terminalError) throw terminalError;
+    await hooks.beforeAnchoredFileWrite?.({
+      outputParent: safety.outputParent.canonicalPath,
+    });
+    if (bundle && anchor.bundle) {
+      writeHeldOutputFile(anchor.bundle, serializeMigrationBundle(bundle));
+    }
+    writeHeldOutputFile(anchor.report, serializeMigrationReport(summary));
+    fsyncSync(anchor.directoryFd);
+    assertAnchoredOutputStillDeclared(safety, anchor);
+    replaceHeldOutputFile(
+      anchor.status,
+      `${JSON.stringify({
+        status: terminalError ? 'conflict' : 'complete',
+        errorCode: terminalError?.code ?? null,
+      }, null, 2)}\n`,
+    );
+    fsyncSync(anchor.directoryFd);
+    preserveOutput = true;
   } catch (error) {
-    if (!terminalError || error !== terminalError) {
-      rmSync(temporaryOutput, { recursive: true, force: true });
+    try {
+      replaceHeldOutputFile(
+        anchor.status,
+        `${JSON.stringify({
+          status: 'aborted',
+          errorCode: error instanceof Error ? error.message : 'MIGRATION_FAILED',
+        }, null, 2)}\n`,
+      );
+      fsyncSync(anchor.directoryFd);
+    } catch {
+      // The thrown error remains authoritative if even the held status FD fails.
     }
     throw error;
+  } finally {
+    if (preserveOutput) closeAnchoredOutput(anchor);
+    else cleanupAnchoredOutput(anchor);
   }
+  if (terminalError) throw terminalError;
 }
 
 if (require.main === module) {

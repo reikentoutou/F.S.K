@@ -40,8 +40,19 @@ export interface AttachmentManifestEntry {
   objectKey: string;
   byteSize: number;
   sha256: string;
+  reportKey: string;
+}
+
+export interface SourceUploadEvidence {
+  sourceRelativeKey: string;
+  byteSize: number;
+  sha256: string;
   linkedReportKeys: string[];
-  orphan: boolean;
+}
+
+export interface UploadInventory {
+  sourceFiles: SourceUploadEvidence[];
+  targetAttachments: AttachmentManifestEntry[];
 }
 
 export interface MigrationConflict {
@@ -71,14 +82,19 @@ export interface MigrationSummary {
     byBusinessDate: Record<string, ReconciliationAmounts>;
     global: ReconciliationAmounts;
   };
-  attachmentSummary: {
+  sourceUploadSummary: {
+    count: number;
+    totalBytes: number;
+    hashes: Array<{ sourceRelativeKey: string; sha256: string }>;
+  };
+  targetAttachmentSummary: {
     count: number;
     totalBytes: number;
     hashes: Array<{ objectKey: string; sha256: string }>;
   };
   warnings: MigrationWarning[];
   conflicts: MigrationConflict[];
-  orphans: string[];
+  orphans: Array<Omit<SourceUploadEvidence, 'linkedReportKeys'>>;
 }
 
 export interface MigrationBundle {

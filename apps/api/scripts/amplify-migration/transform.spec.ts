@@ -334,8 +334,12 @@ describe('SQLite migration transform', () => {
   it.each([
     ['ambiguous local timestamp', '2026-08-23 15:01:02'],
     ['invalid calendar timestamp', '2026-02-30T15:01:02.000Z'],
+    ['year zero timestamp', '0000-01-01T00:00:00.000Z'],
+    ['offset crossing below target year one', '0001-01-01T00:00:00+00:01'],
+    ['offset crossing above target year 9999', '9999-12-31T23:59:59-00:01'],
     ['fractional epoch milliseconds', 1.5],
     ['epoch milliseconds outside the Date range', 9_000_000_000_000_000],
+    ['epoch milliseconds requiring an expanded UTC year', -8_640_000_000_000_000],
     ['non-finite epoch milliseconds', Number.NaN],
   ])('rejects %s', (_label, invalidTimestamp) => {
     expect(() => normalizeLegacySubmittedAt(invalidTimestamp)).toThrow(
@@ -349,10 +353,12 @@ describe('SQLite migration transform', () => {
     );
   });
 
-  it('accepts a valid epoch-millisecond integer before 1970', () => {
-    expect(normalizeLegacySubmittedAt(-1)).toBe(
-      '1969-12-31T23:59:59.999Z',
-    );
+  it.each([
+    [-62_135_596_800_000, '0001-01-01T00:00:00.000Z'],
+    [-1, '1969-12-31T23:59:59.999Z'],
+    [253_402_300_799_999, '9999-12-31T23:59:59.999Z'],
+  ])('accepts target-safe epoch milliseconds %s', (timestamp, expected) => {
+    expect(normalizeLegacySubmittedAt(timestamp)).toBe(expected);
   });
 
   it('fails when SQLite foreign_key_check reports a broken source relation', async () => {
@@ -432,6 +438,55 @@ describe('SQLite migration transform', () => {
     await expect(
       createMigrationBundle(fixture.sqlitePath, fixture.uploadsPath),
     ).rejects.toThrow('INVALID_SQLITE_SOURCE_FIELD:DailyReport.minuteOfDay');
+  });
+
+  it('rejects an equal start and end minute', async () => {
+    const fixture = createFixture();
+    const database = new DatabaseSync(fixture.sqlitePath);
+    database.exec(
+      'UPDATE "DailyReport" SET "endMinuteOfDay" = "startMinuteOfDay"',
+    );
+    database.close();
+
+    await expect(
+      createMigrationBundle(fixture.sqlitePath, fixture.uploadsPath),
+    ).rejects.toThrow('INVALID_SQLITE_SOURCE_FIELD:DailyReport.timeRange');
+  });
+
+  it('rejects a source status outside the exact approved contract', async () => {
+    const fixture = createFixture();
+    const database = new DatabaseSync(fixture.sqlitePath);
+    database.exec('UPDATE "DailyReport" SET "status" = \'draft\'');
+    database.close();
+
+    await expect(
+      createMigrationBundle(fixture.sqlitePath, fixture.uploadsPath),
+    ).rejects.toThrow('INVALID_SQLITE_SOURCE_FIELD:DailyReport.status');
+  });
+
+  it('requires a nonblank expense reason when expense is positive', async () => {
+    const fixture = createFixture();
+    const database = new DatabaseSync(fixture.sqlitePath);
+    database.exec('UPDATE "DailyReport" SET "expenseReason" = \'   \'');
+    database.close();
+
+    await expect(
+      createMigrationBundle(fixture.sqlitePath, fixture.uploadsPath),
+    ).rejects.toThrow('INVALID_SQLITE_SOURCE_FIELD:DailyReport.expenseReason');
+  });
+
+  it('normalizes a blank zero-expense reason to null without fabricating one', async () => {
+    const fixture = createFixture();
+    const database = new DatabaseSync(fixture.sqlitePath);
+    database.exec(
+      'UPDATE "DailyReport" SET "expenseYen" = 0, "expenseReason" = \'   \'',
+    );
+    database.close();
+
+    const report = (
+      await createMigrationBundle(fixture.sqlitePath, fixture.uploadsPath)
+    ).dailyReports[0];
+    expect(report.expenseReason).toBeNull();
   });
 
   it('rejects a negative shift sort order', async () => {
@@ -568,7 +623,12 @@ describe('SQLite migration transform', () => {
           },
         ],
         orphans: [
-          'migration/orphans/88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7-unlinked.txt',
+          {
+            sourceRelativeKey: 'unlinked.txt',
+            byteSize: 6,
+            sha256:
+              '88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7',
+          },
         ],
       },
     });
@@ -585,7 +645,7 @@ describe('SQLite migration transform', () => {
       responsiblePersons: 2,
       appSettings: 1,
       dailyReports: 1,
-      attachments: 2,
+      attachments: 1,
     });
     expect(summary.amounts).toEqual({
       byBusinessDate: {
@@ -627,55 +687,77 @@ describe('SQLite migration transform', () => {
         },
       },
     });
-    expect(summary.attachmentSummary).toEqual({
+    expect(summary.sourceUploadSummary).toEqual({
       count: 2,
       totalBytes: 17,
       hashes: [
         {
-          objectKey:
-            'migration/daily-reports/2026-08-23#shift-day/1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c-receipt.txt',
+          sourceRelativeKey: 'legacy-report-1/receipt.txt',
           sha256: '1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c',
         },
         {
-          objectKey:
-            'migration/orphans/88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7-unlinked.txt',
+          sourceRelativeKey: 'unlinked.txt',
           sha256: '88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7',
         },
       ],
     });
+    expect(summary.targetAttachmentSummary).toEqual({
+      count: 1,
+      totalBytes: 11,
+      hashes: [
+        {
+          objectKey:
+            'migration/daily-reports/2026-08-23#shift-day/1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c-receipt.txt',
+          sha256:
+            '1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c',
+        },
+      ],
+    });
     expect(summary.orphans).toEqual([
-      'migration/orphans/88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7-unlinked.txt',
+      {
+        sourceRelativeKey: 'unlinked.txt',
+        byteSize: 6,
+        sha256:
+          '88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7',
+      },
     ]);
     expect(summary.conflicts).toEqual([]);
   });
 });
 
 describe('uploads inventory safety', () => {
-  it('records canonical keys, hashes, report clues and orphan state', async () => {
+  it('separates physical source evidence from linked target attachments', async () => {
     const fixture = createFixture();
 
     const inventory = await inventoryUploads(fixture.uploadsPath, [
       { legacyReportId: 'legacy-report-1', reportKey: '2026-08-23#shift-day' },
     ]);
 
-    expect(inventory).toEqual([
+    expect(inventory.sourceFiles).toEqual([
+      {
+        sourceRelativeKey: 'legacy-report-1/receipt.txt',
+        byteSize: 11,
+        sha256:
+          '1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c',
+        linkedReportKeys: ['2026-08-23#shift-day'],
+      },
+      {
+        sourceRelativeKey: 'unlinked.txt',
+        byteSize: 6,
+        sha256:
+          '88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7',
+        linkedReportKeys: [],
+      },
+    ]);
+    expect(inventory.targetAttachments).toEqual([
       {
         sourceRelativeKey: 'legacy-report-1/receipt.txt',
         objectKey:
           'migration/daily-reports/2026-08-23#shift-day/1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c-receipt.txt',
         byteSize: 11,
-        sha256: '1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c',
-        linkedReportKeys: ['2026-08-23#shift-day'],
-        orphan: false,
-      },
-      {
-        sourceRelativeKey: 'unlinked.txt',
-        objectKey:
-          'migration/orphans/88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7-unlinked.txt',
-        byteSize: 6,
-        sha256: '88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7',
-        linkedReportKeys: [],
-        orphan: true,
+        sha256:
+          '1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c',
+        reportKey: '2026-08-23#shift-day',
       },
     ]);
   });
@@ -689,37 +771,49 @@ describe('uploads inventory safety', () => {
     ]);
 
     expect(
-      inventory
-        .filter((entry) => !entry.orphan)
-        .map((entry) => ({
+      inventory.targetAttachments.map((entry) => ({
           objectKey: entry.objectKey,
-          linkedReportKeys: entry.linkedReportKeys,
+          reportKey: entry.reportKey,
         })),
     ).toEqual([
       {
         objectKey:
           'migration/daily-reports/2026-08-23#shift-day/1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c-receipt.txt',
-        linkedReportKeys: ['2026-08-23#shift-day'],
+        reportKey: '2026-08-23#shift-day',
       },
       {
         objectKey:
           'migration/daily-reports/2026-08-24#shift-day/1623126585a29ed7e9f756979339fe046226759931a22138be37316b76c6a36c-receipt.txt',
-        linkedReportKeys: ['2026-08-24#shift-day'],
+        reportKey: '2026-08-24#shift-day',
       },
     ]);
   });
 
-  it('emits attachment keys that Task11 can consume without rewriting reports', async () => {
+  it('emits only linked entries that Task11 can consume unconditionally', async () => {
     const fixture = createFixture();
     const bundle = await createMigrationBundle(
       fixture.sqlitePath,
       fixture.uploadsPath,
     );
 
+    expect(bundle.attachments).toHaveLength(1);
+    for (const attachment of bundle.attachments) {
+      expect(attachment.objectKey).toMatch(
+        new RegExp(
+          `^migration/daily-reports/${attachment.reportKey}/[0-9a-f]{64}-.+`,
+          'u',
+        ),
+      );
+      expect(
+        bundle.dailyReports.find(
+          (report) => report.reportKey === attachment.reportKey,
+        )?.attachmentKeys,
+      ).toContain(attachment.objectKey);
+    }
     for (const report of bundle.dailyReports) {
       expect(report.attachmentKeys).toEqual(
         bundle.attachments
-          .filter((entry) => entry.linkedReportKeys.includes(report.reportKey))
+          .filter((entry) => entry.reportKey === report.reportKey)
           .map((entry) => entry.objectKey),
       );
       expect(report.attachmentKeys).toEqual(
@@ -733,6 +827,11 @@ describe('uploads inventory safety', () => {
         ]),
       );
     }
+    expect(bundle.attachments).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ objectKey: expect.stringContaining('/orphans/') }),
+      ]),
+    );
   });
 
   it('rejects an unsafe bidi filename instead of embedding it in a target key', async () => {
@@ -819,6 +918,55 @@ describe('uploads inventory safety', () => {
         },
       ),
     ).rejects.toThrow('UPLOAD_FILE_CHANGED');
+  });
+
+  it.each([
+    [
+      'an added entry',
+      (fixture: ReturnType<typeof createFixture>) => {
+        writeFileSync(join(fixture.uploadsPath, 'added.txt'), 'added');
+      },
+    ],
+    [
+      'a deleted entry',
+      (fixture: ReturnType<typeof createFixture>) => {
+        rmSync(join(fixture.uploadsPath, 'unlinked.txt'));
+      },
+    ],
+    [
+      'a renamed entry',
+      (fixture: ReturnType<typeof createFixture>) => {
+        renameSync(
+          join(fixture.uploadsPath, 'unlinked.txt'),
+          join(fixture.uploadsPath, 'renamed.txt'),
+        );
+      },
+    ],
+    [
+      'a directory replaced by a symlink',
+      (fixture: ReturnType<typeof createFixture>) => {
+        const directory = join(fixture.uploadsPath, 'legacy-report-1');
+        const moved = join(fixture.root, 'moved-directory');
+        const replacement = join(fixture.root, 'replacement-directory');
+        mkdirSync(replacement);
+        renameSync(directory, moved);
+        symlinkSync(replacement, directory);
+      },
+    ],
+    [
+      'a file mutated after hashing',
+      (fixture: ReturnType<typeof createFixture>) => {
+        writeFileSync(join(fixture.uploadsPath, 'unlinked.txt'), 'change');
+      },
+    ],
+  ])('rejects tree snapshot change from %s', async (_label, mutateTree) => {
+    const fixture = createFixture();
+
+    await expect(
+      inventoryUploads(fixture.uploadsPath, [], {
+        beforeFinalTreeCheck: () => mutateTree(fixture),
+      }),
+    ).rejects.toThrow('UPLOAD_TREE_CHANGED');
   });
 
   it('rejects a special filesystem entry', async () => {
@@ -1001,6 +1149,100 @@ describe('dry-run CLI', () => {
     expect(() => readFileSync(join(outputPath, 'migration-report.json'))).toThrow();
   });
 
+  it('writes only held files when the parent is swapped after the last path check', async () => {
+    const fixture = createFixture();
+    const outputRoot = temporaryRoot();
+    const safeParent = join(outputRoot, 'safe-parent');
+    const movedParent = join(outputRoot, 'moved-parent');
+    mkdirSync(safeParent);
+    const outputPath = join(safeParent, 'result');
+
+    await expect(
+      runDryRunCli(
+        [
+          '--sqlite',
+          fixture.sqlitePath,
+          '--uploads',
+          fixture.uploadsPath,
+          '--out',
+          outputPath,
+        ],
+        repositoryRoot,
+        {
+          beforeAnchoredFileWrite: () => {
+            renameSync(safeParent, movedParent);
+            symlinkSync(fixture.uploadsPath, safeParent);
+          },
+        },
+      ),
+    ).rejects.toThrow('MIGRATION_OUTPUT_PATH_CHANGED');
+    expect(() =>
+      readFileSync(join(fixture.uploadsPath, 'result', 'migration-report.json')),
+    ).toThrow();
+    expect(process.cwd()).toBe(repositoryRoot);
+  });
+
+  it('never writes through a late parent swap into a repository boundary', async () => {
+    const fixture = createFixture();
+    const fakeRepository = temporaryRoot();
+    const outputRoot = temporaryRoot();
+    const safeParent = join(outputRoot, 'safe-parent');
+    const movedParent = join(outputRoot, 'moved-parent');
+    mkdirSync(safeParent);
+    const outputPath = join(safeParent, 'result');
+
+    await expect(
+      runDryRunCli(
+        [
+          '--sqlite',
+          fixture.sqlitePath,
+          '--uploads',
+          fixture.uploadsPath,
+          '--out',
+          outputPath,
+        ],
+        fakeRepository,
+        {
+          beforeAnchoredFileWrite: () => {
+            renameSync(safeParent, movedParent);
+            symlinkSync(fakeRepository, safeParent);
+          },
+        },
+      ),
+    ).rejects.toThrow('MIGRATION_OUTPUT_PATH_CHANGED');
+    expect(() =>
+      readFileSync(join(fakeRepository, 'result', 'migration-report.json')),
+    ).toThrow();
+    expect(process.cwd()).toBe(repositoryRoot);
+  });
+
+  it('marks the anchored output in progress before long source processing', async () => {
+    const fixture = createFixture();
+    const outputPath = join(fixture.root, 'status-output');
+    let observedStatus: unknown;
+
+    await runDryRunCli(
+      [
+        '--sqlite',
+        fixture.sqlitePath,
+        '--uploads',
+        fixture.uploadsPath,
+        '--out',
+        outputPath,
+      ],
+      repositoryRoot,
+      {
+        beforeOutputWrite: () => {
+          observedStatus = JSON.parse(
+            readFileSync(join(outputPath, 'migration-status.json'), 'utf8'),
+          );
+        },
+      },
+    );
+
+    expect(observedStatus).toEqual({ status: 'in-progress', errorCode: null });
+  });
+
   it('writes a deterministic bundle and report outside the repository without changing sources', () => {
     const fixture = createFixture();
     const outputPath = join(fixture.root, 'dry-run-output');
@@ -1023,6 +1265,8 @@ describe('dry-run CLI', () => {
       .toMatchObject({ dailyReports: [{ reportKey: '2026-08-23#shift-day' }] });
     expect(JSON.parse(readFileSync(join(outputPath, 'migration-report.json'), 'utf8')))
       .toMatchObject({ modelCounts: { dailyReports: 1 }, conflicts: [] });
+    expect(JSON.parse(readFileSync(join(outputPath, 'migration-status.json'), 'utf8')))
+      .toEqual({ status: 'complete', errorCode: null });
     expect(sha256(fixture.sqlitePath)).toBe(databaseHashBefore);
     expect(
       sha256(join(fixture.uploadsPath, 'legacy-report-1', 'receipt.txt')),
@@ -1055,8 +1299,19 @@ describe('dry-run CLI', () => {
         },
       ],
       orphans: [
-        'migration/orphans/88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7-unlinked.txt',
+        {
+          sourceRelativeKey: 'unlinked.txt',
+          byteSize: 6,
+          sha256:
+            '88f6811ab5d8fc6d3177f9b7609ae0fcebfda187e5046b62d38bb539e88b74d7',
+        },
       ],
+    });
+    expect(
+      JSON.parse(readFileSync(join(outputPath, 'migration-status.json'), 'utf8')),
+    ).toEqual({
+      status: 'conflict',
+      errorCode: 'MIGRATION_REPORT_KEY_CONFLICT',
     });
     expect(reportBytes.endsWith('\n')).toBe(true);
     expect(() => readFileSync(join(outputPath, 'migration-bundle.json'))).toThrow();
