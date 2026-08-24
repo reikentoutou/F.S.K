@@ -56,15 +56,14 @@ export function validateDailyReportGoToConfirm(opts: {
   /** 仅管理员新建 */
   admin?: {
     isNew: boolean;
-    createdByUserId: string;
     reportDate: string;
     shiftId: string;
   };
 }): string | null {
   const { form, admin } = opts;
   if (admin?.isNew) {
-    if (!admin.createdByUserId || !admin.reportDate || !admin.shiftId) {
-      return '日付・シフト・提出元（網管）を確認してください';
+    if (!admin.reportDate || !admin.shiftId) {
+      return '日付・シフトを確認してください';
     }
   }
   if (!form.responsiblePersonId) {
@@ -93,7 +92,6 @@ export function validateDailyReportSubmit(opts: {
   form: FormSlice;
   admin?: {
     isNew: boolean;
-    createdByUserId: string;
     reportDate: string;
     shiftId: string;
   };
@@ -103,8 +101,8 @@ export function validateDailyReportSubmit(opts: {
     return '責任者を選択してください';
   }
   if (admin?.isNew) {
-    if (!admin.createdByUserId || !admin.reportDate || !admin.shiftId) {
-      return '日付・シフト・提出元（網管）を確認してください';
+    if (!admin.reportDate || !admin.shiftId) {
+      return '日付・シフトを確認してください';
     }
   }
   const amountError = amountValidationError(form);

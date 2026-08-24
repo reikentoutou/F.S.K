@@ -23,8 +23,6 @@ const props = defineProps<{
   expenseReason: string;
   staffMealCashYen: number;
   staffMealAlipayYen: number;
-  showWebmasterRow?: boolean;
-  webmasterLabel?: string;
 }>();
 
 function yen(n: number): string {
@@ -45,13 +43,6 @@ function yen(n: number): string {
         }}
       </p>
     </header>
-
-    <DailyReportSection v-if="showWebmasterRow" title="提出元">
-      <div class="kv-row">
-        <span class="kv-label">網管アカウント</span>
-        <span class="kv-value">{{ webmasterLabel ?? '—' }}</span>
-      </div>
-    </DailyReportSection>
 
     <DailyReportSection title="基本">
       <div class="kv-row">

@@ -5,9 +5,9 @@ import { useAuthStore } from '@/stores/auth';
 const auth = useAuthStore();
 const router = useRouter();
 
-function logout() {
-  auth.logout();
-  router.replace('/login');
+async function logout(): Promise<void> {
+  await auth.logout();
+  await router.replace('/login');
 }
 </script>
 
@@ -26,17 +26,14 @@ function logout() {
         text-color="rgba(244, 239, 230, 0.78)"
         active-text-color="#f2e6c9"
       >
-        <el-menu-item index="/admin/daily">
+        <el-menu-item index="/owner/daily">
           <span class="nav-label">全日報</span>
         </el-menu-item>
-        <el-menu-item index="/admin/settings">
+        <el-menu-item index="/owner/settings">
           <span class="nav-label">マスタ・設定</span>
         </el-menu-item>
-        <el-menu-item index="/admin/analytics">
+        <el-menu-item index="/owner/analytics">
           <span class="nav-label">集計・エクスポート</span>
-        </el-menu-item>
-        <el-menu-item index="/admin/backup">
-          <span class="nav-label">バックアップ・リストア</span>
         </el-menu-item>
       </el-menu>
     </el-aside>
@@ -44,7 +41,7 @@ function logout() {
       <el-header class="head">
         <div class="head-left">
           <span class="head-user">{{ auth.user?.username }}</span>
-          <span class="head-role">管理者</span>
+          <span class="head-role">老板</span>
         </div>
         <el-button class="logout" link type="primary" @click="logout">ログアウト</el-button>
       </el-header>

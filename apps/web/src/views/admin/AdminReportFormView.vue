@@ -1,4 +1,7 @@
 <script lang="ts">
+import type { CreateDailyReportCommand as ReportCommand } from '@/data/daily-reports';
+import { DataRepositoryError as RepositoryError } from '@/data/errors';
+
 export type OwnerReportMode = 'create' | 'edit' | null;
 
 export function ownerReportMode(routeName: unknown): OwnerReportMode {
@@ -8,39 +11,98 @@ export function ownerReportMode(routeName: unknown): OwnerReportMode {
 }
 
 export const ownerDailyPath = '/owner/daily';
+
+export function ownerReportDataErrorMessage(
+  error: unknown,
+  fallback: string,
+): string {
+  if (!(error instanceof RepositoryError)) return fallback;
+  switch (error.code) {
+    case 'DATA_UNAUTHORIZED':
+      return '权限不足，请重新以老板账号登录';
+    case 'DATA_NOT_FOUND':
+      return '未找到指定账务，可能已被修改';
+    case 'REPORT_ALREADY_EXISTS':
+    case 'DATA_CONFLICT':
+      return '该营业日和班次已有账务，或数据发生冲突';
+    case 'DATA_PAGINATION_FAILED':
+      return '分页读取失败，请返回日报后重试';
+    case 'DATA_NETWORK_ERROR':
+    case 'SUBMISSION_RESULT_UNKNOWN':
+      return '网络异常，结果可能不确定，请返回日报确认后再重试';
+    default:
+      return fallback;
+  }
+}
+
+export function loadOwnerReport<T>(
+  reportKey: string,
+  repository: { getByReportKey(reportKey: string): Promise<T> },
+): Promise<T> {
+  return repository.getByReportKey(reportKey);
+}
+
+export function saveOwnerReport<T>(
+  reportKey: string | null,
+  command: ReportCommand,
+  repository: {
+    create(command: ReportCommand): Promise<T>;
+    updateByReportKey(
+      reportKey: string,
+      changes: Omit<ReportCommand, 'businessDate' | 'shiftId'>,
+    ): Promise<T>;
+  },
+): Promise<T> {
+  if (!reportKey) return repository.create(command);
+  const { businessDate: _businessDate, shiftId: _shiftId, ...changes } =
+    command;
+  return repository.updateByReportKey(reportKey, changes);
+}
 </script>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
-import { http } from '@/api/http';
 import { ElMessage } from 'element-plus';
+import { computed, shallowRef, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+
+import DailyReportConfirmSummary from '@/components/daily-report/DailyReportConfirmSummary.vue';
+import DailyReportFormFields from '@/components/daily-report/DailyReportFormFields.vue';
+import { useDailyReportFormState } from '@/composables/useDailyReportFormState';
+import { useDailyReportPreview } from '@/composables/useDailyReportPreview';
+import {
+  dailyReportsRepository,
+  type CreateDailyReportCommand,
+} from '@/data/daily-reports';
+import { DataRepositoryError } from '@/data/errors';
+import { ownerMasterDataRepository } from '@/data/master-data';
 import { confirmCashBeforeSubmit } from '@/utils/coupon-labels';
-import { minuteToHm, parseHmToMinute, wrapEndAfterStart } from '@/utils/time-parse';
 import {
   validateDailyReportGoToConfirm,
   validateDailyReportSubmit,
 } from '@/utils/daily-report-form-validate';
-import { useDailyReportFormState } from '@/composables/useDailyReportFormState';
-import { useDailyReportPreview } from '@/composables/useDailyReportPreview';
-import DailyReportFormFields from '@/components/daily-report/DailyReportFormFields.vue';
-import DailyReportConfirmSummary from '@/components/daily-report/DailyReportConfirmSummary.vue';
-import { httpErrorMessage } from '@/utils/http-error-message';
+import { useAuthStore } from '@/stores/auth';
+
+type LoadedReport = Awaited<
+  ReturnType<typeof dailyReportsRepository.getByReportKey>
+>;
 
 const route = useRoute();
 const router = useRouter();
-
-const loading = ref(true);
-const saving = ref(false);
-const step = ref<'form' | 'confirm'>('form');
-const registerFloatAmount = ref(0);
-const editId = ref<string | null>(null);
-const shiftId = ref('');
-const reportDate = ref('');
-const createdByUserId = ref('');
-const shifts = ref<{ id: string; name: string }[]>([]);
-const persons = ref<{ id: string; name: string }[]>([]);
-const webmasters = ref<{ id: string; username: string }[]>([]);
+const auth = useAuthStore();
+const loading = shallowRef(true);
+const saving = shallowRef(false);
+const step = shallowRef<'form' | 'confirm'>('form');
+const registerFloatAmount = shallowRef(0);
+const reportKey = shallowRef<string | null>(null);
+const shiftId = shallowRef('');
+const businessDate = shallowRef('');
+const existingReport = shallowRef<LoadedReport | null>(null);
+const shifts = shallowRef<
+  Array<{ id: string; name: string; sortOrder: number; active: boolean }>
+>([]);
+const persons = shallowRef<Array<{ id: string; name: string; active: boolean }>>(
+  [],
+);
 const {
   form,
   reset: resetDailyReportForm,
@@ -49,153 +111,184 @@ const {
   buildPayload: buildDailyReportPayload,
 } = useDailyReportFormState();
 
-const isNew = computed(() => !editId.value);
-
+const isNew = computed(() => ownerReportMode(route.name) === 'create');
+const activePersons = computed(() =>
+  isNew.value ? persons.value.filter((person) => person.active) : persons.value,
+);
 const shiftName = computed(
-  () => shifts.value.find((s) => s.id === shiftId.value)?.name ?? '—',
+  () =>
+    existingReport.value?.shiftNameSnapshot ??
+    shifts.value.find((shift) => shift.id === shiftId.value)?.name ??
+    '—',
 );
 const personName = computed(
   () =>
-    persons.value.find((p) => p.id === form.responsiblePersonId)?.name ?? '—',
-);
-const webmasterLabel = computed(
-  () =>
-    webmasters.value.find((w) => w.id === createdByUserId.value)?.username ??
+    persons.value.find((person) => person.id === form.responsiblePersonId)
+      ?.name ??
+    existingReport.value?.responsiblePersonSnapshot ??
     '—',
 );
-
 const preview = useDailyReportPreview(form, registerFloatAmount);
 
-async function loadMeta() {
-  const [{ data: s }, { data: p }, { data: w }, { data: settings }] =
-    await Promise.all([
-      http.get('/meta/shifts'),
-      http.get('/meta/responsible-persons'),
-      http.get('/meta/webmaster-users'),
-      http.get<{ registerFloatAmount?: number } | null>('/meta/settings'),
-    ]);
-  shifts.value = s;
-  persons.value = p;
-  webmasters.value = w;
-  registerFloatAmount.value = settings?.registerFloatAmount ?? 0;
-  setDefaultResponsiblePerson(p[0]?.id);
-}
-
-async function loadExisting(id: string) {
-  const { data } = await http.get(`/daily-reports/${id}`);
-  editId.value = id;
-  shiftId.value = data.shiftId;
-  reportDate.value = data.reportDate;
-  createdByUserId.value = data.createdByUserId;
-  applyExisting(data);
-}
-
-async function loadNewDefaultsFromPreviousShift() {
-  if (!reportDate.value || !shiftId.value) return;
+async function loadSetting(): Promise<number> {
   try {
-    const { data } = await http.get<{ previousShiftEndMinute: number | null }>(
-      '/daily-reports/hint/business-day',
-      { params: { reportDate: reportDate.value, shiftId: shiftId.value } },
-    );
-    if (data.previousShiftEndMinute == null) return;
-    form.startStr = minuteToHm(data.previousShiftEndMinute);
-    const sm = parseHmToMinute(form.startStr);
-    const em = parseHmToMinute(form.endStr);
-    form.endStr = minuteToHm(wrapEndAfterStart(sm, em));
-  } catch {
-    // 仅作时间提示；失败不改变当前表单
+    const setting = await ownerMasterDataRepository.getSetting('default');
+    return setting.registerFloatAmount;
+  } catch (error: unknown) {
+    if (
+      error instanceof DataRepositoryError &&
+      error.code === 'DATA_NOT_FOUND'
+    ) {
+      return 0;
+    }
+    throw error;
   }
 }
 
-function resetFormForNewAdminReport() {
-  resetDailyReportForm(persons.value[0]?.id);
+async function loadMeta(): Promise<void> {
+  const [loadedShifts, loadedPersons, floatAmount] = await Promise.all([
+    ownerMasterDataRepository.listShifts(),
+    ownerMasterDataRepository.listResponsiblePersons(),
+    loadSetting(),
+  ]);
+  shifts.value = loadedShifts
+    .filter((shift): shift is NonNullable<typeof shift> => shift != null)
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+    .map((shift) => ({
+      id: shift.id,
+      name: shift.name,
+      sortOrder: shift.sortOrder,
+      active: shift.active,
+    }));
+  persons.value = loadedPersons
+    .filter((person): person is NonNullable<typeof person> => person != null)
+    .map((person) => ({
+      id: person.id,
+      name: person.name,
+      active: person.active,
+    }));
+  registerFloatAmount.value = floatAmount;
 }
 
-async function loadPage() {
+async function loadExisting(key: string): Promise<void> {
+  const report = await loadOwnerReport(key, dailyReportsRepository);
+  existingReport.value = report;
+  reportKey.value = report.reportKey;
+  shiftId.value = report.shiftId;
+  businessDate.value = report.businessDate;
+  applyExisting(report);
+}
+
+async function loadPage(): Promise<void> {
   loading.value = true;
   step.value = 'form';
+  existingReport.value = null;
   try {
     await loadMeta();
     const mode = ownerReportMode(route.name);
-    if (mode === 'edit' && route.params.id) {
-      await loadExisting(route.params.id as string);
+    if (mode === 'edit') {
+      const key = String(route.params.reportKey ?? '');
+      if (!key) throw new DataRepositoryError('DATA_NOT_FOUND');
+      await loadExisting(key);
     } else if (mode === 'create') {
-      editId.value = null;
-      reportDate.value = (route.query.reportDate as string) || '';
-      shiftId.value = (route.query.shiftId as string) || '';
-      createdByUserId.value = (route.query.createdByUserId as string) || '';
-      resetFormForNewAdminReport();
-      await loadNewDefaultsFromPreviousShift();
+      reportKey.value = null;
+      businessDate.value = String(route.query.businessDate ?? '');
+      shiftId.value = String(route.query.shiftId ?? '');
+      const defaultPerson = persons.value.find((person) => person.active)?.id;
+      resetDailyReportForm(defaultPerson);
+      setDefaultResponsiblePerson(defaultPerson);
     }
-  } catch (e: unknown) {
-    ElMessage.error(httpErrorMessage(e, '読み込みに失敗しました'));
+  } catch (error: unknown) {
+    ElMessage.error(ownerReportDataErrorMessage(error, '読み込みに失敗しました'));
   } finally {
     loading.value = false;
   }
 }
 
 watch(
-  () =>
-    [
-      route.name,
-      route.params.id,
-      route.query.reportDate,
-      route.query.shiftId,
-      route.query.createdByUserId,
-    ] as const,
+  () => [
+    route.name,
+    route.params.reportKey,
+    route.query.businessDate,
+    route.query.shiftId,
+  ] as const,
   () => {
-    if (ownerReportMode(route.name) !== null) {
-      void loadPage();
-    }
+    if (ownerReportMode(route.name) !== null) void loadPage();
   },
   { immediate: true },
 );
 
-function goToConfirm() {
-  const err = validateDailyReportGoToConfirm({
+function validationOptions() {
+  return isNew.value
+    ? {
+        isNew: true,
+        reportDate: businessDate.value,
+        shiftId: shiftId.value,
+      }
+    : undefined;
+}
+
+function goToConfirm(): void {
+  const error = validateDailyReportGoToConfirm({
     form,
-    admin: isNew.value
-      ? {
-          isNew: true,
-          createdByUserId: createdByUserId.value,
-          reportDate: reportDate.value,
-          shiftId: shiftId.value,
-        }
-      : undefined,
+    admin: validationOptions(),
   });
-  if (err) {
-    ElMessage.error(err);
+  if (error) {
+    ElMessage.error(error);
     return;
   }
   step.value = 'confirm';
 }
 
-function backToForm() {
+function backToForm(): void {
   step.value = 'form';
 }
 
-function buildPayload() {
-  const base = buildDailyReportPayload(reportDate.value, shiftId.value);
-  if (isNew.value) {
-    return { ...base, createdByUserId: createdByUserId.value };
+function buildCommand(): CreateDailyReportCommand {
+  const selectedShift = shifts.value.find(
+    (shift) => shift.id === shiftId.value,
+  );
+  const selectedPerson = persons.value.find(
+    (person) => person.id === form.responsiblePersonId,
+  );
+  if (!selectedShift || !selectedPerson) {
+    throw new DataRepositoryError('INVALID_MASTER_DATA');
   }
-  return base;
+  const payload = buildDailyReportPayload(
+    businessDate.value,
+    shiftId.value,
+  );
+  return {
+    businessDate: payload.reportDate,
+    shiftId: payload.shiftId,
+    shiftNameSnapshot:
+      existingReport.value?.shiftNameSnapshot ?? selectedShift.name,
+    responsiblePersonId: payload.responsiblePersonId,
+    responsiblePersonSnapshot: selectedPerson.name,
+    startMinuteOfDay: payload.startMinuteOfDay,
+    endMinuteOfDay: payload.endMinuteOfDay,
+    timeRangeLabelSnapshot: `${form.startStr}–${form.endStr}`,
+    previousImosBalanceYen: payload.previousImosBalanceYen,
+    currentImosBalanceYen: payload.currentImosBalanceYen,
+    newageYen: payload.newageYen,
+    cashTotalYen: payload.cashTotalYen,
+    expenseYen: payload.expenseYen,
+    expenseReason: payload.expenseReason.trim() || undefined,
+    staffMealCashYen: payload.staffMealCashYen,
+    staffMealAlipayYen: payload.staffMealAlipayYen,
+    attachmentKeys: existingReport.value?.attachmentKeys?.filter(
+      (key): key is string => key != null,
+    ) ?? [],
+  };
 }
 
-async function submit() {
-  const errSubmit = validateDailyReportSubmit({
+async function submit(): Promise<void> {
+  const validationError = validateDailyReportSubmit({
     form,
-    admin: isNew.value
-      ? {
-          isNew: true,
-          createdByUserId: createdByUserId.value,
-          reportDate: reportDate.value,
-          shiftId: shiftId.value,
-        }
-      : undefined,
+    admin: validationOptions(),
   });
-  if (errSubmit) {
-    ElMessage.error(errSubmit);
+  if (validationError) {
+    ElMessage.error(validationError);
     return;
   }
   try {
@@ -209,19 +302,17 @@ async function submit() {
   }
   saving.value = true;
   try {
-    const payload = buildPayload();
-    let id = editId.value;
-    if (id) {
-      await http.put(`/daily-reports/${id}`, payload);
+    const command = buildCommand();
+    if (reportKey.value) {
+      await saveOwnerReport(reportKey.value, command, dailyReportsRepository);
+      ElMessage.success('修正しました');
     } else {
-      const res = await http.post<{ id: string }>('/daily-reports', payload);
-      id = res.data.id;
-      editId.value = id;
+      await saveOwnerReport(null, command, dailyReportsRepository);
+      ElMessage.success('老板补录を保存しました');
     }
-    ElMessage.success('提出しました');
-    router.replace(ownerDailyPath);
-  } catch (e: unknown) {
-    ElMessage.error(httpErrorMessage(e, 'エラー'));
+    await router.replace(ownerDailyPath);
+  } catch (error: unknown) {
+    ElMessage.error(ownerReportDataErrorMessage(error, '保存に失敗しました'));
   } finally {
     saving.value = false;
   }
@@ -231,13 +322,15 @@ async function submit() {
 <template>
   <div class="page" v-loading="loading">
     <header class="bar">
-      <el-button
-        link
-        @click="step === 'confirm' ? backToForm() : router.back()"
-      >
+      <el-button link @click="step === 'confirm' ? backToForm() : router.back()">
         {{ step === 'confirm' ? '入力に戻る' : '戻る' }}
       </el-button>
-      <h2>日報（管理者）— {{ reportDate }}</h2>
+      <div>
+        <h2>日報（老板）— {{ businessDate }}</h2>
+        <p v-if="isNew" class="audit-note">
+          老板补录：{{ auth.user?.username ?? 'OWNER' }} が作成します
+        </p>
+      </div>
     </header>
 
     <template v-if="!loading && step === 'confirm'">
@@ -256,12 +349,16 @@ async function submit() {
         :expense-reason="form.expenseReason"
         :staff-meal-cash-yen="form.staffMealCashYen"
         :staff-meal-alipay-yen="form.staffMealAlipayYen"
-        :show-webmaster-row="isNew"
-        :webmaster-label="webmasterLabel"
       />
       <div class="confirm-actions">
-        <el-button type="primary" size="large" class="submit-btn" :loading="saving" @click="submit">
-          提出する
+        <el-button
+          type="primary"
+          size="large"
+          class="submit-btn"
+          :loading="saving"
+          @click="submit"
+        >
+          {{ isNew ? '老板补录を保存' : '修正を保存' }}
         </el-button>
       </div>
     </template>
@@ -273,14 +370,11 @@ async function submit() {
       class="form"
     >
       <DailyReportFormFields
-        v-model:created-by-user-id="createdByUserId"
         :form="form"
-        :persons="persons"
+        :persons="activePersons"
         :register-float-amount="registerFloatAmount"
         :preview="preview"
         variant="admin"
-        :show-webmaster-select="isNew"
-        :webmasters="webmasters"
         @confirm="goToConfirm"
       />
     </el-form>
@@ -288,23 +382,10 @@ async function submit() {
 </template>
 
 <style scoped>
-.page {
-  max-width: 900px;
-}
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-.confirm-actions {
-  margin-top: 20px;
-  padding-top: 8px;
-}
-
-.submit-btn {
-  width: 100%;
-  max-width: 360px;
-  font-weight: 700;
-}
+.page { max-width: 900px; }
+.bar { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.bar h2 { margin: 0; }
+.audit-note { margin: 6px 0 0; color: var(--fs-muted); font-size: 0.82rem; }
+.confirm-actions { margin-top: 20px; padding-top: 8px; }
+.submit-btn { width: 100%; max-width: 360px; font-weight: 700; }
 </style>

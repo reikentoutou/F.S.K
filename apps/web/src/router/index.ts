@@ -37,7 +37,7 @@ export function createAppRouter(history: RouterHistory) {
         meta: { role: 'OWNER' },
       },
       {
-        path: '/owner/report/:id',
+        path: '/owner/report/:reportKey',
         name: 'owner-report-edit',
         component: () => import('@/views/admin/AdminReportFormView.vue'),
         meta: { role: 'OWNER' },
@@ -62,11 +62,6 @@ export function createAppRouter(history: RouterHistory) {
             path: 'analytics',
             name: 'owner-analytics',
             component: () => import('@/views/admin/AnalyticsView.vue'),
-          },
-          {
-            path: 'backup',
-            name: 'owner-backup',
-            component: () => import('@/views/admin/AdminBackupView.vue'),
           },
         ],
       },

@@ -28,6 +28,30 @@ function form(overrides: Partial<ValidationForm> = {}): ValidationForm {
 }
 
 describe('daily report staff meal validation', () => {
+  it('validates an OWNER backfill without requiring a legacy submitter', () => {
+    const ownerBackfill = {
+      isNew: true,
+      reportDate: '2026-08-24',
+      shiftId: 'day',
+    };
+
+    expect(
+      validateDailyReportGoToConfirm({ form: form(), admin: ownerBackfill }),
+    ).toBeNull();
+    expect(
+      validateDailyReportSubmit({ form: form(), admin: ownerBackfill }),
+    ).toBeNull();
+  });
+
+  it('still rejects an OWNER backfill without its immutable date or shift', () => {
+    expect(
+      validateDailyReportSubmit({
+        form: form(),
+        admin: { isNew: true, reportDate: '', shiftId: 'day' },
+      }),
+    ).toBe('日付・シフトを確認してください');
+  });
+
   it('accepts integer bounds in both validation stages', () => {
     const valid = form({
       staffMealCashYen: 0,

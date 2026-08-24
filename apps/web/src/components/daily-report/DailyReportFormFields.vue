@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import DailyReportBasicFields from './DailyReportBasicFields.vue';
 import DailyReportSalesFields from './DailyReportSalesFields.vue';
-import DailyReportSubmitterFields from './DailyReportSubmitterFields.vue';
 import type {
   DailyReportFormFieldsModel,
   ResponsiblePersonOption,
-  WebmasterOption,
 } from './daily-report-form.types';
 
 defineProps<{
@@ -23,13 +21,7 @@ defineProps<{
     showWmTimeHint?: boolean;
     showKitchenTimeHint?: boolean;
     startTimeFromPreviousShift?: boolean;
-    showWebmasterSelect?: boolean;
-    webmasters?: WebmasterOption[];
   }>();
-
-const createdByUserId = defineModel<string>('createdByUserId', {
-  required: false,
-});
 
 defineEmits<{
   confirm: [];
@@ -38,12 +30,6 @@ defineEmits<{
 
 <template>
   <div class="daily-report-form-fields">
-    <DailyReportSubmitterFields
-      v-if="showWebmasterSelect"
-      v-model:created-by-user-id="createdByUserId"
-      :webmasters="webmasters"
-    />
-
     <p v-if="variant === 'kitchen' && showKitchenTimeHint" class="kitchen-time-hint">
       開始・終了時刻はこのシフトの実績を確認して入力してください。日をまたぐ終了時刻も入力できます。
     </p>
