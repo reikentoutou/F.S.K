@@ -307,3 +307,53 @@ NODE
 | PWA devices | iPhone 16 Pro Max 与 iPhone 7 Plus/iOS 15.8.4 standalone | `PENDING_GATE_A` |
 
 Gate A 合成数据必须带清晰 `synthetic` 标识，并在验收报告列出清理责任人。Gate A 通过仍不允许读取或导入真实源数据；下一步只能提交 Gate B 审批材料。
+
+## 5. 2026-08-25 本地验收与恢复点证据
+
+本节只记录提交 `77559f359ad00079a51c8fae3ee9844184318579` 及其父提交的本地审查结果。没有调用 AWS、访问远程 Git、读取真实 `dev.db` / `uploads`、创建真实账号或写入真实账务。Hosting、真实权限矩阵和两台 iPhone 的结果仍为 `PENDING_GATE_A`，不得以本节替代 live evidence。
+
+### 5.1 独立审查和已知边界
+
+- spec compliance 与 code quality 两轮独立审查覆盖 Task 1–12。可在原架构内修复的问题已通过行为 RED → GREEN 收口，并由 scoped rereview 通过：缺失 `AppSetting/default` 时金额计算失败关闭、Amplify outputs 完整校验、已完成迁移 checkpoint 的全目标复核、Gate B 第二次 apply 的机器可读 no-op 证明，以及 OWNER 日报加载的分批/过期/卸载隔离。
+- 老版本回退文档已纠正：当前 Vue 是 Amplify-only 客户端，不能靠 `VITE_API_BASE` 恢复旧 NestJS/SQLite UI；完整旧 UI 回退必须从切换前 recovery ref / checkout 和对应运行环境启动。
+- 业主在 2026-08-25 明确选择“方案 2：保持简化架构”。因此以下风险是有意保留的已知边界，不得宣称已由服务端完全消除：
+  1. `KITCHEN` 仍使用 Amplify Data 的直接 create 能力；正常 UI 有当前东京业务日、字段和重复提交校验，但持有有效厨房凭据的调用方可能绕过页面校验直接调用 API。
+  2. 厨房 UI 只消费 `getKitchenContext` 的活动投影，但批准的 Data 授权仍保留原始班次/责任人只读能力。
+  3. 厨房附件只由 Cognito Identity scoped S3 前缀隔离；直接 `PutObject` 没有预签名 POST 的服务端 MIME/大小条件。
+- 上述边界不扩大 Gate A：Gate A 仍只能使用合成账号、合成账务和合成附件。Gate B 的真实迁移、旧系统冻结和切换仍需单独明确批准。
+
+### 5.2 干净 checkout 验证
+
+验证使用 `git archive HEAD` 创建独立临时 checkout，并在该副本执行 `pnpm install --frozen-lockfile --offline`：解析 1409 个包、复用 1406 个缓存包、下载 0 个，Prisma Client 重新生成成功。随后运行 `pnpm run check:all`，退出码为 0：
+
+| 层 | 结果 |
+| --- | --- |
+| API | 8 files / 29 tests PASS |
+| Web | 21 files / 232 tests PASS |
+| Shared domain | 1 file / 12 tests PASS |
+| Migration | 3 files / 173 tests PASS |
+| Amplify | 10 files / 261 tests PASS |
+| TypeScript | API、Web、domain、migration、Amplify 全部 PASS |
+| Production build | Nest build PASS；Vite 3144 modules transformed、build PASS |
+
+Vite 的大 chunk advisory 与 CDK `addDependency` deprecation warning 仍存在，但没有测试、类型检查、合成或构建失败。
+
+### 5.3 定向契约和产物验证
+
+- 活动 DynamoDB backend 独立 synth PASS：1 个 stack artifact、11 个模板、10 个 nested stacks、1 个 AppSync API、4 张 DynamoDB 表、7 个 Lambda；EC2、RDS、Secrets Manager 资源均为 0，临时 synth outdir 已清理。
+- Web repository/auth contract：6 files / 74 tests PASS；页面数据访问继续经 `apps/web/src/data` repositories，OWNER/KITCHEN 路由授权回归通过。
+- Migration fixture：只读 dry-run 生成确定性 bundle/report PASS；同 bundle、同 checkpoint 第二次 apply 返回 `created={records:0,attachments:0}`、`unchanged={records:4,attachments:1}`，并重新访问全部目标阶段。
+- 本地 Vite production preview 实际响应：`/manifest.json` 为 `application/json`，`/icons/icon-180.png` 为 `image/png`，`/` 为 `text/html`；manifest 为 `display=standalone`、`scope=/`、`start_url=/`。
+- Git 新增文件扫描未发现 `amplify_outputs.json`、真实数据库、`uploads/`、Graphify 输出、环境文件或凭据；`graphify-out/` 由本地 exclude 忽略，tracked 文件数为 0。
+
+### 5.4 Graphify 架构证据
+
+Graphify 对 174 个 tracked code files 建立 AST 图：1822 nodes、2918 post-build edges、158 communities；本地产物为 `graphify-out/graph.json`、`graph.html`、`GRAPH_REPORT.md`，全部保持 ignored/untracked。
+
+图查询与当前 HEAD 的精确静态检查共同确认：
+
+- `apps/web/src/views`、`components`、`composables` 中没有直接 Data/Storage SDK 调用；业务数据和附件通过 repository 层进入 Amplify。
+- 厨房 production routes 只有 `/kitchen` 与 `/kitchen/report/:date/:shiftId`；不存在厨房 history、analytics 或 settings route。
+- 活动 `amplify/backend.ts` 只组合 Auth、Data、Storage、`kitchenContext`，不 import `backend.foundation.ts`、PostgreSQL、Aurora、RDS 或 VPC。
+
+Graphify health diagnostic 同时报告 468 条 dangling-endpoint edges、106 条 undirected same-endpoint collapsed edges；因此架构结论还必须由上述 synth、route/auth tests 和源码静态检查共同支持，不能只引用图谱。
