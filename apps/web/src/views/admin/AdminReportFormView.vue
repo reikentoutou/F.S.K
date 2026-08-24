@@ -1,3 +1,15 @@
+<script lang="ts">
+export type OwnerReportMode = 'create' | 'edit' | null;
+
+export function ownerReportMode(routeName: unknown): OwnerReportMode {
+  if (routeName === 'owner-report-new') return 'create';
+  if (routeName === 'owner-report-edit') return 'edit';
+  return null;
+}
+
+export const ownerDailyPath = '/owner/daily';
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
@@ -104,9 +116,10 @@ async function loadPage() {
   step.value = 'form';
   try {
     await loadMeta();
-    if (route.name === 'admin-report-edit' && route.params.id) {
+    const mode = ownerReportMode(route.name);
+    if (mode === 'edit' && route.params.id) {
       await loadExisting(route.params.id as string);
-    } else if (route.name === 'admin-report-new') {
+    } else if (mode === 'create') {
       editId.value = null;
       reportDate.value = (route.query.reportDate as string) || '';
       shiftId.value = (route.query.shiftId as string) || '';
@@ -131,7 +144,7 @@ watch(
       route.query.createdByUserId,
     ] as const,
   () => {
-    if (route.name === 'admin-report-edit' || route.name === 'admin-report-new') {
+    if (ownerReportMode(route.name) !== null) {
       void loadPage();
     }
   },
@@ -206,7 +219,7 @@ async function submit() {
       editId.value = id;
     }
     ElMessage.success('提出しました');
-    router.replace('/admin/daily');
+    router.replace(ownerDailyPath);
   } catch (e: unknown) {
     ElMessage.error(httpErrorMessage(e, 'エラー'));
   } finally {

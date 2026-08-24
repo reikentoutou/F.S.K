@@ -79,4 +79,13 @@ describe('authorizeNavigation', () => {
       authorizeNavigation({ path: '/login', isPublic: true }, null),
     ).toBe(true);
   });
+
+  it('returns an authenticated user away from login to the role home', () => {
+    expect(
+      authorizeNavigation({ path: '/login', isPublic: true }, owner),
+    ).toEqual({ name: 'owner-home' });
+    expect(
+      authorizeNavigation({ path: '/login', isPublic: true }, kitchen),
+    ).toEqual({ name: 'kitchen-home' });
+  });
 });

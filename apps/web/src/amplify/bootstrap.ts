@@ -30,11 +30,21 @@ function isOutputs(value: unknown): value is Record<string, unknown> {
     return false;
   }
   const outputs = value as Record<string, unknown>;
+  const auth = outputs.auth;
+  if (auth === null || typeof auth !== 'object' || Array.isArray(auth)) {
+    return false;
+  }
+  const authOutputs = auth as Record<string, unknown>;
+  const requiredAuthFields = [
+    authOutputs.aws_region,
+    authOutputs.user_pool_id,
+    authOutputs.user_pool_client_id,
+  ];
   return (
     typeof outputs.version === 'string' &&
-    outputs.auth !== null &&
-    typeof outputs.auth === 'object' &&
-    !Array.isArray(outputs.auth)
+    requiredAuthFields.every(
+      (field) => typeof field === 'string' && field.trim().length > 0,
+    )
   );
 }
 

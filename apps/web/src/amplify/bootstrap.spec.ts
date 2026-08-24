@@ -120,8 +120,50 @@ describe('bootstrapAmplifyApp', () => {
     });
   });
 
+  it.each([
+    ['aws_region', { user_pool_id: 'pool-id', user_pool_client_id: 'client-id' }],
+    ['user_pool_id', { aws_region: 'ap-northeast-1', user_pool_client_id: 'client-id' }],
+    ['user_pool_client_id', { aws_region: 'ap-northeast-1', user_pool_id: 'pool-id' }],
+    [
+      'blank aws_region',
+      {
+        aws_region: '   ',
+        user_pool_id: 'pool-id',
+        user_pool_client_id: 'client-id',
+      },
+    ],
+  ])('rejects outputs with missing or blank %s', async (_field, auth) => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({ version: '1.4', auth }),
+    );
+    const configure = vi.fn();
+    const mount = vi.fn();
+    const showConfigurationError = vi.fn();
+
+    const started = await bootstrapAmplifyApp({
+      fetchImpl,
+      configure,
+      mount,
+      showConfigurationError,
+    });
+
+    expect(started).toBe(false);
+    expect(configure).not.toHaveBeenCalled();
+    expect(mount).not.toHaveBeenCalled();
+    expect(showConfigurationError.mock.calls[0]?.[0]).toMatchObject({
+      code: 'OUTPUTS_INVALID',
+    });
+  });
+
   it('can retry after a configuration failure and only mounts after configuration succeeds', async () => {
-    const outputs = { version: '1.4', auth: { aws_region: 'ap-northeast-1' } };
+    const outputs = {
+      version: '1.4',
+      auth: {
+        aws_region: 'ap-northeast-1',
+        user_pool_id: 'ap-northeast-1_example',
+        user_pool_client_id: 'client-id',
+      },
+    };
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(new Response('', { status: 404 }))

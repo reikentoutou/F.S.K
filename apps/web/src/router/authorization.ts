@@ -23,7 +23,7 @@ export function authorizeNavigation(
   target: AuthorizationTarget,
   user: AuthUser | null,
 ): AuthorizationResult {
-  if (target.isPublic) return true;
+  if (target.isPublic) return user ? roleHome(user.role) : true;
   if (!user) {
     return { name: 'login', query: { redirect: target.path } };
   }
