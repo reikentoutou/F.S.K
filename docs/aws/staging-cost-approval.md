@@ -16,7 +16,7 @@
 | Git deployment point | `fsk-staging-data-api-foundation-v1` |
 | MonthlyCeilingJpy | `5000` |
 
-`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。Foundation 已按本页批准范围完成部署和只读验收：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。Migration 已获得一次性批准，只允许在下方绑定的 operation tuple 和截止时间内执行合成 DDL/verify 并立即清理；完整 backend、Hosting、Budget/alarms、Destroy 和真实数据迁移仍未批准，也未执行。
+`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。Foundation 已按本页批准范围完成部署和只读验收：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。Migration 的一次性批准已消费：首次 TLS 握手失败、DDL 未落库、持续计费临时资源已清理；新的 operation tuple 和独立批准前不得重试。完整 backend、Hosting、Budget/alarms、Destroy 和真实数据迁移仍未批准，也未执行。
 
 ## 成本模型
 
@@ -48,9 +48,9 @@
 | S3 Gateway VPC Endpoint | Foundation | 无固定小时费；仍计算 S3 请求和传输 | `PENDING_RATE_LOOKUP` | `DEPLOYED_VERIFIED: exactly one Gateway endpoint; no Interface endpoint` |
 | Cognito | Foundation | 仅合成 staging 用户；按当期 MAU 规则复核 | `PENDING_RATE_LOOKUP` | `DEPLOYED: admin-created users only; no guest identities; no users seeded` |
 | S3 对象、请求和版本 | Foundation/Hosting | pending、test、migration 使用短生命周期；正式对象及版本可能持续保留 | `PENDING_RATE_LOOKUP` | `DEPLOYED: private, versioned, retained; no uploads migrated` |
-| Secrets Manager | Foundation/Full backend | Aurora generated Secret 的 secret-month 和 API 调用 | `PENDING_RATE_LOOKUP` | `DEPLOYED: generated Aurora Secret; value not read or recorded` |
+| Secrets Manager | Foundation/Full backend | Aurora generated Secret 的 secret-month 和 API 调用 | `PENDING_RATE_LOOKUP` | `DEPLOYED: generated Aurora Secret; migration worker read it only into process memory; value was not printed or recorded` |
 | Amplify 平台 custom-resource Functions/Logs | Foundation | branch linker/provider 的部署调用、执行时间和日志 | `PENDING_RATE_LOOKUP` | `DEPLOYED_VERIFIED: exactly two platform linker/provider Functions` |
-| CloudShell VPC 临时 NAT/IGW/EIP/运维 SG | Migration | 只在批准窗口内存在；从创建到稳定零残留计费 | `PENDING_RATE_LOOKUP` | `PENDING_MIGRATION` |
+| CloudShell VPC 临时 NAT/IGW/EIP/运维 SG | Migration | 只在批准窗口内存在；从创建到稳定零残留计费 | `PENDING_RATE_LOOKUP` | `FAILED_CLEANED: SG/5432 ingress/IGW/subnet/route table/EIP absent; NAT deleted; application default routes absent` |
 | RDS Data API calls | Full backend | 参数化语句、事务和返回数据量；不建立业务 TCP 连接池 | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
 | API Gateway HTTP API | Full backend | Kitchen/Admin API 请求和数据传输 | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
 | Kitchen/Admin/Export Functions | Full backend | 调用次数、执行时间、内存、日志和指标 | `PENDING_RATE_LOOKUP` | `PENDING_FULL_BACKEND` |
@@ -85,14 +85,14 @@
 | PersistentInterfaceEndpoints | `0` |
 | DatabaseIngressRuleCount | `0` |
 | HostingStatus | `NOT_DEPLOYED` |
-| MigrationStatus | `NOT_RUN` |
+| MigrationStatus | `FAILED_TLS_TRUST / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED` |
 | FullBackendStatus | `NOT_DEPLOYED` |
 
 权威部署来自 target-account CloudShell 的 detached approved commit。首次 Amplify bootstrap job 的 commit 只显示 `HEAD`，因此在发布 Hosting 前已取消；随后关闭 Auto build，并用 `ampx pipeline-deploy` 完成 Foundation reconciliation。两个 CloudFormation 栈均为 `CREATE_COMPLETE`。
 
-只读运行态验收确认：Data API 和 deletion protection 开启；Writer 为私有、加密的 `db.serverless`，无 RDS Proxy；VPC 没有 NAT、IGW、默认公网路由或公网子网，只有一个 S3 Gateway Endpoint，数据库安全组无入站规则。CloudWatch `ServerlessDatabaseCapacity` 在 `05:47 UTC` 为 `0.0`，RDS 事件在 `05:46:48 UTC` 记录 Writer 成功暂停。
+只读运行态验收确认：Data API 和 deletion protection 开启；Writer 为私有、加密的 `db.serverless`，无 RDS Proxy；VPC 没有 NAT、IGW、默认公网路由或公网子网，只有一个 S3 Gateway Endpoint，数据库安全组无入站规则。CloudWatch `ServerlessDatabaseCapacity` 在 `05:47 UTC` 为 `0.0`，RDS 事件在 `05:46:48 UTC` 记录 Writer 成功暂停。Migration 第一次连接因缺少 Amazon RDS CA 信任而在 TLS 握手阶段失败；Data API 只读复查确认 `schema_migrations` 不存在，临时持续计费资源已归零，三个 Standard SSM 参数保留失败证据。新的 Migration approval 前不得重试。
 
-Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 天生命周期；Cognito 只允许管理员创建用户、禁止 guest，只有 `ADMIN`/`KITCHEN` 两组且未 seed 用户。主栈只有两个 Amplify Branch Linker 平台 Functions，没有业务 Function、HTTP API 或 Hosting 发布。证据未读取或记录 Secret 值、连接串、token、真实用户或账务 payload。
+Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 天生命周期；Cognito 只允许管理员创建用户、禁止 guest，只有 `ADMIN`/`KITCHEN` 两组且未 seed 用户。主栈只有两个 Amplify Branch Linker 平台 Functions，没有业务 Function、HTTP API 或 Hosting 发布。Migration worker 只在进程内读取 Secret 并构造连接串；证据没有打印或记录 Secret 值、连接串、用户名、密码、真实用户或账务 payload。
 
 ## 六个独立写入阶段
 

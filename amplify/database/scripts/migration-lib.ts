@@ -37,7 +37,7 @@ const MIGRATION_ADVISORY_LOCK_SQL =
 const databaseUrlError = (code: string): Error =>
   new Error(`DATABASE_URL_${code}`);
 
-const ALLOWED_SSL_MODES = new Set(['require', 'verify-full']);
+const ALLOWED_SSL_MODES = new Set(['verify-full']);
 
 const isLoopbackHost = (hostname: string): boolean => {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');

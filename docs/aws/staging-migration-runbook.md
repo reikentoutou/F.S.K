@@ -2,7 +2,7 @@
 
 ## 0. 边界与责任
 
-本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。当前 `GateStatus=APPROVED_MIGRATION`，只允许按第 7 节绑定的 exact operation tuple、网络范围和截止时间执行；任何不一致立即停止。
+本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。当前 `GateStatus=MIGRATION_FAILED_CLEANUP_BLOCKED`；第 7 节记录的批准已消费且不得复用，新的 immutable source、operation tuple 和独立批准完成前只能做只读诊断。
 
 允许的临时拓扑只有：普通 CloudShell control session、VPC CloudShell worker session、带完整 ownership tuple 的单个运维 SG/数据库 ingress、IGW、public subnet/route table、EIP、NAT，以及两个 application route table 上的临时默认路由。长期状态仍是无 NAT、无 Interface Endpoint、无 `5432` ingress。
 
@@ -735,6 +735,18 @@ fsk_worker_exit() {
   exit "$original_status"
 }
 
+fsk_prepare_rds_ca_trust() {
+  : "${FSK_RDS_CA_IDENTIFIER:?RDS CA identifier required}"
+  : "${FSK_RDS_CA_BUNDLE_PATH:=$PWD/amplify/database/certificates/rds-ca-rsa2048-g1-ap-northeast-1.pem}"
+  test "$FSK_RDS_CA_IDENTIFIER" = rds-ca-rsa2048-g1
+  test -f "$FSK_RDS_CA_BUNDLE_PATH"
+  test ! -L "$FSK_RDS_CA_BUNDLE_PATH"
+  test -r "$FSK_RDS_CA_BUNDLE_PATH"
+  test "$(sha256sum "$FSK_RDS_CA_BUNDLE_PATH" | awk '{ print $1 }')" = \
+    1e6881a91bf287b6ff2be7c003139a9bb4a7d75171819a72165114258efe93bd
+  export NODE_EXTRA_CA_CERTS="$FSK_RDS_CA_BUNDLE_PATH"
+}
+
 fsk_build_database_url() {
   set +x
   DATABASE_URL="$(
@@ -761,7 +773,7 @@ fsk_build_database_url() {
           }
           process.stdout.write(
             `postgresql://${encodeURIComponent(username)}:${encodeURIComponent(password)}` +
-            `@${endpoint}:${port}/${database}?sslmode=require`,
+            `@${endpoint}:${port}/${database}?sslmode=verify-full`,
           );
         } catch {
           process.exit(2);
@@ -814,11 +826,12 @@ fsk_worker_run() {
   test "$(git rev-parse HEAD)" = "$FSK_FOUNDATION_COMMIT"
   test -z "$(git status --short)"
   fsk_run_before_migration_deadline pnpm install --frozen-lockfile
+  fsk_prepare_rds_ca_trust
   fsk_worker_run_database_migration
 }
 ```
 
-Foundation outputs 必须从批准的 exact stack ID 读取，RDS describe 必须证明 endpoint 属于 Foundation VPC、database name 是 `fsk_staging`、全部 instances `PubliclyAccessible=false`。证据只保存“VPC 匹配、private PASS、first count=1、second count=0、verify PASS”和 exit code；不得保存完整 ARN/endpoint/Secret/URL。worker 发布 READY 后，立即在 Console 删除 exact CloudShell worker environment，让 ENI 释放；worker tab 随后关闭。
+Foundation outputs 必须从批准的 exact stack ID 读取，RDS describe 必须证明 endpoint 属于 Foundation VPC、database name 是 `fsk_staging`、全部 instances `PubliclyAccessible=false`，并把 Writer 的 `CertificateDetails.CAIdentifier` 作为 `FSK_RDS_CA_IDENTIFIER` 传入 worker。worker 只接受仓库内 SHA-256 固定的东京区 `rds-ca-rsa2048-g1` 根证书，在启动 Node migration 前通过 `NODE_EXTRA_CA_CERTS` 加载，并使用 `sslmode=verify-full`；CA identifier、证书文件或 hash 任一漂移都立即失败。证据只保存“VPC 匹配、private PASS、CA identifier/hash PASS、first count=1、second count=0、verify PASS”和 exit code；不得保存完整 ARN/endpoint/Secret/URL。worker 发布 READY 后，立即在 Console 删除 exact CloudShell worker environment，让 ENI 释放；worker tab 随后关闭。
 
 ## 6. control watchdog、幂等 cleanup 和稳定零残留
 
@@ -1349,7 +1362,7 @@ fsk_control_run_migration() {
 
 | 证据字段 | 值 |
 | --- | --- |
-| GateStatus | `APPROVED_MIGRATION` |
+| GateStatus | `MIGRATION_FAILED_CLEANUP_BLOCKED` |
 | MigrationApprovalId | `FSK-MIGRATION-20260824-145858-JST` |
 | FoundationCommit/Tag/RemoteBranch | `dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1 / staging` |
 | TaskId | `migration-20260824` |
@@ -1358,17 +1371,20 @@ fsk_control_run_migration() {
 | CleanupDeadlineEpoch | `1787561038 / 2026-08-24 17:43:58 JST` |
 | TemporaryPublicCidr/Az | `10.42.4.0/24 / ap-northeast-1a` |
 | ApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
-| ControlActor/WatchdogPid | `PENDING_MIGRATION` |
-| WorkerEnvironmentId | `PENDING_MIGRATION` |
-| TemporaryResourceIds | `PENDING_MIGRATION` |
-| FirstMigrationResult | `PENDING_MIGRATION` |
-| SecondMigrationNoOpResult | `PENDING_MIGRATION` |
-| VerifySchemaResult | `PENDING_MIGRATION` |
-| DatabaseUrlCleared | `PENDING_MIGRATION` |
-| WorkerEnvironmentDeleted | `PENDING_MIGRATION` |
-| StableZeroObservations/Duration | `PENDING_MIGRATION` |
-| FinalResidualCount | `PENDING_MIGRATION` |
+| ControlActor/WatchdogPid | `reiken / CloudShell control terminal 8e4ce176-de87-4982-84f4-e6384ec8c6de / internal watchdog PID not retained` |
+| WorkerEnvironmentId | `fsk-migrate-20260824 / deleted` |
+| TemporaryResourceIds | `sg-072a93d8f3a8d0f45 / sgr-0b3a15bb09f2f3116 / igw-05dccf6abbf427ff9 / subnet-02aa3d5817fe8b616 / rtb-0728ee62b58934cd5 / eipalloc-0c695c7ba4a5b35dd / nat-098ce3ae856d5c521` |
+| FirstMigrationResult | `FAILED_TLS_HANDSHAKE / MIGRATIONS_APPLIED marker absent / schema_migrations ABSENT` |
+| SecondMigrationNoOpResult | `NOT_RUN_AFTER_FIRST_FAILURE` |
+| VerifySchemaResult | `NOT_RUN_AFTER_FIRST_FAILURE` |
+| DatabaseUrlCleared | `PASS_BY_WORKER_EXIT_TRAP_AND_ENVIRONMENT_DELETE` |
+| WorkerEnvironmentDeleted | `PASS` |
+| StableZeroObservations/Duration | `COST_RESOURCES_ZERO_AFTER_180_SECOND_CONTROL_OBSERVATION / terminal status retained because cleanupFailed=true` |
+| FinalResidualCount | `COST_RESOURCES=0 / SSM_FAILURE_EVIDENCE=3` |
+| FailureRootCause | `pg 8.23 sslmode=require entered verify-full without the Amazon RDS root CA; Aurora logged SSL EOF from worker 10.42.0.56 at 2026-08-24 06:30:00 UTC` |
+| DatabaseDdlState | `Data API read-only check: fsk_staging reachable / public.schema_migrations ABSENT` |
+| NextApproval | `NEW_MIGRATION_OPERATION_REQUIRED` |
 | CostOwner | `reiken` |
 | CleanupOwner | `reiken` |
 
-任何 cleanup 查询失败、未知 owner、deadline 超时或残留非零都写 `BLOCKED`，保留费用责任并停止 Full backend。Migration 已获得上述一次性批准；写入开始前仍须复验初始残留为 0，且当前尚未创建本次 Migration 临时资源。
+本次一次性批准已消费且 migration 失败，不能复用 operation token。失败 worker、默认路由和全部持续计费临时资源已删除；三个 Standard SSM 参数只保留非敏感失败终态 `FAILED:WORKER_EXIT_1`、`cleanupFailed=true`、`CLEANUP_BLOCKED:EXIT_1`。新的 immutable commit/tag、operation token、初始残留复验和独立 Migration 批准完成前，不得重跑 migration，也不得开始 Full backend。

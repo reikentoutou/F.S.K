@@ -137,7 +137,7 @@ const FOUNDATION_APPROVAL_EVIDENCE = {
 };
 
 const MIGRATION_APPROVAL_EVIDENCE = {
-  GateStatus: ['APPROVED_MIGRATION'],
+  GateStatus: ['MIGRATION_FAILED_CLEANUP_BLOCKED'],
   MigrationApprovalId: ['FSK-MIGRATION-20260824-145858-JST'],
   'FoundationCommit/Tag/RemoteBranch': [
     'dcff57ebc9bc6d77fbb51072b996834f5a5ca715 / fsk-staging-data-api-foundation-v1 / staging',
@@ -555,7 +555,16 @@ describe('staging deployment documentation contracts', () => {
       '批准在已部署的 FSK staging Foundation 上创建带 operation token 的临时 CloudShell VPC 出口和运维 5432 访问，执行合成数据库 migration/verify 后立即清理；不导入真实 SQLite、用户、bcrypt hash 或 uploads。',
     ]);
     expect(documentFieldValues(COST_APPROVAL, 'MigrationStatus')).toEqual([
-      'NOT_RUN',
+      'FAILED_TLS_TRUST / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED',
+    ]);
+    expect(documentFieldValues(MIGRATION_RUNBOOK, 'FirstMigrationResult')).toEqual([
+      'FAILED_TLS_HANDSHAKE / MIGRATIONS_APPLIED marker absent / schema_migrations ABSENT',
+    ]);
+    expect(documentFieldValues(MIGRATION_RUNBOOK, 'FinalResidualCount')).toEqual([
+      'COST_RESOURCES=0 / SSM_FAILURE_EVIDENCE=3',
+    ]);
+    expect(documentFieldValues(MIGRATION_RUNBOOK, 'NextApproval')).toEqual([
+      'NEW_MIGRATION_OPERATION_REQUIRED',
     ]);
   });
 
@@ -582,7 +591,9 @@ describe('staging deployment documentation contracts', () => {
       PersistentInterfaceEndpoints: ['0'],
       DatabaseIngressRuleCount: ['0'],
       HostingStatus: ['NOT_DEPLOYED'],
-      MigrationStatus: ['NOT_RUN'],
+      MigrationStatus: [
+        'FAILED_TLS_TRUST / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED',
+      ],
       FullBackendStatus: ['NOT_DEPLOYED'],
     };
 
@@ -706,6 +717,107 @@ printf '%s' "$${variable}"
 });
 
 describe('staging migration runbook executable contracts', () => {
+  it('prepares the pinned RDS CA before the worker starts PostgreSQL migration', () => {
+    const certificatePath = join(
+      process.cwd(),
+      'amplify/database/certificates/rds-ca-rsa2048-g1-ap-northeast-1.pem',
+    );
+    let prepareTrust = '';
+    try {
+      prepareTrust = extractBashFunction(
+        MIGRATION_RUNBOOK,
+        'fsk_prepare_rds_ca_trust',
+      );
+    } catch {
+      // The RED phase executes the requested command and proves it is absent.
+    }
+    const script = `set -euo pipefail
+git() {
+  case "$*" in
+    'rev-parse HEAD') printf '%s\\n' "$FSK_FOUNDATION_COMMIT" ;;
+    'status --short') : ;;
+    *) return 91 ;;
+  esac
+}
+pnpm() {
+  test "$*" = 'install --frozen-lockfile'
+}
+fsk_run_before_migration_deadline() { "$@"; }
+fsk_worker_run_database_migration() {
+  test "$NODE_EXTRA_CA_CERTS" = "$FSK_EXPECTED_CA_PATH"
+  node -e '
+    const { createHash, X509Certificate } = require("node:crypto");
+    const { readFileSync } = require("node:fs");
+    const pem = readFileSync(process.env.NODE_EXTRA_CA_CERTS);
+    const certificate = new X509Certificate(pem);
+    process.stdout.write(JSON.stringify({
+      sha256: createHash("sha256").update(pem).digest("hex"),
+      subject: certificate.subject,
+    }));
+  '
+  FSK_WORKER_READY_FOR_CLEANUP=1
+}
+fsk_worker_exit() { exit "$1"; }
+${prepareTrust}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_run')}
+FSK_MIGRATION_SHELL_ROLE=worker
+FSK_FOUNDATION_COMMIT=dcff57ebc9bc6d77fbb51072b996834f5a5ca715
+FSK_RDS_CA_IDENTIFIER=rds-ca-rsa2048-g1
+FSK_RDS_CA_BUNDLE_PATH="$FSK_EXPECTED_CA_PATH"
+fsk_worker_run
+`;
+    const result = spawnSync('bash', ['-c', script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        FSK_EXPECTED_CA_PATH: certificatePath,
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      sha256:
+        '1e6881a91bf287b6ff2be7c003139a9bb4a7d75171819a72165114258efe93bd',
+      subject:
+        'C=US\nO=Amazon Web Services\\, Inc.\nOU=Amazon RDS\nST=WA\nCN=Amazon RDS ap-northeast-1 Root CA RSA2048 G1\nL=Seattle',
+    });
+  });
+
+  it('builds a verify-full database URL without exposing the secret', () => {
+    const script = `set -euo pipefail
+aws() {
+  test "$1 $2" = 'secretsmanager get-secret-value'
+  printf '{"username":"stage_user","password":"super-secret"}\\n'
+}
+fsk_run_before_migration_deadline() { "$@"; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_build_database_url')}
+FSK_AURORA_SECRET_ARN=secret-arn
+FSK_DB_ENDPOINT=fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com
+FSK_DB_PORT=5432
+FSK_DATABASE_NAME=fsk_staging
+fsk_build_database_url
+node -e '
+  const parsed = new URL(process.env.DATABASE_URL);
+  process.stdout.write(JSON.stringify({
+    database: parsed.pathname,
+    sslmode: parsed.searchParams.get("sslmode"),
+  }));
+'
+unset DATABASE_URL
+`;
+    const result = spawnSync('bash', ['-c', script], {
+      encoding: 'utf8',
+      env: process.env,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      database: '/fsk_staging',
+      sslmode: 'verify-full',
+    });
+    expect(`${result.stdout}${result.stderr}`).not.toContain('super-secret');
+  });
+
   it('exports the runbook-owned AWS account ID before rendering ownership tags in a child process', () => {
     const [, sharedFunctions, operationGuard] =
       extractBashBlocks(MIGRATION_RUNBOOK);

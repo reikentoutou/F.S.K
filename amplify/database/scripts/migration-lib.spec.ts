@@ -484,15 +484,20 @@ describe('migration runner wiring', () => {
 });
 
 describe('staging PostgreSQL DATABASE_URL guard', () => {
-  it.each(['require', 'verify-full'])(
-    'accepts the explicit remote fsk_staging database with sslmode=%s',
-    (sslmode) => {
-      const databaseUrl =
-        `postgresql://stage_user:secret@fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com:5432/fsk_staging?sslmode=${sslmode}`;
+  it('accepts the explicit remote fsk_staging database with hostname-verifying TLS', () => {
+    const databaseUrl =
+      'postgresql://stage_user:secret@fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com:5432/fsk_staging?sslmode=verify-full';
 
-      expect(assertStagingDatabaseUrl(databaseUrl)).toBe(databaseUrl);
-    },
-  );
+    expect(assertStagingDatabaseUrl(databaseUrl)).toBe(databaseUrl);
+  });
+
+  it('rejects sslmode=require so a pg major upgrade cannot weaken verification', () => {
+    expect(() =>
+      assertStagingDatabaseUrl(
+        'postgresql://stage_user:secret@fsk-staging.cluster-example.ap-northeast-1.rds.amazonaws.com:5432/fsk_staging?sslmode=require',
+      ),
+    ).toThrow('DATABASE_URL_TLS_PARAMETER_INVALID');
+  });
 
   it('rejects a remote URL without an approved TLS parameter', () => {
     expect(
