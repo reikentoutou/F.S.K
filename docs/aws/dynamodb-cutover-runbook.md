@@ -76,7 +76,7 @@ test -z "$(git status --porcelain)"
 FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" node -e 'const fs=require("node:fs"); const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(c.accountId!==process.env.FSK_EXPECTED_AWS_ACCOUNT_ID||c.region!==process.env.FSK_EXPECTED_AWS_REGION||c.amplifyApp?.appId!==process.env.FSK_AMPLIFY_APP_ID||c.amplifyApp?.name!=="FSK") process.exit(1)' "$FSK_TARGET_CONFIG"
 pnpm run migration:dry-run --sqlite "$FSK_SQLITE_SNAPSHOT" --uploads "$FSK_UPLOADS_SNAPSHOT" --out "$FSK_MIGRATION_OUTPUT_DIR"
 test -s "$FSK_MIGRATION_OUTPUT_DIR/migration-report.json"
-test "$(shasum -a 256 "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" | awk '{print $1}')" = "$FSK_EXPECTED_BUNDLE_SHA256"
+FSK_BUNDLE_PATH="$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" node -e 'const {createHash}=require("node:crypto"); const {createReadStream}=require("node:fs"); const hash=createHash("sha256"); const stream=createReadStream(process.env.FSK_BUNDLE_PATH); stream.on("error",()=>process.exit(1)); stream.on("data",chunk=>hash.update(chunk)); stream.on("end",()=>{if(hash.digest("hex")!==process.env.FSK_EXPECTED_BUNDLE_SHA256) process.exit(1)})'
 FSK_FIRST_IMPORT_RESULT="$FSK_MIGRATION_OUTPUT_DIR/import-result-first.json"
 FSK_SECOND_IMPORT_RESULT="$FSK_MIGRATION_OUTPUT_DIR/import-result-second.json"
 umask 077
