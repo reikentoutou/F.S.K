@@ -14,12 +14,23 @@ export function kitchenReportMode(routeName: unknown): KitchenReportMode {
 }
 
 export const kitchenHomePath = '/kitchen';
+export const KITCHEN_BUSINESS_DATE_CHANGED_MESSAGE =
+  '营业日已更新，请返回厨房首页重新选择班次';
 
 export function isCurrentKitchenBusinessDate(
   businessDate: string,
   currentBusinessDate = todayTokyo(),
 ): boolean {
   return businessDate === currentBusinessDate;
+}
+
+export function kitchenBusinessDateSubmissionError(
+  businessDate: string,
+  currentBusinessDate = todayTokyo(),
+): string | null {
+  return isCurrentKitchenBusinessDate(businessDate, currentBusinessDate)
+    ? null
+    : KITCHEN_BUSINESS_DATE_CHANGED_MESSAGE;
 }
 
 export function loadKitchenReportContext(
@@ -105,9 +116,9 @@ import {
   validateDailyReportSubmit,
 } from '@/utils/daily-report-form-validate';
 import {
-  failSubmissionWithoutReset,
+  createKitchenSubmissionController,
   initialSubmissionState,
-  transitionSubmissionState,
+  type KitchenSubmissionSnapshot,
 } from './submission-state';
 
 type SubmittedReport = Awaited<ReturnType<typeof createKitchenReport>>;
@@ -117,9 +128,6 @@ const router = useRouter();
 const context = shallowRef<KitchenContext | null>(null);
 const loading = shallowRef(true);
 const loadError = shallowRef(false);
-const submission = shallowRef(initialSubmissionState());
-const submissionMessage = shallowRef('');
-const submittedReport = shallowRef<SubmittedReport | null>(null);
 const receiptFile = shallowRef<File | null>(null);
 const attachmentKeys = shallowRef<string[]>([]);
 const draftId = `draft_${crypto.randomUUID().replaceAll('-', '')}`;
@@ -141,6 +149,36 @@ const {
   setDefaultResponsiblePerson,
   buildPayload,
 } = useDailyReportFormState();
+const confirmationMessage = shallowRef('');
+const initialSnapshot: KitchenSubmissionSnapshot<
+  typeof form,
+  SubmittedReport
+> = {
+  state: initialSubmissionState(),
+  draft: form,
+  result: null,
+  message: '',
+};
+const submissionSnapshot = shallowRef(initialSnapshot);
+const submissionController = createKitchenSubmissionController({
+  draft: form,
+  validate: () => {
+    const dateError = kitchenBusinessDateSubmissionError(businessDate.value);
+    if (dateError) return dateError;
+    return validateDailyReportSubmit({ form });
+  },
+  prepareAttachments: ensureReceiptUploaded,
+  create: () => createKitchenReport(buildCommand()),
+  classifyFailure: kitchenSubmissionFailure,
+  onChange: (snapshot) => {
+    submissionSnapshot.value = snapshot;
+  },
+});
+const submission = computed(() => submissionSnapshot.value.state);
+const submissionMessage = computed(
+  () => submissionSnapshot.value.message || confirmationMessage.value,
+);
+const submittedReport = computed(() => submissionSnapshot.value.result);
 const preview = useDailyReportPreview(form, registerFloatAmount);
 const personName = computed(
   () =>
@@ -172,8 +210,8 @@ watch(
     loading.value = true;
     loadError.value = false;
     context.value = null;
-    submission.value = initialSubmissionState();
-    submittedReport.value = null;
+    submissionController.reset();
+    confirmationMessage.value = '';
     attachmentKeys.value = [];
     receiptFile.value = null;
     reset();
@@ -199,22 +237,23 @@ watch(
 function goToConfirm(): void {
   const error = validateDailyReportGoToConfirm({ form });
   if (error) {
-    submissionMessage.value = error;
+    confirmationMessage.value = error;
     return;
   }
-  submissionMessage.value = '';
-  submission.value = transitionSubmissionState(submission.value, 'CONFIRM');
+  confirmationMessage.value = '';
+  submissionController.confirm();
 }
 
 function backToForm(): void {
-  submissionMessage.value = '';
-  submission.value = transitionSubmissionState(submission.value, 'EDIT');
+  confirmationMessage.value = '';
+  submissionController.edit();
 }
 
 function selectReceipt(event: Event): void {
   const input = event.target as HTMLInputElement;
   receiptFile.value = input.files?.[0] ?? null;
   attachmentKeys.value = [];
+  submissionController.invalidatePreparedAttachments();
 }
 
 function buildCommand(): CreateDailyReportCommand {
@@ -267,35 +306,8 @@ async function ensureReceiptUploaded(): Promise<void> {
 }
 
 async function submit(): Promise<void> {
-  const currentStatus = submission.value.status;
-  if (currentStatus === 'submitting') return;
-  const error = validateDailyReportSubmit({ form });
-  if (error) {
-    submissionMessage.value = error;
-    return;
-  }
-  const event =
-    currentStatus === 'failed' || currentStatus === 'unknown'
-      ? 'RETRY'
-      : 'SUBMIT';
-  const next = transitionSubmissionState(submission.value, event);
-  if (next === submission.value) return;
-  submission.value = next;
-  submissionMessage.value = '';
-  try {
-    await ensureReceiptUploaded();
-    submittedReport.value = await createKitchenReport(buildCommand());
-    submission.value = transitionSubmissionState(submission.value, 'SUCCEED');
-  } catch (caught) {
-    const failure = kitchenSubmissionFailure(caught);
-    submissionMessage.value = failure.message;
-    const retained = failSubmissionWithoutReset(
-      submission.value,
-      form,
-      failure.event,
-    );
-    submission.value = retained.state;
-  }
+  confirmationMessage.value = '';
+  await submissionController.submit();
 }
 </script>
 

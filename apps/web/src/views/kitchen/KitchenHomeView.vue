@@ -11,6 +11,43 @@ export interface KitchenContext {
   responsiblePersons: Array<{ id: string; name: string }>;
 }
 
+interface KitchenDateEventSource {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+interface KitchenVisibilitySource extends KitchenDateEventSource {
+  readonly visibilityState: string;
+}
+
+export function createKitchenBusinessDateTracker(options: {
+  today(): string;
+  setBusinessDate(value: string): void;
+  documentSource: KitchenVisibilitySource;
+  windowSource: KitchenDateEventSource;
+}): { dispose(): void } {
+  const refresh = () => options.setBusinessDate(options.today());
+  const refreshWhenVisible = () => {
+    if (options.documentSource.visibilityState === 'visible') refresh();
+  };
+
+  options.documentSource.addEventListener(
+    'visibilitychange',
+    refreshWhenVisible,
+  );
+  options.windowSource.addEventListener('pageshow', refresh);
+
+  return {
+    dispose() {
+      options.documentSource.removeEventListener(
+        'visibilitychange',
+        refreshWhenVisible,
+      );
+      options.windowSource.removeEventListener('pageshow', refresh);
+    },
+  };
+}
+
 function normalizeKitchenContext(value: RawKitchenContext): KitchenContext {
   if (!value) throw new Error('KITCHEN_CONTEXT_UNAVAILABLE');
   return {
@@ -33,7 +70,7 @@ export function loadKitchenHomeContext(
 </script>
 
 <script setup lang="ts">
-import { onMounted, shallowRef } from 'vue';
+import { onMounted, onUnmounted, shallowRef } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { useAuthStore } from '@/stores/auth';
@@ -41,10 +78,26 @@ import { todayTokyo } from '@/utils/tokyo';
 
 const auth = useAuthStore();
 const router = useRouter();
-const businessDate = todayTokyo();
+const businessDate = shallowRef(todayTokyo());
 const context = shallowRef<KitchenContext | null>(null);
 const loading = shallowRef(true);
 const loadError = shallowRef(false);
+let dateTracker: { dispose(): void } | undefined;
+
+onMounted(() => {
+  dateTracker = createKitchenBusinessDateTracker({
+    today: todayTokyo,
+    setBusinessDate: (value) => {
+      businessDate.value = value;
+    },
+    documentSource: document,
+    windowSource: window,
+  });
+});
+
+onUnmounted(() => {
+  dateTracker?.dispose();
+});
 
 onMounted(async () => {
   try {

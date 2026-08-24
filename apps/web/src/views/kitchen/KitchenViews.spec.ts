@@ -4,12 +4,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { DataRepositoryError } from '@/data/errors';
 
-import { loadKitchenHomeContext } from './KitchenHomeView.vue';
+import {
+  createKitchenBusinessDateTracker,
+  loadKitchenHomeContext,
+} from './KitchenHomeView.vue';
 import {
   createKitchenReport,
   kitchenHomePath,
   kitchenReportMode,
   isCurrentKitchenBusinessDate,
+  kitchenBusinessDateSubmissionError,
   kitchenSubmissionFailure,
   loadKitchenReportContext,
   uploadKitchenReportAttachment,
@@ -57,6 +61,59 @@ describe('kitchen create-only views', () => {
     ).rejects.toThrow('KITCHEN_CONTEXT_UNAVAILABLE');
   });
 
+  it('refreshes the Tokyo date on visible/pageshow and removes lifecycle listeners', () => {
+    class FakeEventSource {
+      visibilityState: 'visible' | 'hidden' = 'visible';
+      readonly listeners = new Map<string, Set<() => void>>();
+
+      addEventListener(type: string, listener: () => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: () => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      dispatch(type: string) {
+        for (const listener of this.listeners.get(type) ?? []) listener();
+      }
+    }
+
+    const documentSource = new FakeEventSource();
+    const windowSource = new FakeEventSource();
+    let today = '2026-08-24';
+    let shownDate = today;
+    const tracker = createKitchenBusinessDateTracker({
+      today: () => today,
+      setBusinessDate: (value) => {
+        shownDate = value;
+      },
+      documentSource,
+      windowSource,
+    });
+
+    today = '2026-08-25';
+    documentSource.visibilityState = 'hidden';
+    documentSource.dispatch('visibilitychange');
+    expect(shownDate).toBe('2026-08-24');
+    documentSource.visibilityState = 'visible';
+    documentSource.dispatch('visibilitychange');
+    expect(shownDate).toBe('2026-08-25');
+    today = '2026-08-26';
+    windowSource.dispatch('pageshow');
+    expect(shownDate).toBe('2026-08-26');
+
+    tracker.dispose();
+    today = '2026-08-27';
+    documentSource.dispatch('visibilitychange');
+    windowSource.dispatch('pageshow');
+    expect(shownDate).toBe('2026-08-26');
+    expect(documentSource.listeners.get('visibilitychange')?.size).toBe(0);
+    expect(windowSource.listeners.get('pageshow')?.size).toBe(0);
+  });
+
   it('rejects a hand-edited historical or future kitchen date before loading context', async () => {
     const getContext = vi.fn();
 
@@ -69,6 +126,12 @@ describe('kitchen create-only views', () => {
     expect(
       isCurrentKitchenBusinessDate('2026-08-25', '2026-08-24'),
     ).toBe(false);
+    expect(
+      kitchenBusinessDateSubmissionError('2026-08-24', '2026-08-24'),
+    ).toBeNull();
+    expect(
+      kitchenBusinessDateSubmissionError('2026-08-23', '2026-08-24'),
+    ).toBe('营业日已更新，请返回厨房首页重新选择班次');
     await expect(
       loadKitchenReportContext(
         { getContext },
