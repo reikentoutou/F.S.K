@@ -35,7 +35,9 @@
 
 ## 2. 精确销毁清单与执行原则
 
-Gate C manifest 是权限受控的 JSON 文件，不入 Git，至少包含：approval ID、账号、region、已部署新系统 commit、观察期结束时刻、待退役资源 ARN/stack 名、保留/快照策略、逐资源 owner。它必须有经批准的 SHA-256，且资源集合与 Gate C 审批逐字一致。
+Gate C manifest 是权限受控的 JSON 文件，不入 Git，使用 `schemaVersion=1`，精确包含：approval ID、账号、region、已部署新系统 commit、观察期结束时刻、两个保护集 hash、待退役资源和保护资源。每个 resource item 只能包含 `category`、完整 `arn`、CloudFormation `resourceType`、`retentionPolicy`、`owner`；禁止通配符、重复 ARN、跨账号/region ARN、未知 service/type/category 和 retire/protect 交集。
+
+新 FSK 与 GameList 的保护清单分别由只读盘点生成独立 JSON 和 SHA-256，并作为 Gate C 审批输入。manifest 的 `protect` 必须精确等于两份权威清单之并集；新 FSK 清单必须显式保护 App、User Pool、AppSync API、四张表、Storage bucket、Kitchen Function 和至少一个活动 stack，GameList 清单不得为空。不能用 manifest 自己声称的 protect 集合替代外部权威清单。
 
 执行前先对每项做只读 `describe`，确认它属于**旧 Foundation**且不在保护清单；检测到未列出的 dependent resource、删除保护、retain/snapshot 歧义或名称冲突时停止。先停止旧 NestJS 常驻进程和旧入口，再按 manifest 逐项退役。SQLite/uploads 原始备份不随运行层自动删除。
 
@@ -51,15 +53,121 @@ set -euo pipefail
 : "${FSK_DEPLOY_COMMIT:?approved 40-character commit required}"
 : "${FSK_RETIREMENT_MANIFEST:?absolute reviewed retirement manifest required}"
 : "${FSK_RETIREMENT_MANIFEST_SHA256:?approved manifest SHA-256 required}"
+: "${FSK_NEW_FSK_PROTECT_SET:?absolute authoritative new FSK protect set required}"
+: "${FSK_NEW_FSK_PROTECT_SET_SHA256:?approved new FSK protect set SHA-256 required}"
+: "${FSK_GAMELIST_PROTECT_SET:?absolute authoritative GameList protect set required}"
+: "${FSK_GAMELIST_PROTECT_SET_SHA256:?approved GameList protect set SHA-256 required}"
 test "$FSK_EXPECTED_AWS_ACCOUNT_ID" = "444083008754"
 test "$FSK_EXPECTED_AWS_REGION" = "ap-northeast-1"
 test "${#FSK_DEPLOY_COMMIT}" -eq 40
 case "$FSK_DEPLOY_COMMIT" in *[!0-9a-f]*|'') exit 2 ;; esac
 case "$FSK_RETIREMENT_MANIFEST" in /*) ;; *) exit 3 ;; esac
+case "$FSK_NEW_FSK_PROTECT_SET" in /*) ;; *) exit 3 ;; esac
+case "$FSK_GAMELIST_PROTECT_SET" in /*) ;; *) exit 3 ;; esac
 test "$(aws sts get-caller-identity --query Account --output text)" = "$FSK_EXPECTED_AWS_ACCOUNT_ID"
 test "$(git rev-parse HEAD)" = "$FSK_DEPLOY_COMMIT"
 test "$(shasum -a 256 "$FSK_RETIREMENT_MANIFEST" | awk '{print $1}')" = "$FSK_RETIREMENT_MANIFEST_SHA256"
-FSK_GATE_C_APPROVAL_ID="$FSK_GATE_C_APPROVAL_ID" FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" node -e 'const fs=require("node:fs"); const p=process.argv[1]; const m=JSON.parse(fs.readFileSync(p,"utf8")); const exact=["approvalId","accountId","region","newSystemCommit","observationEndedAt","retire","protect"]; if(Object.keys(m).sort().join()!==exact.sort().join()||m.approvalId!==process.env.FSK_GATE_C_APPROVAL_ID||m.accountId!==process.env.FSK_EXPECTED_AWS_ACCOUNT_ID||m.region!==process.env.FSK_EXPECTED_AWS_REGION||m.newSystemCommit!==process.env.FSK_DEPLOY_COMMIT||!Array.isArray(m.retire)||m.retire.length===0||!Array.isArray(m.protect)||m.protect.length===0) process.exit(1); const retire=new Set(m.retire.map(x=>x.arn)); const protect=new Set(m.protect.map(x=>x.arn)); if([...retire].some(x=>!x||protect.has(x))) process.exit(1)' "$FSK_RETIREMENT_MANIFEST"
+test "$(shasum -a 256 "$FSK_NEW_FSK_PROTECT_SET" | awk '{print $1}')" = "$FSK_NEW_FSK_PROTECT_SET_SHA256"
+test "$(shasum -a 256 "$FSK_GAMELIST_PROTECT_SET" | awk '{print $1}')" = "$FSK_GAMELIST_PROTECT_SET_SHA256"
+FSK_GATE_C_APPROVAL_ID="$FSK_GATE_C_APPROVAL_ID" FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" FSK_NEW_FSK_PROTECT_SET_SHA256="$FSK_NEW_FSK_PROTECT_SET_SHA256" FSK_GAMELIST_PROTECT_SET_SHA256="$FSK_GAMELIST_PROTECT_SET_SHA256" node - "$FSK_RETIREMENT_MANIFEST" "$FSK_NEW_FSK_PROTECT_SET" "$FSK_GAMELIST_PROTECT_SET" <<'NODE'
+const fs = require('node:fs');
+const [manifestPath, newFskPath, gameListPath] = process.argv.slice(2);
+for (const path of [manifestPath, newFskPath, gameListPath]) {
+  const stat = fs.lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink()) process.exit(1);
+}
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const newFsk = JSON.parse(fs.readFileSync(newFskPath, 'utf8'));
+const gameList = JSON.parse(fs.readFileSync(gameListPath, 'utf8'));
+const exactKeys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join() === [...expected].sort().join();
+const itemKeys = ['category', 'arn', 'resourceType', 'retentionPolicy', 'owner'];
+const newFskCategoryType = {
+  NEW_FSK_AMPLIFY_APP: 'AWS::Amplify::App',
+  NEW_FSK_COGNITO_POOL: 'AWS::Cognito::UserPool',
+  NEW_FSK_APPSYNC_API: 'AWS::AppSync::GraphQLApi',
+  NEW_FSK_DYNAMODB_TABLE: 'AWS::DynamoDB::Table',
+  NEW_FSK_STORAGE_BUCKET: 'AWS::S3::Bucket',
+  NEW_FSK_FUNCTION: 'AWS::Lambda::Function',
+  NEW_FSK_CLOUDFORMATION_STACK: 'AWS::CloudFormation::Stack',
+};
+const legacyCategoryType = {
+  LEGACY_FSK_AMPLIFY_APP: 'AWS::Amplify::App',
+  LEGACY_FSK_COGNITO_POOL: 'AWS::Cognito::UserPool',
+  LEGACY_FSK_APPSYNC_API: 'AWS::AppSync::GraphQLApi',
+  LEGACY_FSK_DYNAMODB_TABLE: 'AWS::DynamoDB::Table',
+  LEGACY_FSK_STORAGE_BUCKET: 'AWS::S3::Bucket',
+  LEGACY_FSK_FUNCTION: 'AWS::Lambda::Function',
+  LEGACY_FSK_STACK: 'AWS::CloudFormation::Stack',
+  LEGACY_FSK_RDS_CLUSTER: 'AWS::RDS::DBCluster',
+  LEGACY_FSK_RDS_INSTANCE: 'AWS::RDS::DBInstance',
+  LEGACY_FSK_RDS_CLUSTER_PARAMETER_GROUP: 'AWS::RDS::DBClusterParameterGroup',
+  LEGACY_FSK_RDS_SUBNET_GROUP: 'AWS::RDS::DBSubnetGroup',
+  LEGACY_FSK_VPC: 'AWS::EC2::VPC',
+  LEGACY_FSK_SUBNET: 'AWS::EC2::Subnet',
+  LEGACY_FSK_ROUTE_TABLE: 'AWS::EC2::RouteTable',
+  LEGACY_FSK_VPC_ENDPOINT: 'AWS::EC2::VPCEndpoint',
+  LEGACY_FSK_SECURITY_GROUP: 'AWS::EC2::SecurityGroup',
+  LEGACY_FSK_INTERNET_GATEWAY: 'AWS::EC2::InternetGateway',
+  LEGACY_FSK_NAT_GATEWAY: 'AWS::EC2::NatGateway',
+  LEGACY_FSK_EIP: 'AWS::EC2::EIP',
+  LEGACY_FSK_SECRET: 'AWS::SecretsManager::Secret',
+};
+const arnContractByType = {
+  'AWS::Amplify::App': { service: 'amplify', resource: /^apps\/[a-z0-9]+$/ },
+  'AWS::Cognito::UserPool': { service: 'cognito-idp', resource: /^userpool\/ap-northeast-1_[A-Za-z0-9]+$/ },
+  'AWS::AppSync::GraphQLApi': { service: 'appsync', resource: /^apis\/[A-Za-z0-9]+$/ },
+  'AWS::DynamoDB::Table': { service: 'dynamodb', resource: /^table\/[A-Za-z0-9_.-]+$/ },
+  'AWS::Lambda::Function': { service: 'lambda', resource: /^function:[A-Za-z0-9_-]+$/ },
+  'AWS::CloudFormation::Stack': { service: 'cloudformation', resource: /^stack\/[A-Za-z0-9_.-]+\/[0-9a-f-]+$/i },
+  'AWS::RDS::DBCluster': { service: 'rds', resource: /^cluster:[A-Za-z0-9_.-]+$/ },
+  'AWS::RDS::DBInstance': { service: 'rds', resource: /^db:[A-Za-z0-9_.-]+$/ },
+  'AWS::RDS::DBClusterParameterGroup': { service: 'rds', resource: /^cluster-pg:[A-Za-z0-9_.-]+$/ },
+  'AWS::RDS::DBSubnetGroup': { service: 'rds', resource: /^subgrp:[A-Za-z0-9_.-]+$/ },
+  'AWS::EC2::VPC': { service: 'ec2', resource: /^vpc\/vpc-[A-Za-z0-9-]+$/ },
+  'AWS::EC2::Subnet': { service: 'ec2', resource: /^subnet\/subnet-[A-Za-z0-9-]+$/ },
+  'AWS::EC2::RouteTable': { service: 'ec2', resource: /^route-table\/rtb-[A-Za-z0-9-]+$/ },
+  'AWS::EC2::VPCEndpoint': { service: 'ec2', resource: /^vpc-endpoint\/vpce-[A-Za-z0-9-]+$/ },
+  'AWS::EC2::SecurityGroup': { service: 'ec2', resource: /^security-group\/sg-[A-Za-z0-9-]+$/ },
+  'AWS::EC2::InternetGateway': { service: 'ec2', resource: /^internet-gateway\/igw-[A-Za-z0-9-]+$/ },
+  'AWS::EC2::NatGateway': { service: 'ec2', resource: /^natgateway\/nat-[A-Za-z0-9-]+$/ },
+  'AWS::EC2::EIP': { service: 'ec2', resource: /^elastic-ip\/eipalloc-[A-Za-z0-9-]+$/ },
+  'AWS::SecretsManager::Secret': { service: 'secretsmanager', resource: /^secret:[A-Za-z0-9/_+=.@-]+$/ },
+  'AWS::S3::Bucket': { service: 's3', resource: /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/ },
+};
+const validateItem = (item, protect) => {
+  if (!exactKeys(item, itemKeys) || typeof item.owner !== 'string' || item.owner.trim() !== item.owner || !item.owner || /[*?\[\]{}]/.test(item.arn)) return false;
+  const expectedType = protect ? (item.category === 'GAMELIST_RESOURCE' ? item.resourceType : newFskCategoryType[item.category]) : legacyCategoryType[item.category];
+  if (!expectedType || expectedType !== item.resourceType) return false;
+  const parts = typeof item.arn === 'string' ? item.arn.split(':') : [];
+  if (parts.length < 6 || parts[0] !== 'arn' || parts[1] !== 'aws') return false;
+  const service = parts[2];
+  const arnContract = arnContractByType[item.resourceType];
+  if (!arnContract || arnContract.service !== service) return false;
+  const resource = parts.slice(5).join(':');
+  if (service === 's3') {
+    if (parts[3] !== '' || parts[4] !== '' || !arnContract.resource.test(resource)) return false;
+  } else if (parts[3] !== process.env.FSK_EXPECTED_AWS_REGION || parts[4] !== process.env.FSK_EXPECTED_AWS_ACCOUNT_ID || !arnContract.resource.test(resource)) return false;
+  if (protect) return item.retentionPolicy === 'DO_NOT_DELETE' && (item.category.startsWith('NEW_FSK_') || item.category === 'GAMELIST_RESOURCE');
+  return item.category.startsWith('LEGACY_FSK_') && ['DELETE', 'RETAIN', 'DELETE_AFTER_APPROVED_FINAL_SNAPSHOT'].includes(item.retentionPolicy);
+};
+const manifestKeys = ['schemaVersion', 'approvalId', 'accountId', 'region', 'newSystemCommit', 'observationEndedAt', 'newFskProtectSetSha256', 'gameListProtectSetSha256', 'retire', 'protect'];
+const observationDate = typeof manifest.observationEndedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(manifest.observationEndedAt) ? new Date(manifest.observationEndedAt) : null;
+if (!exactKeys(manifest, manifestKeys) || manifest.schemaVersion !== 1 || manifest.approvalId !== process.env.FSK_GATE_C_APPROVAL_ID || manifest.accountId !== process.env.FSK_EXPECTED_AWS_ACCOUNT_ID || manifest.region !== process.env.FSK_EXPECTED_AWS_REGION || manifest.newSystemCommit !== process.env.FSK_DEPLOY_COMMIT || !observationDate || Number.isNaN(observationDate.valueOf()) || observationDate.toISOString() !== manifest.observationEndedAt || manifest.newFskProtectSetSha256 !== process.env.FSK_NEW_FSK_PROTECT_SET_SHA256 || manifest.gameListProtectSetSha256 !== process.env.FSK_GAMELIST_PROTECT_SET_SHA256 || !Array.isArray(manifest.retire) || manifest.retire.length === 0 || !Array.isArray(manifest.protect) || !Array.isArray(newFsk) || !Array.isArray(gameList) || gameList.length === 0) process.exit(1);
+if (!manifest.retire.every((item) => validateItem(item, false)) || !manifest.protect.every((item) => validateItem(item, true)) || !newFsk.every((item) => validateItem(item, true) && item.category.startsWith('NEW_FSK_')) || !gameList.every((item) => validateItem(item, true) && item.category === 'GAMELIST_RESOURCE')) process.exit(1);
+const canonical = (items) => JSON.stringify([...items].sort((left, right) => left.arn.localeCompare(right.arn)));
+const manifestNewFsk = manifest.protect.filter((item) => item.category.startsWith('NEW_FSK_'));
+const manifestGameList = manifest.protect.filter((item) => item.category === 'GAMELIST_RESOURCE');
+if (canonical(manifestNewFsk) !== canonical(newFsk) || canonical(manifestGameList) !== canonical(gameList)) process.exit(1);
+const all = [...manifest.retire, ...manifest.protect];
+const arns = all.map((item) => item.arn);
+if (new Set(arns).size !== arns.length) process.exit(1);
+const counts = new Map();
+for (const item of newFsk) counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
+const exactRequired = { NEW_FSK_AMPLIFY_APP: 1, NEW_FSK_COGNITO_POOL: 1, NEW_FSK_APPSYNC_API: 1, NEW_FSK_DYNAMODB_TABLE: 4, NEW_FSK_STORAGE_BUCKET: 1, NEW_FSK_FUNCTION: 1 };
+if (Object.entries(exactRequired).some(([category, count]) => counts.get(category) !== count) || (counts.get('NEW_FSK_CLOUDFORMATION_STACK') ?? 0) < 1) process.exit(1);
+const expectedAppArn = `arn:aws:amplify:${process.env.FSK_EXPECTED_AWS_REGION}:${process.env.FSK_EXPECTED_AWS_ACCOUNT_ID}:apps/${process.env.FSK_AMPLIFY_APP_ID}`;
+if (!newFsk.some((item) => item.category === 'NEW_FSK_AMPLIFY_APP' && item.arn === expectedAppArn)) process.exit(1);
+NODE
 ```
 
 ## 3. 删除后的核对与长期保留

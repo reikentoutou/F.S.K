@@ -44,8 +44,8 @@ App 名称必须明确含 FSK 标识且不得等于或包含已登记的 GameLis
 
 仓库根 `amplify.yml` 使用 Amplify Gen 2 支持的 fullstack 流程：
 
-1. 固定 pnpm 9.15.0，执行 `pnpm install --frozen-lockfile`；
-2. 对 account、region、App ID、branch、commit 做 fail-closed 核对；
+1. 在任何依赖工具执行前，对 build 提供的 account、region、App ID、branch、commit 做 fail-closed 核对；
+2. 固定 pnpm 9.15.0，执行 `pnpm install --frozen-lockfile`；
 3. `ampx pipeline-deploy` 部署该 branch backend，并将 CLI 生成的 `amplify_outputs.json` 写到 `apps/web/public`；
 4. 确认 outputs 非空、被 Git ignore 且未被跟踪；
 5. 执行 `pnpm run check:all` 和 `pnpm run build:web`；
@@ -65,7 +65,9 @@ App 名称必须明确含 FSK 标识且不得等于或包含已登记的 GameLis
 
 ## 3. Gate A 执行与现场证据
 
-只有 Gate A 获得新的明确批准后，才可在干净的 detached exact commit 和目标账号会话中运行。所有变量由审批记录逐字填入；不得写入 shell history、仓库或日志中的凭据。下面命令没有默认 App、branch 或 commit，并在任何不一致时停止：
+只有 Gate A 获得新的明确批准后，才可在干净的 detached exact commit 和目标账号会话中运行。首次连接 repository 所需的 Git provider 授权必须由批准人在 Amplify Console 人工完成：创建**全新的**名为 `FSK`、platform=`WEB_COMPUTE` 的 App，选择审批记录中的 exact repository，并设置四个 tags。Console 返回的 App ID 必须写入审批记录和 `FSK_AMPLIFY_APP_ID`；脚本不会搜索或猜测 App，也不会复用 GameList。
+
+所有变量由审批记录逐字填入；不得写入 shell history、仓库或日志中的凭据。下面脚本随后做 App readback、受控 branch bootstrap、build environment、supported `customRules`、remote CAS、RELEASE job 和 HTTP 验收。任何未知既有 rewrite、App/repository/platform/tag/env 漂移或 job commit 漂移都会在发布验收前停止：
 
 ```bash
 set -euo pipefail
@@ -77,21 +79,65 @@ set -euo pipefail
 : "${FSK_DEPLOY_COMMIT:?approved 40-character commit required}"
 : "${FSK_AMPLIFY_APP_NAME:?approved independent FSK App name required}"
 : "${FSK_HOSTING_URL:?approved FSK Hosting URL required}"
+: "${FSK_GIT_REMOTE:?approved local Git remote name required}"
+: "${FSK_GIT_REMOTE_URL:?approved repository URL required}"
+: "${FSK_DEPLOY_DEADLINE_EPOCH:?approved deployment deadline required}"
 test "$FSK_EXPECTED_AWS_ACCOUNT_ID" = "444083008754"
 test "$FSK_EXPECTED_AWS_REGION" = "ap-northeast-1"
 test "${#FSK_DEPLOY_COMMIT}" -eq 40
 case "$FSK_DEPLOY_COMMIT" in *[!0-9a-f]*|'') exit 2 ;; esac
+case "$FSK_DEPLOY_DEADLINE_EPOCH" in *[!0-9]*|'') exit 2 ;; esac
+case "$FSK_GIT_REMOTE" in -*|*[!A-Za-z0-9._/-]*|'') exit 2 ;; esac
+test "$(date +%s)" -lt "$FSK_DEPLOY_DEADLINE_EPOCH"
 test "$FSK_AMPLIFY_APP_NAME" = "FSK"
 test "$(aws sts get-caller-identity --query Account --output text)" = "$FSK_EXPECTED_AWS_ACCOUNT_ID"
 test "$(git rev-parse HEAD)" = "$FSK_DEPLOY_COMMIT"
 test -z "$(git status --porcelain)"
+test "$(git remote get-url "$FSK_GIT_REMOTE")" = "$FSK_GIT_REMOTE_URL"
+test "$(git remote get-url --push "$FSK_GIT_REMOTE")" = "$FSK_GIT_REMOTE_URL"
 FSK_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$FSK_TMP_DIR"' EXIT
-test "$(aws amplify get-app --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --query 'app.name' --output text)" = "$FSK_AMPLIFY_APP_NAME"
-test "$(aws amplify get-branch --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" --query 'branch.branchName' --output text)" = "$FSK_AMPLIFY_BRANCH"
+node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1],JSON.stringify([{source:"</^[^.]+$/>",target:"/index.html",status:"200"}]))' "$FSK_TMP_DIR/custom-rules.json"
+FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_AMPLIFY_APP_NAME="$FSK_AMPLIFY_APP_NAME" FSK_GIT_REMOTE_URL="$FSK_GIT_REMOTE_URL" aws amplify get-app --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" > "$FSK_TMP_DIR/app-before.json"
+FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_AMPLIFY_APP_NAME="$FSK_AMPLIFY_APP_NAME" FSK_GIT_REMOTE_URL="$FSK_GIT_REMOTE_URL" node -e 'const fs=require("node:fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).app; const e=process.env; const arn=`arn:aws:amplify:${e.FSK_EXPECTED_AWS_REGION}:${e.FSK_EXPECTED_AWS_ACCOUNT_ID}:apps/${e.FSK_AMPLIFY_APP_ID}`; const tags={Project:"FSK",Environment:"production",ManagedBy:"AmplifyGen2",CostCenter:"FSK"}; const desired=[{source:"</^[^.]+$/>",target:"/index.html",status:"200"}]; if(!a||a.appId!==e.FSK_AMPLIFY_APP_ID||a.appArn!==arn||a.name!==e.FSK_AMPLIFY_APP_NAME||a.repository!==e.FSK_GIT_REMOTE_URL||a.platform!=="WEB_COMPUTE"||Object.entries(tags).some(([k,v])=>a.tags?.[k]!==v)||(!Object.is(JSON.stringify(a.customRules??[]),JSON.stringify([]))&&!Object.is(JSON.stringify(a.customRules),JSON.stringify(desired)))) process.exit(1)' "$FSK_TMP_DIR/app-before.json"
+FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_AMPLIFY_BRANCH="$FSK_AMPLIFY_BRANCH" FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" node -e 'const fs=require("node:fs"); const e=process.env; fs.writeFileSync(process.argv[1],JSON.stringify({FSK_EXPECTED_AWS_ACCOUNT_ID:e.FSK_EXPECTED_AWS_ACCOUNT_ID,FSK_EXPECTED_AWS_REGION:e.FSK_EXPECTED_AWS_REGION,FSK_EXPECTED_AMPLIFY_APP_ID:e.FSK_AMPLIFY_APP_ID,FSK_EXPECTED_AMPLIFY_BRANCH:e.FSK_AMPLIFY_BRANCH,FSK_EXPECTED_DEPLOY_COMMIT:e.FSK_DEPLOY_COMMIT}))' "$FSK_TMP_DIR/branch-env.json"
+if aws amplify get-branch --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" > "$FSK_TMP_DIR/branch-before.json" 2> "$FSK_TMP_DIR/branch-before.err"; then
+  FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_AMPLIFY_BRANCH="$FSK_AMPLIFY_BRANCH" FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" node -e 'const fs=require("node:fs"); const b=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).branch; const e=process.env; const expected={FSK_EXPECTED_AWS_ACCOUNT_ID:e.FSK_EXPECTED_AWS_ACCOUNT_ID,FSK_EXPECTED_AWS_REGION:e.FSK_EXPECTED_AWS_REGION,FSK_EXPECTED_AMPLIFY_APP_ID:e.FSK_AMPLIFY_APP_ID,FSK_EXPECTED_AMPLIFY_BRANCH:e.FSK_AMPLIFY_BRANCH,FSK_EXPECTED_DEPLOY_COMMIT:e.FSK_DEPLOY_COMMIT}; const env=b?.environmentVariables; const exactEnv=env&&Object.keys(env).length===Object.keys(expected).length&&Object.entries(expected).every(([k,v])=>env[k]===v); if(!b||b.branchName!==e.FSK_AMPLIFY_BRANCH||b.stage!=="PRODUCTION"||b.framework!=="Vue"||b.enableAutoBuild!==false||!exactEnv) process.exit(1)' "$FSK_TMP_DIR/branch-before.json"
+else
+  FSK_BRANCH_READ_STATUS="$?"
+  if ! grep -q 'NotFoundException' "$FSK_TMP_DIR/branch-before.err"; then
+    cat "$FSK_TMP_DIR/branch-before.err" >&2
+    exit "$FSK_BRANCH_READ_STATUS"
+  fi
+  aws amplify create-branch --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" --framework Vue --stage PRODUCTION --no-enable-auto-build --environment-variables "file://$FSK_TMP_DIR/branch-env.json"
+fi
+aws amplify update-branch --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" --framework Vue --stage PRODUCTION --no-enable-auto-build --environment-variables "file://$FSK_TMP_DIR/branch-env.json"
+aws amplify get-branch --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" > "$FSK_TMP_DIR/branch-after.json"
+FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_AMPLIFY_BRANCH="$FSK_AMPLIFY_BRANCH" FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" node -e 'const fs=require("node:fs"); const b=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).branch; const e=process.env; const expected={FSK_EXPECTED_AWS_ACCOUNT_ID:e.FSK_EXPECTED_AWS_ACCOUNT_ID,FSK_EXPECTED_AWS_REGION:e.FSK_EXPECTED_AWS_REGION,FSK_EXPECTED_AMPLIFY_APP_ID:e.FSK_AMPLIFY_APP_ID,FSK_EXPECTED_AMPLIFY_BRANCH:e.FSK_AMPLIFY_BRANCH,FSK_EXPECTED_DEPLOY_COMMIT:e.FSK_DEPLOY_COMMIT}; const env=b?.environmentVariables; const exactEnv=env&&Object.keys(env).length===Object.keys(expected).length&&Object.entries(expected).every(([k,v])=>env[k]===v); if(!b||b.branchName!==e.FSK_AMPLIFY_BRANCH||b.stage!=="PRODUCTION"||b.framework!=="Vue"||b.enableAutoBuild!==false||!exactEnv) process.exit(1)' "$FSK_TMP_DIR/branch-after.json"
+aws amplify update-app --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --custom-rules "file://$FSK_TMP_DIR/custom-rules.json"
+aws amplify get-app --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" > "$FSK_TMP_DIR/app-after.json"
+node -e 'const fs=require("node:fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).app; const desired=[{source:"</^[^.]+$/>",target:"/index.html",status:"200"}]; if(JSON.stringify(a?.customRules)!==JSON.stringify(desired)) process.exit(1)' "$FSK_TMP_DIR/app-after.json"
+FSK_REMOTE_OLD_COMMIT="$(git ls-remote --heads "$FSK_GIT_REMOTE_URL" "refs/heads/$FSK_AMPLIFY_BRANCH" | awk 'NF { print $1 }')"
+if [ -n "$FSK_REMOTE_OLD_COMMIT" ]; then
+  test "${#FSK_REMOTE_OLD_COMMIT}" -eq 40
+  case "$FSK_REMOTE_OLD_COMMIT" in *[!0-9a-f]*|'') exit 3 ;; esac
+fi
+printf 'REMOTE_OLD_COMMIT=%s\n' "${FSK_REMOTE_OLD_COMMIT:-ABSENT}"
+git push --force-with-lease="refs/heads/$FSK_AMPLIFY_BRANCH:$FSK_REMOTE_OLD_COMMIT" "$FSK_GIT_REMOTE" "$FSK_DEPLOY_COMMIT:refs/heads/$FSK_AMPLIFY_BRANCH"
+test "$(git ls-remote --heads "$FSK_GIT_REMOTE_URL" "refs/heads/$FSK_AMPLIFY_BRANCH" | awk 'NF { print $1 }')" = "$FSK_DEPLOY_COMMIT"
 FSK_JOB_ID="$(aws amplify start-job --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" --job-type RELEASE --commit-id "$FSK_DEPLOY_COMMIT" --commit-message "Gate A ${FSK_GATE_A_APPROVAL_ID}" --query 'jobSummary.jobId' --output text)"
 test -n "$FSK_JOB_ID"
-aws amplify get-job --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" --job-id "$FSK_JOB_ID"
+while true; do
+  test "$(date +%s)" -lt "$FSK_DEPLOY_DEADLINE_EPOCH"
+  aws amplify get-job --region "$FSK_EXPECTED_AWS_REGION" --app-id "$FSK_AMPLIFY_APP_ID" --branch-name "$FSK_AMPLIFY_BRANCH" --job-id "$FSK_JOB_ID" > "$FSK_TMP_DIR/job.json"
+  FSK_JOB_STATUS="$(FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" FSK_JOB_ID="$FSK_JOB_ID" node -e 'const fs=require("node:fs"); const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).job?.summary; if(!s||s.jobId!==process.env.FSK_JOB_ID||s.commitId!==process.env.FSK_DEPLOY_COMMIT) process.exit(1); process.stdout.write(s.status)' "$FSK_TMP_DIR/job.json")"
+  case "$FSK_JOB_STATUS" in
+    SUCCEED) break ;;
+    PENDING|PROVISIONING|RUNNING) sleep 5 ;;
+    FAILED|CANCELLED) exit 4 ;;
+    *) exit 5 ;;
+  esac
+done
 curl -fsS -D "$FSK_TMP_DIR/manifest.headers" -o "$FSK_TMP_DIR/manifest.json" "${FSK_HOSTING_URL%/}/manifest.json"
 node -e 'const fs=require("node:fs"); const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(m.display!=="standalone") process.exit(1)' "$FSK_TMP_DIR/manifest.json"
 curl -fsS -o "$FSK_TMP_DIR/owner-route.html" "${FSK_HOSTING_URL%/}/owner/reports"

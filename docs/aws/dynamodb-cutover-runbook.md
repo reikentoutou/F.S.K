@@ -74,10 +74,11 @@ test "$(aws sts get-caller-identity --query Account --output text)" = "$FSK_EXPE
 test "$(git rev-parse HEAD)" = "$FSK_DEPLOY_COMMIT"
 test -z "$(git status --porcelain)"
 FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" node -e 'const fs=require("node:fs"); const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(c.accountId!==process.env.FSK_EXPECTED_AWS_ACCOUNT_ID||c.region!==process.env.FSK_EXPECTED_AWS_REGION||c.amplifyApp?.appId!==process.env.FSK_AMPLIFY_APP_ID||c.amplifyApp?.name!=="FSK") process.exit(1)' "$FSK_TARGET_CONFIG"
-pnpm run migration:dry-run -- --sqlite "$FSK_SQLITE_SNAPSHOT" --uploads "$FSK_UPLOADS_SNAPSHOT" --out "$FSK_MIGRATION_OUTPUT_DIR"
-test "$(shasum -a 256 "$FSK_MIGRATION_OUTPUT_DIR/bundle.json" | awk '{print $1}')" = "$FSK_EXPECTED_BUNDLE_SHA256"
-pnpm run migration:import -- --apply --approval-id "$FSK_GATE_B_APPROVAL_ID" --bundle "$FSK_MIGRATION_OUTPUT_DIR/bundle.json" --uploads-root "$FSK_UPLOADS_SNAPSHOT" --checkpoint "$FSK_MIGRATION_OUTPUT_DIR/import-checkpoint.json" --target-config "$FSK_TARGET_CONFIG"
-pnpm run migration:verify -- --bundle "$FSK_MIGRATION_OUTPUT_DIR/bundle.json" --target-config "$FSK_TARGET_CONFIG"
+pnpm run migration:dry-run --sqlite "$FSK_SQLITE_SNAPSHOT" --uploads "$FSK_UPLOADS_SNAPSHOT" --out "$FSK_MIGRATION_OUTPUT_DIR"
+test -s "$FSK_MIGRATION_OUTPUT_DIR/migration-report.json"
+test "$(shasum -a 256 "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" | awk '{print $1}')" = "$FSK_EXPECTED_BUNDLE_SHA256"
+pnpm run migration:import --apply --approval-id "$FSK_GATE_B_APPROVAL_ID" --bundle "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" --uploads-root "$FSK_UPLOADS_SNAPSHOT" --checkpoint "$FSK_MIGRATION_OUTPUT_DIR/import-checkpoint.json" --target-config "$FSK_TARGET_CONFIG"
+pnpm run migration:verify --verify --bundle "$FSK_MIGRATION_OUTPUT_DIR/migration-bundle.json" --target-config "$FSK_TARGET_CONFIG"
 ```
 
 ## 4. 独立验证和业务验收
