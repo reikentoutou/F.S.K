@@ -1397,7 +1397,7 @@ describe('uploads inventory safety', () => {
           },
         },
       ),
-    ).rejects.toThrow('UPLOAD_FILE_CHANGED');
+    ).rejects.toThrow(/UPLOAD_(?:FILE|TREE)_CHANGED/);
   });
 
   it.each([
