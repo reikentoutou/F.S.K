@@ -13,6 +13,9 @@
     "start:prod": "node dist/main",
     "prisma": "prisma",
     "migration:dry-run": "pnpm --dir ../.. exec tsx apps/api/scripts/amplify-migration/transform.ts",
+    "migration:import": "pnpm --dir ../.. exec tsx apps/api/scripts/amplify-migration/import.ts",
+    "migration:verify": "pnpm --dir ../.. exec tsx apps/api/scripts/amplify-migration/verify.ts",
+    "migration:provision-users": "pnpm --dir ../.. exec tsx apps/api/scripts/amplify-migration/provision-users.ts",
     "typecheck:migration": "tsc -p tsconfig.migration.json",
     "test": "vitest run",
     "postinstall": "prisma generate"
@@ -48,6 +51,12 @@
     "uid": "^2.0.2"
   },
   "devDependencies": {
+    "@aws-sdk/client-amplify": "3.1116.0",
+    "@aws-sdk/client-cloudformation": "3.1116.0",
+    "@aws-sdk/client-cognito-identity-provider": "3.1116.0",
+    "@aws-sdk/client-dynamodb": "3.1116.0",
+    "@aws-sdk/client-s3": "3.1116.0",
+    "@aws-sdk/client-sts": "3.1116.0",
     "@nestjs/cli": "^10.4.9",
     "@types/adm-zip": "^0.5.8",
     "@types/archiver": "^7.0.0",
