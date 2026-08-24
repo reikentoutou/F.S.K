@@ -457,6 +457,12 @@ describe('active DynamoDB backend composition', () => {
     const [identityPool] = resources
     .map(({ resource }) => resource)
     .filter((resource) => resource.Type === 'AWS::Cognito::IdentityPool');
+    const [userPool] = resources
+    .map(({ resource }) => resource)
+    .filter((resource) => resource.Type === 'AWS::Cognito::UserPool');
+    const [userPoolClient] = resources
+    .map(({ resource }) => resource)
+    .filter((resource) => resource.Type === 'AWS::Cognito::UserPoolClient');
     const dynamoTableTypes = resourceTypes.filter(
     (type) => type === 'AWS::DynamoDB::Table' || type === 'Custom::AmplifyDynamoDBTable',
     );
@@ -511,13 +517,23 @@ describe('active DynamoDB backend composition', () => {
         resource.Type === 'AWS::DynamoDB::Table' ||
         resource.Type === 'Custom::AmplifyDynamoDBTable',
       )
-      .map(({ logicalId, resource }) => ({
-        billingMode: resource.Properties?.BillingMode,
-        deletionPolicy: resource.DeletionPolicy,
-        logicalId,
-        pointInTimeRecoverySpecification:
-          resource.Properties?.PointInTimeRecoverySpecification,
-      }))
+      .map(({ logicalId, path, resource }) => {
+        const template = templates.find((entry) => entry.path === path)?.template;
+        return {
+          billingCondition:
+            template?.Conditions?.ShouldUsePayPerRequestBilling,
+          billingMode: resource.Properties?.billingMode,
+          billingModeDefault:
+            template?.Parameters?.DynamoDBBillingMode?.Default,
+          logicalId,
+          pitrCondition:
+            template?.Conditions?.ShouldUsePointInTimeRecovery,
+          pitrDefault:
+            template?.Parameters?.DynamoDBEnablePointInTimeRecovery?.Default,
+          pointInTimeRecoverySpecification:
+            resource.Properties?.pointInTimeRecoverySpecification,
+        };
+      })
       .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
     const dynamoParameterDefaults = templates
       .flatMap(({ path, template }) =>
@@ -561,6 +577,25 @@ describe('active DynamoDB backend composition', () => {
       .filter(({ resource }) => resource.Type === 'AWS::Cognito::UserPoolGroup')
       .map(({ resource }) => resource.Properties?.GroupName)
       .sort();
+    const [kitchenGroup] = resources
+      .filter(({ resource }) =>
+        resource.Type === 'AWS::Cognito::UserPoolGroup' &&
+        resource.Properties?.GroupName === 'KITCHEN',
+      )
+      .map(({ resource }) => resource.Properties);
+    const kitchenStoragePolicies = resources
+      .filter(({ resource }) => resource.Type === 'AWS::IAM::Policy')
+      .filter(({ resource }) =>
+        (resource.Properties?.Roles ?? []).some(
+          (role) =>
+            typeof role?.Ref === 'string' &&
+            role.Ref.includes('KITCHENGroupRole'),
+        ),
+      )
+      .map(({ resource }) => ({
+        roles: resource.Properties?.Roles,
+        statements: resource.Properties?.PolicyDocument?.Statement,
+      }));
     const kitchenContextResolvers = resources
       .filter(({ resource }) =>
         resource.Type === 'AWS::AppSync::Resolver' &&
@@ -609,6 +644,8 @@ describe('active DynamoDB backend composition', () => {
       authenticationType: api?.Properties?.AuthenticationType,
       additionalAuthenticationProviders: api?.Properties?.AdditionalAuthenticationProviders,
       allowUnauthenticatedIdentities: identityPool?.Properties?.AllowUnauthenticatedIdentities,
+      userPool: userPool?.Properties,
+      userPoolClient: userPoolClient?.Properties,
       ec2Types: resourceTypes.filter((type) => type.startsWith('AWS::EC2::')),
       rdsTypes: resourceTypes.filter((type) => type.startsWith('AWS::RDS::')),
       secretTypes: resourceTypes.filter((type) =>
@@ -621,6 +658,8 @@ describe('active DynamoDB backend composition', () => {
       dynamoParameterDefaults,
       dynamoTables,
       kitchenContextResolvers,
+      kitchenGroup,
+      kitchenStoragePolicies,
       kitchenContextSchemaLines: transformedSchema
         .split('\\n')
         .filter((line) => line.includes('KitchenContext')),
@@ -820,6 +859,53 @@ describe('active DynamoDB backend composition', () => {
         forbiddenEnvironmentVariables: [],
       });
       expect(evidence.userPoolGroups).toEqual(['KITCHEN', 'OWNER']);
+      expect(evidence.userPool).toMatchObject({
+        AccountRecoverySetting: {
+          RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }],
+        },
+        AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
+        MfaConfiguration: 'OFF',
+        UsernameAttributes: [],
+      });
+      expect(evidence.userPoolClient).toMatchObject({
+        ExplicitAuthFlows: [
+          'ALLOW_USER_PASSWORD_AUTH',
+          'ALLOW_USER_SRP_AUTH',
+          'ALLOW_REFRESH_TOKEN_AUTH',
+        ],
+      });
+      expect(evidence.kitchenGroup).toMatchObject({
+        GroupName: 'KITCHEN',
+        RoleArn: {
+          'Fn::GetAtt': [expect.stringMatching(/KITCHENGroupRole[A-F0-9]+$/), 'Arn'],
+        },
+      });
+      expect(evidence.kitchenStoragePolicies).toHaveLength(1);
+      expect(evidence.kitchenStoragePolicies[0].roles).toEqual([
+        {
+          Ref: expect.stringMatching(/KITCHENGroupRole[A-F0-9]+Ref$/),
+        },
+      ]);
+      expect(evidence.kitchenStoragePolicies[0].statements).toEqual([
+        {
+          Action: 's3:PutObject',
+          Effect: 'Allow',
+          Resource: {
+            'Fn::Join': [
+              '',
+              [
+                {
+                  'Fn::GetAtt': [
+                    expect.stringMatching(/Bucket[A-F0-9]+$/),
+                    'Arn',
+                  ],
+                },
+                '/submissions/${cognito-identity.amazonaws.com:sub}/*',
+              ],
+            ],
+          },
+        },
+      ]);
       expect(evidence.kitchenContextResolvers).toEqual([
         { fieldName: 'getKitchenContext', typeName: 'Query' },
       ]);
@@ -839,6 +925,48 @@ describe('active DynamoDB backend composition', () => {
         runtime: 'nodejs22.x',
       });
       expect(evidence.dynamoTables).toHaveLength(4);
+      expect(
+        evidence.dynamoTables.map(
+          ({ logicalId }: { logicalId: string }) => logicalId,
+        ),
+      ).toEqual([
+        'AppSettingTable',
+        'DailyReportTable',
+        'ResponsiblePersonTable',
+        'ShiftDefinitionTable',
+      ]);
+      for (const table of evidence.dynamoTables) {
+        expect(table).toMatchObject({
+          billingCondition: {
+            'Fn::Equals': [
+              { Ref: 'DynamoDBBillingMode' },
+              'PAY_PER_REQUEST',
+            ],
+          },
+          billingMode: {
+            'Fn::If': [
+              'ShouldUsePayPerRequestBilling',
+              'PAY_PER_REQUEST',
+              { Ref: 'AWS::NoValue' },
+            ],
+          },
+          billingModeDefault: 'PAY_PER_REQUEST',
+          pitrCondition: {
+            'Fn::Equals': [
+              { Ref: 'DynamoDBEnablePointInTimeRecovery' },
+              'true',
+            ],
+          },
+          pitrDefault: 'true',
+          pointInTimeRecoverySpecification: {
+            'Fn::If': [
+              'ShouldUsePointInTimeRecovery',
+              { PointInTimeRecoveryEnabled: true },
+              { Ref: 'AWS::NoValue' },
+            ],
+          },
+        });
+      }
       const billingModeDefaults = evidence.dynamoParameterDefaults.filter(
         ({ name }: { name: string }) => name === 'DynamoDBBillingMode',
       );

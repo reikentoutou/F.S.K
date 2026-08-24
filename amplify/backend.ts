@@ -1,5 +1,6 @@
 import { defineBackend } from '@aws-amplify/backend';
 import { CfnParameter, Tags } from 'aws-cdk-lib';
+import { Policy, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 
 import { applyProductionAuthOverrides } from './auth/overrides.js';
 import { auth } from './auth/resource.js';
@@ -29,6 +30,24 @@ cfnIdentityPool.allowUnauthenticatedIdentities = false;
 applyProductionStorageBucketOverrides(
   backend.storage.resources.cfnResources.cfnBucket,
 );
+
+const kitchenGroup = backend.auth.resources.groups.KITCHEN;
+if (!kitchenGroup) {
+  throw new Error('KITCHEN_GROUP_NOT_FOUND');
+}
+new Policy(backend.storage.stack, 'KitchenSubmissionWritePolicy', {
+  roles: [kitchenGroup.role],
+  statements: [
+    new PolicyStatement({
+      actions: ['s3:PutObject'],
+      resources: [
+        backend.storage.resources.bucket.arnForObjects(
+          'submissions/${cognito-identity.amazonaws.com:sub}/*',
+        ),
+      ],
+    }),
+  ],
+});
 
 const kitchenContextTables = [
   ['APP_SETTING_TABLE_NAME', 'AppSetting'],
