@@ -1480,6 +1480,83 @@ esac`,
     }
   });
 
+  it('checks an empty initial residual set before the operations security group exists', () => {
+    const script = `set -euo pipefail
+fsk_run_current_deadline() { "$@"; }
+fsk_count_owned_application_route_residuals() { printf '0\\n'; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_select_exact_owned_resource_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_operations_sg_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_igw_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_public_subnet_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_route_table_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_eip_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_nat_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_select_exact_owned_db_ingress_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_db_ingress_ids')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_discover_owned_residual_count')}
+fsk_discover_owned_residual_count
+`;
+    const result = runWithMockAws(
+      script,
+      `case " $* " in
+  *' ec2 describe-security-groups '*) printf '{"SecurityGroups":[]}' ;;
+  *' ec2 describe-internet-gateways '*) printf '{"InternetGateways":[]}' ;;
+  *' ec2 describe-subnets '*) printf '{"Subnets":[]}' ;;
+  *' ec2 describe-route-tables '*) printf '{"RouteTables":[]}' ;;
+  *' ec2 describe-addresses '*) printf '{"Addresses":[]}' ;;
+  *' ec2 describe-nat-gateways '*) printf '{"NatGateways":[]}' ;;
+  *' ec2 describe-security-group-rules '*) printf '{"SecurityGroupRules":[]}' ;;
+  *) exit 64 ;;
+esac`,
+      {
+        ...OWNERSHIP_ENVIRONMENT,
+        FSK_DB_SECURITY_GROUP_ID: 'sg-database',
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('0\n');
+  });
+
+  it('counts a same-tuple orphan database ingress before the operations security group exists', () => {
+    const script = `set -euo pipefail
+unset FSK_OPS_SG_ID
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_assert_exact_ownership_tags')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_select_exact_owned_db_ingress_ids')}
+printf '%s' "$FSK_RULE_RESPONSE" | fsk_select_exact_owned_db_ingress_ids
+`;
+    const result = spawnSync('bash', ['-c', script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...OWNERSHIP_ENVIRONMENT,
+        FSK_DB_SECURITY_GROUP_ID: 'sg-database',
+        FSK_RULE_RESPONSE: JSON.stringify({
+          SecurityGroupRules: [
+            {
+              SecurityGroupRuleId: 'sgr-orphan',
+              GroupId: 'sg-database',
+              GroupOwnerId: '444083008754',
+              IsEgress: false,
+              IpProtocol: 'tcp',
+              FromPort: 5432,
+              ToPort: 5432,
+              ReferencedGroupInfo: {
+                GroupId: 'sg-orphan-operations',
+                UserId: '444083008754',
+              },
+              Tags: OWNERSHIP_TAGS,
+            },
+          ],
+        }),
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('sgr-orphan\n');
+  });
+
   it.each([
     ['deadline timeout', 'timeout'],
     ['describe failure', 'failure'],

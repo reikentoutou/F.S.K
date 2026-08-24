@@ -571,10 +571,11 @@ fsk_select_exact_owned_db_ingress_ids() {
   input="$(cat)"
   candidates="$(FSK_RULES_JSON="$input" \
     FSK_EXPECTED_DB_SG="$FSK_DB_SECURITY_GROUP_ID" \
-    FSK_EXPECTED_OPS_SG="$FSK_OPS_SG_ID" \
+    FSK_EXPECTED_OPS_SG="${FSK_OPS_SG_ID:-}" \
     FSK_EXPECTED_ACCOUNT="$FSK_AWS_ACCOUNT_ID" \
     node -e '
       const input = JSON.parse(process.env.FSK_RULES_JSON ?? "");
+      const expectedOperationsGroup = process.env.FSK_EXPECTED_OPS_SG ?? "";
       if (!input || typeof input !== "object" || Array.isArray(input) ||
           !Object.hasOwn(input, "SecurityGroupRules") ||
           !Array.isArray(input.SecurityGroupRules)) process.exit(2);
@@ -605,7 +606,8 @@ fsk_select_exact_owned_db_ingress_ids() {
           rule.GroupOwnerId === process.env.FSK_EXPECTED_ACCOUNT &&
           rule.IsEgress === false && rule.IpProtocol === "tcp" &&
           rule.FromPort === 5432 && rule.ToPort === 5432 &&
-          rule.ReferencedGroupInfo?.GroupId === process.env.FSK_EXPECTED_OPS_SG &&
+          (!expectedOperationsGroup ||
+            rule.ReferencedGroupInfo?.GroupId === expectedOperationsGroup) &&
           rule.ReferencedGroupInfo?.UserId === process.env.FSK_EXPECTED_ACCOUNT;
         process.stdout.write(`${rule.SecurityGroupRuleId}\t${semantic ? 1 : 0}\t${encodeURIComponent(JSON.stringify(tags))}\n`);
       }
