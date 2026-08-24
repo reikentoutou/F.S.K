@@ -57,7 +57,7 @@ export function pendingKey(
   assertStorageId(draftId, 'draftId');
   assertStorageId(attachmentId, 'attachmentId');
 
-  return `pending/${subject}/${draftId}/${attachmentId}/${sanitizeFileName(fileName)}`;
+  return `submissions/${subject}/${draftId}/${attachmentId}/${sanitizeFileName(fileName)}`;
 }
 
 export function formalAttachmentKey(
@@ -79,7 +79,7 @@ export function assertOwnedPendingKey(key: string, subject: string): void {
 
   try {
     if (
-      namespace !== 'pending' ||
+      namespace !== 'submissions' ||
       keySubject !== subject ||
       extra.length > 0 ||
       fileName === undefined

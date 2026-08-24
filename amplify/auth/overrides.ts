@@ -1,8 +1,8 @@
 import { CfnUserPool, CfnUserPoolClient } from 'aws-cdk-lib/aws-cognito';
 
-export const COGNITO_GROUPS = ['ADMIN', 'KITCHEN'] as const;
+export const COGNITO_GROUPS = ['OWNER', 'KITCHEN'] as const;
 
-export function applyStagingAuthOverrides(
+export function applyProductionAuthOverrides(
   pool: CfnUserPool,
   client: CfnUserPoolClient,
 ): void {
@@ -22,3 +22,5 @@ export function applyStagingAuthOverrides(
     'ALLOW_REFRESH_TOKEN_AUTH',
   ];
 }
+
+export const applyStagingAuthOverrides = applyProductionAuthOverrides;

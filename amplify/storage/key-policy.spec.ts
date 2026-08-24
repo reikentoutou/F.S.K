@@ -7,20 +7,21 @@ import {
 } from './key-policy.js';
 import {
   applyStagingStorageBucketOverrides,
+  productionStorageAccess,
   type StorageBucketOverrideTarget,
 } from './resource.js';
 
 describe('Storage key construction', () => {
-  it('builds the exact pending namespace and basenames filename input', () => {
+  it('builds the exact identity-scoped submission namespace and basenames filename input', () => {
     expect(pendingKey('sub-a', 'draft-1', 'att-1', '../票据.jpg')).toBe(
-      'pending/sub-a/draft-1/att-1/票据.jpg',
+      'submissions/sub-a/draft-1/att-1/票据.jpg',
     );
   });
 
   it('treats Windows separators as filename input separators', () => {
     expect(
       pendingKey('sub-a', 'draft-1', 'att-1', String.raw`C:\upload\票据.jpg`),
-    ).toBe('pending/sub-a/draft-1/att-1/票据.jpg');
+    ).toBe('submissions/sub-a/draft-1/att-1/票据.jpg');
   });
 
   it('builds the formal namespace and removes control characters', () => {
@@ -73,7 +74,7 @@ describe('Storage key construction', () => {
     const fileName = `${'票'.repeat(83)}文件`;
 
     expect(pendingKey('sub-a', 'draft-1', 'att-1', fileName)).toBe(
-      `pending/sub-a/draft-1/att-1/${fileName}`,
+      `submissions/sub-a/draft-1/att-1/${fileName}`,
     );
   });
 
@@ -109,21 +110,21 @@ describe('Storage key construction', () => {
     const fileName = '領収書-🧾-👨‍👩‍👧.jpg';
 
     expect(pendingKey('sub-a', 'draft-1', 'att-1', fileName)).toBe(
-      `pending/sub-a/draft-1/att-1/${fileName}`,
+      `submissions/sub-a/draft-1/att-1/${fileName}`,
     );
   });
 });
 
-describe('pending key ownership', () => {
-  it('accepts a canonical pending key owned by the subject', () => {
-    const key = 'pending/sub-a/draft-1/att-1/票据.jpg';
+describe('submission key ownership', () => {
+  it('accepts a canonical submission key owned by the subject', () => {
+    const key = 'submissions/sub-a/draft-1/att-1/票据.jpg';
 
     expect(() => assertOwnedPendingKey(key, 'sub-a')).not.toThrow();
   });
 
-  it('rejects a pending key owned by another subject', () => {
+  it('rejects a submission key owned by another subject', () => {
     expect(() =>
-      assertOwnedPendingKey('pending/sub-b/draft-1/att-1/x.jpg', 'sub-a'),
+      assertOwnedPendingKey('submissions/sub-b/draft-1/att-1/x.jpg', 'sub-a'),
     ).toThrow('PENDING_KEY_NOT_OWNED');
   });
 
@@ -137,15 +138,60 @@ describe('pending key ownership', () => {
   });
 
   it.each([
-    'pending/sub-a/../att-1/x.jpg',
-    'pending/sub-a/draft-1/att-1/../x.jpg',
-    'pending/sub-a/draft-1/att-1/nested/x.jpg',
-    String.raw`pending/sub-a/draft-1/att-1/nested\x.jpg`,
-    'pending/sub-a/draft-1/att-1/invoice\u0000.pdf',
+    'submissions/sub-a/../att-1/x.jpg',
+    'submissions/sub-a/draft-1/att-1/../x.jpg',
+    'submissions/sub-a/draft-1/att-1/nested/x.jpg',
+    String.raw`submissions/sub-a/draft-1/att-1/nested\x.jpg`,
+    'submissions/sub-a/draft-1/att-1/invoice\u0000.pdf',
   ])('rejects non-canonical or traversing full key %j', (key) => {
     expect(() => assertOwnedPendingKey(key, 'sub-a')).toThrow(
       'PENDING_KEY_NOT_OWNED',
     );
+  });
+});
+
+describe('production Storage access', () => {
+  it('grants identity write-only submissions and OWNER-only attachment management', () => {
+    const definition = (
+      actions: ReadonlyArray<'read' | 'write' | 'delete'>,
+      principal: string,
+    ) => ({ actions, principal });
+    const access = productionStorageAccess({
+      entity: (entityId: string) => ({
+        to: (actions: ReadonlyArray<'read' | 'write' | 'delete'>) =>
+          definition(actions, `entity:${entityId}`),
+      }),
+      groups: (groups: string[]) => ({
+        to: (actions: ReadonlyArray<'read' | 'write' | 'delete'>) =>
+          definition(actions, `groups:${groups.join(',')}`),
+      }),
+    } as never) as unknown as Record<
+      string,
+      Array<{ actions: string[]; principal: string }>
+    >;
+
+    expect(access).toEqual({
+      'submissions/{entity_id}/*': [
+        { actions: ['write'], principal: 'entity:identity' },
+        {
+          actions: ['read', 'write', 'delete'],
+          principal: 'groups:OWNER',
+        },
+      ],
+      'daily-reports/*': [
+        {
+          actions: ['read', 'write', 'delete'],
+          principal: 'groups:OWNER',
+        },
+      ],
+      'migration/*': [
+        {
+          actions: ['read', 'write', 'delete'],
+          principal: 'groups:OWNER',
+        },
+      ],
+    });
+    expect(JSON.stringify(access)).not.toContain('KITCHEN');
   });
 });
 

@@ -14,12 +14,49 @@ export interface StorageBucketOverrideTarget {
     | IResolvable;
 }
 
+type ProductionStorageAccess = NonNullable<
+  Parameters<typeof defineStorage>[0]['access']
+>;
+
+export const productionStorageAccess: ProductionStorageAccess = (allow) => ({
+  'submissions/{entity_id}/*': [
+    allow.entity('identity').to(['write']),
+    allow.groups(['OWNER']).to(['read', 'write', 'delete']),
+  ],
+  'daily-reports/*': [
+    allow.groups(['OWNER']).to(['read', 'write', 'delete']),
+  ],
+  'migration/*': [
+    allow.groups(['OWNER']).to(['read', 'write', 'delete']),
+  ],
+});
+
 export const storage = defineStorage({
   name: 'fskStagingFiles',
   versioned: true,
   keepOnDelete: true,
-  // Omitting access keeps every client and backend resource denied by default.
+  access: productionStorageAccess,
 });
+
+export function applyProductionStorageBucketOverrides(
+  bucket: StorageBucketOverrideTarget,
+): void {
+  bucket.publicAccessBlockConfiguration = {
+    blockPublicAcls: true,
+    blockPublicPolicy: true,
+    ignorePublicAcls: true,
+    restrictPublicBuckets: true,
+  };
+  bucket.bucketEncryption = {
+    serverSideEncryptionConfiguration: [
+      {
+        serverSideEncryptionByDefault: {
+          sseAlgorithm: 'AES256',
+        },
+      },
+    ],
+  };
+}
 
 export function applyStagingStorageBucketOverrides(
   bucket: StorageBucketOverrideTarget,

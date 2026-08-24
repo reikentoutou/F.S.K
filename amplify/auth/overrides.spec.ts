@@ -3,11 +3,12 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { CfnUserPool, CfnUserPoolClient } from 'aws-cdk-lib/aws-cognito';
 import { describe, expect, it } from 'vitest';
 
-import { applyStagingAuthOverrides, COGNITO_GROUPS } from './overrides.js';
+import { applyProductionAuthOverrides, COGNITO_GROUPS } from './overrides.js';
 
-describe('staging Cognito overrides', () => {
-  it('keeps the authorized groups limited to ADMIN and KITCHEN', () => {
-    expect(COGNITO_GROUPS).toEqual(['ADMIN', 'KITCHEN']);
+describe('production Cognito overrides', () => {
+  it('keeps the authorized groups limited to OWNER and KITCHEN', () => {
+    expect(COGNITO_GROUPS).toEqual(['OWNER', 'KITCHEN']);
+    expect(COGNITO_GROUPS).not.toContain('ADMIN');
     expect(COGNITO_GROUPS).not.toContain('WEBMASTER');
   });
 
@@ -29,7 +30,7 @@ describe('staging Cognito overrides', () => {
       userPoolId: pool.ref,
     });
 
-    applyStagingAuthOverrides(pool, client);
+    applyProductionAuthOverrides(pool, client);
 
     const template = Template.fromStack(stack);
     template.hasResourceProperties('AWS::Cognito::UserPool', {

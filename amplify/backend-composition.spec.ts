@@ -383,6 +383,9 @@ describe('active DynamoDB backend composition', () => {
     const backendUrl = pathToFileURL(
       join(process.cwd(), 'amplify/backend.ts'),
     ).href;
+    const dataUrl = pathToFileURL(
+      join(process.cwd(), 'amplify/data/resource.ts'),
+    ).href;
     const marker = 'ACTIVE_BACKEND_SYNTH=';
     const script = `(async () => {
   const { existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } = await import('node:fs');
@@ -402,6 +405,7 @@ describe('active DynamoDB backend composition', () => {
   let evidence;
   try {
     const active = await import(${JSON.stringify(backendUrl)});
+    const activeData = await import(${JSON.stringify(dataUrl)});
     if (!active.backend) {
       evidence = { hasBackend: false };
       return;
@@ -446,6 +450,7 @@ describe('active DynamoDB backend composition', () => {
     })),
     );
     const resourceTypes = resources.map(({ resource }) => resource.Type);
+    const transformedSchema = activeData.schema.transform().schema;
     const [api] = resources
     .map(({ resource }) => resource)
     .filter((resource) => resource.Type === 'AWS::AppSync::GraphQLApi');
@@ -464,11 +469,107 @@ describe('active DynamoDB backend composition', () => {
     }))
     .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
     const environmentVariableNames = resources
-    .filter(({ resource }) => resource.Type === 'AWS::Lambda::Function')
-    .flatMap(({ resource }) =>
-      Object.keys(resource.Properties?.Environment?.Variables ?? {}),
-    )
-    .sort();
+      .filter(({ resource }) => resource.Type === 'AWS::Lambda::Function')
+      .flatMap(({ resource }) =>
+        Object.keys(resource.Properties?.Environment?.Variables ?? {}),
+      )
+      .sort();
+    const businessLambdas = resources
+      .filter(({ resource }) =>
+        resource.Type === 'AWS::Lambda::Function' &&
+        Object.hasOwn(
+          resource.Properties?.Environment?.Variables ?? {},
+          'APP_SETTING_TABLE_NAME',
+        ),
+      )
+      .map(({ logicalId, resource }) => ({
+        logicalId,
+        environmentVariableNames: Object.keys(
+          resource.Properties?.Environment?.Variables ?? {},
+        ).sort(),
+        handler: resource.Properties?.Handler,
+        role: resource.Properties?.Role,
+        runtime: resource.Properties?.Runtime,
+      }));
+    const businessRoleLogicalIds = businessLambdas
+      .map(({ role }) => role?.['Fn::GetAtt']?.[0])
+      .filter((logicalId) => typeof logicalId === 'string');
+    const businessFunctionStatements = resources
+      .filter(({ resource }) => resource.Type === 'AWS::IAM::Policy')
+      .filter(({ resource }) =>
+        (resource.Properties?.Roles ?? []).some(
+          (role) =>
+            typeof role?.Ref === 'string' &&
+            businessRoleLogicalIds.includes(role.Ref),
+        ),
+      )
+      .flatMap(({ resource }) =>
+        resource.Properties?.PolicyDocument?.Statement ?? [],
+      );
+    const dynamoTables = resources
+      .filter(({ resource }) =>
+        resource.Type === 'AWS::DynamoDB::Table' ||
+        resource.Type === 'Custom::AmplifyDynamoDBTable',
+      )
+      .map(({ logicalId, resource }) => ({
+        billingMode: resource.Properties?.BillingMode,
+        deletionPolicy: resource.DeletionPolicy,
+        logicalId,
+        pointInTimeRecoverySpecification:
+          resource.Properties?.PointInTimeRecoverySpecification,
+      }))
+      .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+    const dynamoParameterDefaults = templates
+      .flatMap(({ path, template }) =>
+        Object.entries(template.Parameters ?? {})
+          .filter(([name]) =>
+            name === 'DynamoDBBillingMode' ||
+            name === 'DynamoDBEnablePointInTimeRecovery',
+          )
+          .map(([name, parameter]) => ({
+            default: parameter.Default,
+            name,
+            path,
+          })),
+      )
+      .sort((left, right) =>
+        left.path.localeCompare(right.path) ||
+        left.name.localeCompare(right.name),
+      );
+    const buckets = resources
+      .filter(({ resource }) => resource.Type === 'AWS::S3::Bucket')
+      .map(({ logicalId, resource }) => ({
+        bucketEncryption: resource.Properties?.BucketEncryption,
+        deletionPolicy: resource.DeletionPolicy,
+        logicalId,
+        publicAccessBlockConfiguration:
+          resource.Properties?.PublicAccessBlockConfiguration,
+        updateReplacePolicy: resource.UpdateReplacePolicy,
+        versioningConfiguration: resource.Properties?.VersioningConfiguration,
+      }));
+    const activeNestedStacks = resources
+      .filter(({ logicalId, resource }) =>
+        resource.Type === 'AWS::CloudFormation::Stack' &&
+        /^(?:auth|data|storage|function)/i.test(logicalId),
+      )
+      .map(({ logicalId, resource }) => ({
+        logicalId: logicalId.replace(/[A-F0-9]{8}$/, ''),
+        tags: resource.Properties?.Tags,
+      }))
+      .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+    const userPoolGroups = resources
+      .filter(({ resource }) => resource.Type === 'AWS::Cognito::UserPoolGroup')
+      .map(({ resource }) => resource.Properties?.GroupName)
+      .sort();
+    const kitchenContextResolvers = resources
+      .filter(({ resource }) =>
+        resource.Type === 'AWS::AppSync::Resolver' &&
+        resource.Properties?.FieldName === 'getKitchenContext',
+      )
+      .map(({ resource }) => ({
+        fieldName: resource.Properties?.FieldName,
+        typeName: resource.Properties?.TypeName,
+      }));
     const actions = [];
     const servicePrincipals = [];
     const collectCapabilities = (value) => {
@@ -513,7 +614,18 @@ describe('active DynamoDB backend composition', () => {
       secretTypes: resourceTypes.filter((type) =>
         type.startsWith('AWS::SecretsManager::'),
       ),
+      activeNestedStacks,
+      buckets,
+      businessFunctionStatements,
+      businessLambdas,
+      dynamoParameterDefaults,
+      dynamoTables,
+      kitchenContextResolvers,
+      kitchenContextSchemaLines: transformedSchema
+        .split('\\n')
+        .filter((line) => line.includes('KitchenContext')),
       lambdaInventory,
+      userPoolGroups,
       environmentVariableNames,
       forbiddenActions: [...new Set(actions.filter((action) =>
         forbiddenActionPrefixes.some((prefix) => action.toLowerCase().startsWith(prefix)),
@@ -640,13 +752,14 @@ describe('active DynamoDB backend composition', () => {
         .split('\n')
         .find((line) => line.startsWith(marker));
       expect(evidenceLine, result.stdout).toBeDefined();
-      expect(JSON.parse(evidenceLine?.slice(marker.length) ?? '{}')).toEqual({
+      const evidence = JSON.parse(evidenceLine?.slice(marker.length) ?? '{}');
+      expect(evidence).toMatchObject({
         hasBackend: true,
         isolatedOutdirExistsAfterCleanup: false,
         stackArtifactIds: ['amplify-testappid-production-branch-bd754b1915'],
         stackNames: ['amplify-testappid-production-branch-bd754b1915'],
-        templateCount: 9,
-        nestedStackCount: 8,
+        templateCount: 11,
+        nestedStackCount: 10,
         appSyncCount: 1,
         tableCount: 4,
         dynamoTableTypes: [
@@ -687,6 +800,11 @@ describe('active DynamoDB backend composition', () => {
             runtime: 'nodejs24.x',
           },
           {
+            logicalId: 'kitchencontextlambda',
+            handler: 'index.handler',
+            runtime: 'nodejs22.x',
+          },
+          {
             logicalId: 'TableManagerCustomProviderframeworkisComplete',
             handler: 'amplify-table-manager-handler.isComplete',
             runtime: 'nodejs24.x',
@@ -697,15 +815,103 @@ describe('active DynamoDB backend composition', () => {
             runtime: 'nodejs24.x',
           },
         ],
-        environmentVariableNames: [
-          'AWS_CA_BUNDLE',
-          'USER_ON_EVENT_FUNCTION_ARN',
-          'WAITER_STATE_MACHINE_ARN',
-        ],
         forbiddenActions: [],
         forbiddenServicePrincipals: [],
         forbiddenEnvironmentVariables: [],
       });
+      expect(evidence.userPoolGroups).toEqual(['KITCHEN', 'OWNER']);
+      expect(evidence.kitchenContextResolvers).toEqual([
+        { fieldName: 'getKitchenContext', typeName: 'Query' },
+      ]);
+      expect(evidence.kitchenContextSchemaLines).toEqual([
+        'type KitchenContext @aws_cognito_user_pools(cognito_groups: ["OWNER", "KITCHEN"])',
+        '  getKitchenContext: KitchenContext @function(name: "FnGetKitchenContext") @auth(rules: [{allow: groups, groups: ["OWNER", "KITCHEN"]}])',
+      ]);
+      expect(evidence.businessLambdas).toHaveLength(1);
+      expect(evidence.businessLambdas[0]).toMatchObject({
+        environmentVariableNames: [
+          'AMPLIFY_SSM_ENV_CONFIG',
+          'APP_SETTING_TABLE_NAME',
+          'RESPONSIBLE_PERSON_TABLE_NAME',
+          'SHIFT_DEFINITION_TABLE_NAME',
+        ],
+        handler: 'index.handler',
+        runtime: 'nodejs22.x',
+      });
+      expect(evidence.dynamoTables).toHaveLength(4);
+      const billingModeDefaults = evidence.dynamoParameterDefaults.filter(
+        ({ name }: { name: string }) => name === 'DynamoDBBillingMode',
+      );
+      const pitrDefaults = evidence.dynamoParameterDefaults.filter(
+        ({ name }: { name: string }) =>
+          name === 'DynamoDBEnablePointInTimeRecovery',
+      );
+      expect(billingModeDefaults).toHaveLength(5);
+      expect(pitrDefaults).toHaveLength(5);
+      expect(
+        billingModeDefaults.every(
+          ({ default: value }: { default: string }) =>
+            value === 'PAY_PER_REQUEST',
+        ),
+      ).toBe(true);
+      expect(
+        pitrDefaults.every(
+          ({ default: value }: { default: string }) => value === 'true',
+        ),
+      ).toBe(true);
+      const hardenedBuckets = evidence.buckets.filter(
+        (bucket: { versioningConfiguration?: { Status?: string } }) =>
+          bucket.versioningConfiguration?.Status === 'Enabled',
+      );
+      expect(hardenedBuckets).toHaveLength(1);
+      expect(hardenedBuckets[0]).toMatchObject({
+        bucketEncryption: {
+          ServerSideEncryptionConfiguration: [
+            {
+              ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' },
+            },
+          ],
+        },
+        deletionPolicy: 'Retain',
+        publicAccessBlockConfiguration: {
+          BlockPublicAcls: true,
+          BlockPublicPolicy: true,
+          IgnorePublicAcls: true,
+          RestrictPublicBuckets: true,
+        },
+        updateReplacePolicy: 'Retain',
+        versioningConfiguration: { Status: 'Enabled' },
+      });
+      expect(
+        evidence.activeNestedStacks.map(
+          ({ logicalId }: { logicalId: string }) => logicalId,
+        ),
+      ).toEqual(
+        expect.arrayContaining(['auth', 'data', 'storage', 'function']),
+      );
+      for (const stack of evidence.activeNestedStacks) {
+        expect(stack.tags).toEqual(
+          expect.arrayContaining([
+            { Key: 'Project', Value: 'FSK' },
+            { Key: 'Environment', Value: 'production' },
+            { Key: 'ManagedBy', Value: 'AmplifyGen2' },
+            { Key: 'CostCenter', Value: 'FSK' },
+          ]),
+        );
+      }
+      const businessPolicy = JSON.stringify(
+        evidence.businessFunctionStatements,
+      );
+      expect(businessPolicy).toContain('dynamodb:GetItem');
+      expect(businessPolicy).toContain('dynamodb:Query');
+      expect(businessPolicy).toContain('dynamodb:Scan');
+      expect(businessPolicy).toContain('AppSetting');
+      expect(businessPolicy).toContain('ShiftDefinition');
+      expect(businessPolicy).toContain('ResponsiblePerson');
+      expect(businessPolicy).not.toContain('DailyReport');
+      expect(businessPolicy).not.toContain('s3:');
+      expect(businessPolicy).not.toContain('cognito-idp:');
+      expect(businessPolicy).not.toContain('GameList');
       expect(existsSync(staleTemplatePath)).toBe(true);
     } finally {
       rmSync(signalMarkerDirectory, { force: true, recursive: true });

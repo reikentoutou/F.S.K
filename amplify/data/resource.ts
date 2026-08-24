@@ -1,5 +1,7 @@
 import { a, defineData, type ClientSchema } from '@aws-amplify/backend';
 
+import { kitchenContext } from '../functions/kitchen-context/resource.js';
+
 const DailyReport = a
   .model({
     reportKey: a.id().required(),
@@ -65,11 +67,38 @@ const AppSetting = a
   })
   .authorization((allow) => [allow.group('OWNER')]);
 
+const KitchenShift = a.customType({
+  id: a.id().required(),
+  name: a.string().required(),
+  sortOrder: a.integer().required(),
+});
+
+const KitchenResponsiblePerson = a.customType({
+  id: a.id().required(),
+  name: a.string().required(),
+});
+
+const KitchenContext = a.customType({
+  registerFloatAmount: a.integer().required(),
+  shifts: a.ref('KitchenShift').array().required(),
+  responsiblePersons: a.ref('KitchenResponsiblePerson').array().required(),
+});
+
+const getKitchenContext = a
+  .query()
+  .returns(a.ref('KitchenContext'))
+  .authorization((allow) => [allow.groups(['OWNER', 'KITCHEN'])])
+  .handler(a.handler.function(kitchenContext));
+
 export const schema = a.schema({
   DailyReport,
   ShiftDefinition,
   ResponsiblePerson,
   AppSetting,
+  KitchenShift,
+  KitchenResponsiblePerson,
+  KitchenContext,
+  getKitchenContext,
 });
 
 export type Schema = ClientSchema<typeof schema>;
