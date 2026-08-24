@@ -16,7 +16,7 @@
 | Git deployment point | `fsk-staging-data-api-foundation-v1` |
 | MonthlyCeilingJpy | `5000` |
 
-`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。Foundation 已按本页批准范围完成部署和只读验收：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。Migration 的一次性批准已消费：首次 TLS 握手失败、DDL 未落库、持续计费临时资源已清理；新的 operation tuple 和独立批准前不得重试。完整 backend、Hosting、Budget/alarms、Destroy 和真实数据迁移仍未批准，也未执行。
+`MonthlyCeilingJpy=5000` 是用户修订的治理上限，不是 AWS 硬停止。Foundation 已按本页批准范围完成部署和只读验收：远程恢复标签/`staging` branch、Auth、Storage、VPC、Aurora/Data API。Migration 的首次批准和 retry 批准均已消费：首次在 TLS 握手失败，retry 在数据库命令前被 clean-worktree guard 拒绝；两次均无 DDL，持续计费临时资源均已清理。新的 source/operation tuple 和独立批准前不得再次执行。完整 backend、Hosting、Budget/alarms、Destroy 和真实数据迁移仍未批准，也未执行。
 
 ## 成本模型
 
@@ -85,7 +85,7 @@
 | PersistentInterfaceEndpoints | `0` |
 | DatabaseIngressRuleCount | `0` |
 | HostingStatus | `NOT_DEPLOYED` |
-| MigrationStatus | `FAILED_TLS_TRUST / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED` |
+| MigrationStatus | `TWO_FAILED_OPERATIONS / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED` |
 | FullBackendStatus | `NOT_DEPLOYED` |
 
 权威部署来自 target-account CloudShell 的 detached approved commit。首次 Amplify bootstrap job 的 commit 只显示 `HEAD`，因此在发布 Hosting 前已取消；随后关闭 Auto build，并用 `ampx pipeline-deploy` 完成 Foundation reconciliation。两个 CloudFormation 栈均为 `CREATE_COMPLETE`。
@@ -134,7 +134,7 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 
 | 字段 | 值 |
 | --- | --- |
-| MigrationRetryGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationRetryGateStatus | `FAILED_BEFORE_DATABASE_CLEANUP_BLOCKED` |
 | MigrationRetryUserApprovalStatement | `批准复审 705c6d7；通过后发布新的 immutable migration source，生成全新的 operation token 与截止时间，再执行一次合成 DDL/verify 和完整清理；不导入真实数据，也不启动 Full backend 或 Hosting。` |
 | MigrationRetryApprovalMessageOrTaskId | `Current Codex task user message: 批准` |
 | MigrationRetryApprovalId | `FSK-MIGRATION-20260824-161030-JST` |
@@ -153,10 +153,21 @@ Storage 为私有、SSE-S3、versioned、`Retain`，三个临时前缀均为 7 �
 | MigrationRetryApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
 | MigrationRetryCostOwner | `reiken` |
 | MigrationRetryCleanupOwner | `reiken` |
-| MigrationRetrySourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
+| MigrationRetrySourcePublication | `REMOTE_CAS_PUBLISHED / origin/staging + peeled fsk-staging-data-api-migration-v2 = 39e6ebae97d17ff803c4d6f3406328ddcb8594ac` |
 | MigrationRetryPreflight | `account 444083008754 / ap-northeast-1 / fsk-staging AutoBuild=false / Foundation CREATE_COMPLETE / Aurora available private rds-ca-rsa2048-g1 / application default routes=0 / database ingress=0 / prior paid temporary resources=0 / prior SSM failure evidence=3` |
+| MigrationRetryControlResult | `FAILED:WORKER_EXIT_1 / CLEANUP_BLOCKED:EXIT_1` |
+| MigrationRetryFirstMigrationResult | `NOT_RUN / clean-worktree guard rejected operator wrapper inside checkout` |
+| MigrationRetrySecondMigrationResult | `NOT_RUN_AFTER_WORKTREE_GUARD` |
+| MigrationRetryVerifyResult | `NOT_RUN_AFTER_WORKTREE_GUARD` |
+| MigrationRetryDatabaseDdlState | `Data API: fsk_staging reachable / public.schema_migrations ABSENT` |
+| MigrationRetryWorkerEnvironment | `fsk-migrate-20260824-v2 / deleted` |
+| MigrationRetryTemporaryResourceIds | `sg-0c4b75a81c9b440df / sgr-0f42f41388fd43914 / igw-06b56ccca81b7ce7b / subnet-0ed7c34777742e606 / rtb-060f5b84a692bf069 / eipalloc-07d3374520cc8f083 / nat-05ebafdcf4c228b88` |
+| MigrationRetryStableZeroEvidence | `control process exit 1 after >=180 seconds stable zero; NAT=deleted; SG/subnet/route table/IGW/EIP/ENI/DB ingress absent; both application default routes=0` |
+| MigrationRetryFinalResidualCount | `COST_RESOURCES=0 / APP_DEFAULT_ROUTES=0 / DB_INGRESS=0 / SSM_FAILURE_EVIDENCE=3` |
+| MigrationRetryFailureRootCause | `operator generated .fsk-worker-v2.sh inside the detached source checkout; the intended git status --short guard failed before pnpm, Secret read, database URL construction, or migration` |
+| MigrationRetryNextApproval | `NEW_MIGRATION_OPERATION_REQUIRED` |
 
-本次 retry 只授权将已复审的 migration source 以新 immutable tag 发布，并在同一 Foundation 上执行一次合成 DDL apply、第二次 no-op、schema verify 和完整 cleanup。不得移动旧 Foundation tag，不得部署或更新 Foundation，不得导入真实数据，也不得启动 Full backend、Hosting、Budget/alarms 或销毁阶段。
+本次 retry 已消费：immutable source 通过 CAS 发布，但 worker launcher 被误写入 detached checkout，clean-worktree guard 在 `pnpm install`、Secret 读取、数据库 URL 构造和 migration 之前安全停止。control 清理初期因 CloudShell ENI 尚占用临时 SG 记录 sticky failure latch，worker environment 删除并传播后所有计费资源和临时访问均归零；三个 Standard SSM 参数保留非敏感失败证据。不得复用该 token，也不得启动 Full backend、Hosting、Budget/alarms 或销毁阶段。
 
 ## 固定批准边界
 

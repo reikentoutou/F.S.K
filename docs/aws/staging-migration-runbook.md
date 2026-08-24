@@ -2,7 +2,7 @@
 
 ## 0. 边界与责任
 
-本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。首次 operation 在 TLS 阶段失败且批准已消费；当前 `MigrationRetryGateStatus=APPROVED_PENDING_EXECUTION`，只能使用下方新 immutable source 与 operation tuple。
+本手册只用于获得独立 Migration ApprovalId 后的一次性 staging DDL。首次 operation 在 TLS 阶段失败；retry operation 在数据库命令前被 clean-worktree guard 拒绝。两次批准均已消费，当前 `MigrationRetryGateStatus=FAILED_BEFORE_DATABASE_CLEANUP_BLOCKED`；不得复用任何旧 operation token，新的 migration 必须重新复审 source、生成 tuple 并取得批准。
 
 允许的临时拓扑只有：普通 CloudShell control session、VPC CloudShell worker session、带完整 ownership tuple 的单个运维 SG/数据库 ingress、IGW、public subnet/route table、EIP、NAT，以及两个 application route table 上的临时默认路由。长期状态仍是无 NAT、无 Interface Endpoint、无 `5432` ingress。
 
@@ -16,7 +16,7 @@ Migration ApprovalId 必须分别给出：account `444083008754`、region `ap-no
 
 | 字段 | 值 |
 | --- | --- |
-| MigrationRetryGateStatus | `APPROVED_PENDING_EXECUTION` |
+| MigrationRetryGateStatus | `FAILED_BEFORE_DATABASE_CLEANUP_BLOCKED` |
 | MigrationRetryApprovalId | `FSK-MIGRATION-20260824-161030-JST` |
 | MigrationRetryApprovedAtJst | `2026-08-24 16:10:30 JST` |
 | MigrationRetryExpiresAtJst | `2026-08-24 18:55:30 JST` |
@@ -33,8 +33,19 @@ Migration ApprovalId 必须分别给出：account `444083008754`、region `ap-no
 | MigrationRetryApplicationRouteTableIds | `rtb-0bbea56ee741ffe5f / rtb-0b08168b07de52b49` |
 | MigrationRetryCostOwner | `reiken` |
 | MigrationRetryCleanupOwner | `reiken` |
-| MigrationRetrySourcePublication | `LOCAL_REVIEWED / REMOTE_CAS_PENDING` |
+| MigrationRetrySourcePublication | `REMOTE_CAS_PUBLISHED / origin/staging + peeled fsk-staging-data-api-migration-v2 = 39e6ebae97d17ff803c4d6f3406328ddcb8594ac` |
 | MigrationRetryPreflight | `account 444083008754 / ap-northeast-1 / fsk-staging AutoBuild=false / Foundation CREATE_COMPLETE / Aurora available private rds-ca-rsa2048-g1 / application default routes=0 / database ingress=0 / prior paid temporary resources=0 / prior SSM failure evidence=3` |
+| MigrationRetryControlResult | `FAILED:WORKER_EXIT_1 / CLEANUP_BLOCKED:EXIT_1` |
+| MigrationRetryFirstMigrationResult | `NOT_RUN / clean-worktree guard rejected operator wrapper inside checkout` |
+| MigrationRetrySecondMigrationResult | `NOT_RUN_AFTER_WORKTREE_GUARD` |
+| MigrationRetryVerifyResult | `NOT_RUN_AFTER_WORKTREE_GUARD` |
+| MigrationRetryDatabaseDdlState | `Data API: fsk_staging reachable / public.schema_migrations ABSENT` |
+| MigrationRetryWorkerEnvironment | `fsk-migrate-20260824-v2 / deleted` |
+| MigrationRetryTemporaryResourceIds | `sg-0c4b75a81c9b440df / sgr-0f42f41388fd43914 / igw-06b56ccca81b7ce7b / subnet-0ed7c34777742e606 / rtb-060f5b84a692bf069 / eipalloc-07d3374520cc8f083 / nat-05ebafdcf4c228b88` |
+| MigrationRetryStableZeroEvidence | `control process exit 1 after >=180 seconds stable zero; NAT=deleted; SG/subnet/route table/IGW/EIP/ENI/DB ingress absent; both application default routes=0` |
+| MigrationRetryFinalResidualCount | `COST_RESOURCES=0 / APP_DEFAULT_ROUTES=0 / DB_INGRESS=0 / SSM_FAILURE_EVIDENCE=3` |
+| MigrationRetryFailureRootCause | `operator generated .fsk-worker-v2.sh inside the detached source checkout; the intended git status --short guard failed before pnpm, Secret read, database URL construction, or migration` |
+| MigrationRetryNextApproval | `NEW_MIGRATION_OPERATION_REQUIRED` |
 
 control 与 worker 的环境变量必须逐字匹配此表；任一字段漂移立即停止。旧 `fsk-staging-data-api-foundation-v1` 只保留为已部署 Foundation 证据，不得移动。
 
@@ -745,6 +756,12 @@ fsk_create_temporary_access() {
 ## 5. worker：exact source、migration 两次和 verify
 
 worker 从批准证据恢复 exact commit/tag、operation token、deadline 和 parameter names。先安装失败 trap；trap 只清除敏感环境并发布 `FAILED:*`，EC2 cleanup 始终由 control 执行。
+
+| 字段 | 值 |
+| --- | --- |
+| WorkerOrchestrationBoundary | `launcher/log outside checkout; checkout detached exact commit and git status --short empty before launch` |
+
+操作者生成的 worker launcher、nohup 输出和临时日志必须位于 source checkout 之外；不得把 `.sh`、日志或证据文件写入 detached checkout。进入 checkout 后先核对 exact HEAD 和空的 `git status --short`，再从外部 launcher 调用本节函数。guard 失败是安全停止，不得用 `git clean`、忽略文件或放宽 guard 绕过。
 
 ```bash
 fsk_worker_exit() {

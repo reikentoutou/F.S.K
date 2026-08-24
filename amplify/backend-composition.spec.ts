@@ -156,7 +156,7 @@ const MIGRATION_APPROVAL_EVIDENCE = {
 } as const;
 
 const MIGRATION_RETRY_APPROVAL_EVIDENCE = {
-  MigrationRetryGateStatus: ['APPROVED_PENDING_EXECUTION'],
+  MigrationRetryGateStatus: ['FAILED_BEFORE_DATABASE_CLEANUP_BLOCKED'],
   MigrationRetryApprovalId: ['FSK-MIGRATION-20260824-161030-JST'],
   MigrationRetryApprovedAtJst: ['2026-08-24 16:10:30 JST'],
   MigrationRetryExpiresAtJst: ['2026-08-24 18:55:30 JST'],
@@ -187,6 +187,26 @@ const MIGRATION_RETRY_APPROVAL_EVIDENCE = {
   ],
   MigrationRetryCostOwner: ['reiken'],
   MigrationRetryCleanupOwner: ['reiken'],
+} as const;
+
+const MIGRATION_RETRY_EXECUTION_EVIDENCE = {
+  MigrationRetrySourcePublication: [
+    'REMOTE_CAS_PUBLISHED / origin/staging + peeled fsk-staging-data-api-migration-v2 = 39e6ebae97d17ff803c4d6f3406328ddcb8594ac',
+  ],
+  MigrationRetryControlResult: [
+    'FAILED:WORKER_EXIT_1 / CLEANUP_BLOCKED:EXIT_1',
+  ],
+  MigrationRetryFirstMigrationResult: [
+    'NOT_RUN / clean-worktree guard rejected operator wrapper inside checkout',
+  ],
+  MigrationRetryDatabaseDdlState: [
+    'Data API: fsk_staging reachable / public.schema_migrations ABSENT',
+  ],
+  MigrationRetryFinalResidualCount: [
+    'COST_RESOURCES=0 / APP_DEFAULT_ROUTES=0 / DB_INGRESS=0 / SSM_FAILURE_EVIDENCE=3',
+  ],
+  MigrationRetryWorkerEnvironment: ['fsk-migrate-20260824-v2 / deleted'],
+  MigrationRetryNextApproval: ['NEW_MIGRATION_OPERATION_REQUIRED'],
 } as const;
 
 const preBindingApprovalEvidence = (
@@ -590,7 +610,7 @@ describe('staging deployment documentation contracts', () => {
       '批准在已部署的 FSK staging Foundation 上创建带 operation token 的临时 CloudShell VPC 出口和运维 5432 访问，执行合成数据库 migration/verify 后立即清理；不导入真实 SQLite、用户、bcrypt hash 或 uploads。',
     ]);
     expect(documentFieldValues(COST_APPROVAL, 'MigrationStatus')).toEqual([
-      'FAILED_TLS_TRUST / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED',
+      'TWO_FAILED_OPERATIONS / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED',
     ]);
     expect(documentFieldValues(MIGRATION_RUNBOOK, 'FirstMigrationResult')).toEqual([
       'FAILED_TLS_HANDSHAKE / MIGRATIONS_APPLIED marker absent / schema_migrations ABSENT',
@@ -626,6 +646,17 @@ describe('staging deployment documentation contracts', () => {
     expect(
       documentFieldValues(COST_APPROVAL, 'MigrationRetryMonthlyCeilingJpy'),
     ).toEqual(['5000']);
+
+    for (const document of [COST_APPROVAL, MIGRATION_RUNBOOK]) {
+      expect(
+        Object.fromEntries(
+          Object.keys(MIGRATION_RETRY_EXECUTION_EVIDENCE).map((field) => [
+            field,
+            documentFieldValues(document, field),
+          ]),
+        ),
+      ).toEqual(MIGRATION_RETRY_EXECUTION_EVIDENCE);
+    }
   });
 
   it('binds the deployed Foundation to the exact App, source, stacks, and cost controls', () => {
@@ -652,7 +683,7 @@ describe('staging deployment documentation contracts', () => {
       DatabaseIngressRuleCount: ['0'],
       HostingStatus: ['NOT_DEPLOYED'],
       MigrationStatus: [
-        'FAILED_TLS_TRUST / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED',
+        'TWO_FAILED_OPERATIONS / DDL_ABSENT / COST_RESOURCES_ZERO / SSM_FAILURE_EVIDENCE_RETAINED',
       ],
       FullBackendStatus: ['NOT_DEPLOYED'],
     };
@@ -776,6 +807,14 @@ printf '%s' "$${variable}"
 });
 
 describe('staging migration runbook executable contracts', () => {
+  it('keeps generated worker launchers and logs outside the exact source checkout', () => {
+    expect(
+      documentFieldValues(MIGRATION_RUNBOOK, 'WorkerOrchestrationBoundary'),
+    ).toEqual([
+      'launcher/log outside checkout; checkout detached exact commit and git status --short empty before launch',
+    ]);
+  });
+
   it('requires a separately approved immutable migration source', () => {
     const [sourceGate] = extractBashBlocks(MIGRATION_RUNBOOK);
     const approvedCommit = '705c6d78b8070201d161a23fefd95f96f5644876';
