@@ -1,16 +1,19 @@
 import { createHash } from 'node:crypto';
 import {
+  createReadStream,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { Readable } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MigrationBundle } from './contracts';
 import {
   FileCheckpointStore,
@@ -54,6 +57,18 @@ afterEach(() => {
 
 const sha256 = (value: string): string =>
   createHash('sha256').update(value).digest('hex');
+
+const S3_SINGLE_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024;
+const STREAM_CHUNK_BYTES = 1024 * 1024;
+
+function zeroFileSha256(byteSize: number): string {
+  const hash = createHash('sha256');
+  const chunk = Buffer.alloc(STREAM_CHUNK_BYTES);
+  for (let offset = 0; offset < byteSize; offset += chunk.length) {
+    hash.update(chunk.subarray(0, Math.min(chunk.length, byteSize - offset)));
+  }
+  return hash.digest('hex');
+}
 
 function fixtureBundle(): MigrationBundle {
   const report = {
@@ -151,7 +166,7 @@ function fixtureBundle(): MigrationBundle {
 
 class MemoryTarget implements MigrationTarget {
   readonly records = new Map<string, unknown>();
-  readonly attachments = new Map<string, { bytes: Buffer; sha256: string }>();
+  readonly attachments = new Map<string, { byteSize: number; sha256: string }>();
   readonly calls: string[] = [];
   failOnceAt?: string;
   mutatingCalls = 0;
@@ -189,15 +204,23 @@ class MemoryTarget implements MigrationTarget {
   ): Promise<'created' | 'unchanged'> {
     this.calls.push(`Attachment:${entry.objectKey}`);
     this.mutatingCalls += 1;
-    const bytes = readFileSync(sourcePath);
+    const hash = createHash('sha256');
+    let byteSize = 0;
+    for await (const chunk of createReadStream(sourcePath, {
+      highWaterMark: STREAM_CHUNK_BYTES,
+    })) {
+      byteSize += chunk.byteLength;
+      hash.update(chunk);
+    }
+    const digest = hash.digest('hex');
     const existing = this.attachments.get(entry.objectKey);
     if (existing) {
-      if (existing.sha256 === entry.sha256 && existing.bytes.equals(bytes)) {
+      if (existing.sha256 === digest && existing.byteSize === byteSize) {
         return 'unchanged';
       }
       throw new Error(`TARGET_ATTACHMENT_CONFLICT:${entry.objectKey}`);
     }
-    this.attachments.set(entry.objectKey, { bytes, sha256: entry.sha256 });
+    this.attachments.set(entry.objectKey, { byteSize, sha256: digest });
     return 'created';
   }
 
@@ -207,14 +230,20 @@ class MemoryTarget implements MigrationTarget {
       .map(([, value]) => value as Record<string, unknown>);
   }
 
-  async listAttachmentObjectKeys(): Promise<string[]> {
-    return [...this.attachments.keys()].sort();
+  async assertAttachmentObjectKeys(expected: ReadonlySet<string>): Promise<void> {
+    const actual = new Set(this.attachments.keys());
+    if (
+      actual.size !== expected.size ||
+      [...expected].some((key) => !actual.has(key))
+    ) {
+      throw new Error('TARGET_VERIFICATION_MISMATCH:attachmentKeys');
+    }
   }
 
   async readAttachment(objectKey: string): Promise<{ byteSize: number; sha256: string }> {
     const value = this.attachments.get(objectKey);
     if (!value) throw new Error(`TARGET_ATTACHMENT_NOT_FOUND:${objectKey}`);
-    return { byteSize: value.bytes.length, sha256: value.sha256 };
+    return value;
   }
 }
 
@@ -256,6 +285,25 @@ function addAttachment(bundle: MigrationBundle, uploadsRoot: string): void {
 }
 
 describe('migration apply orchestration', () => {
+  it('rejects an attachment over the conditional single-PutObject limit before target preflight', async () => {
+    const root = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    bundle.attachments[0].byteSize = S3_SINGLE_PUT_MAX_BYTES + 1;
+    const target = new MemoryTarget();
+    await expect(
+      importMigrationBundle({
+        mode: 'apply',
+        approvalId: 'FSK-TASK11-SYNTHETIC-OVERSIZE',
+        bundle,
+        uploadsRoot: root,
+        target,
+        checkpointStore: new MemoryCheckpointStore(),
+      }),
+    ).rejects.toThrow('IMPORT_ATTACHMENT_EXCEEDS_CONDITIONAL_PUT_LIMIT');
+    expect(target.calls).toEqual([]);
+  });
+
   it('materializes deterministic Amplify Data createdAt and updatedAt fields for every target model', async () => {
     const bundle = fixtureBundle();
     const target = new MemoryTarget();
@@ -407,6 +455,34 @@ describe('migration apply orchestration', () => {
       failureCode: 'SYNTHETIC_PARTIAL_FAILURE',
       checkpointPersisted: false,
       checkpointFailureCode: 'CHECKPOINT_DISK_FAILURE',
+    });
+  });
+
+  it('preserves a sanitized unknown attachment Put outcome in the deterministic checkpoint', async () => {
+    const root = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    const target = new MemoryTarget();
+    const checkpoint = new MemoryCheckpointStore();
+    const outcomeCode =
+      `TARGET_ATTACHMENT_PUT_OUTCOME_UNKNOWN:${bundle.attachments[0].objectKey}`;
+    target.putAttachment = async () => {
+      throw new Error(outcomeCode);
+    };
+    await expect(
+      importMigrationBundle({
+        mode: 'apply',
+        approvalId: 'FSK-TASK11-SYNTHETIC-UNKNOWN-PUT',
+        bundle,
+        uploadsRoot: root,
+        target,
+        checkpointStore: checkpoint,
+      }),
+    ).rejects.toMatchObject({ failureCode: outcomeCode });
+    expect(checkpoint.checkpoint).toMatchObject({
+      status: 'failed',
+      failedStage: 'Attachment',
+      failureCode: outcomeCode,
     });
   });
 
@@ -835,8 +911,23 @@ function fakeAwsClients(config = targetConfiguration()): AwsMigrationClients & {
           error.name = 'PreconditionFailed';
           throw error;
         }
+        const body = input.Body as AsyncIterable<unknown> | undefined;
+        if (!body || typeof body[Symbol.asyncIterator] !== 'function') {
+          throw new Error('TEST_UPLOAD_BODY_NOT_ASYNC_ITERABLE');
+        }
+        const expectedLength = Number(input.ContentLength);
+        const bytes = Buffer.alloc(expectedLength);
+        let offset = 0;
+        for await (const chunk of body) {
+          if (!(chunk instanceof Uint8Array) || offset + chunk.byteLength > bytes.length) {
+            throw new Error('TEST_UPLOAD_BODY_INVALID');
+          }
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        if (offset !== expectedLength) throw new Error('TEST_UPLOAD_BODY_INVALID');
         objects.set(key, {
-          body: Buffer.from(input.Body as Uint8Array),
+          body: bytes,
           metadata: input.Metadata as Record<string, string>,
         });
         return {};
@@ -848,7 +939,7 @@ function fakeAwsClients(config = targetConfiguration()): AwsMigrationClients & {
           error.name = 'NoSuchKey';
           throw error;
         }
-        return { Body: object.body };
+        return { Body: Readable.from([object.body]) };
       }
       return {};
     }
@@ -1049,7 +1140,251 @@ describe('AWS target safety and DynamoDB adapter', () => {
 });
 
 describe('attachment import and independent verification', () => {
-  it('paginates the exact migration prefix and returns every unique object key', async () => {
+  it('rejects a direct over-5-GiB attachment before preflight or any AWS call', async () => {
+    const root = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    const entry = {
+      ...bundle.attachments[0],
+      byteSize: S3_SINGLE_PUT_MAX_BYTES + 1,
+    };
+    const clients = fakeAwsClients();
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await expect(
+      target.putAttachment(
+        entry,
+        join(root, entry.sourceRelativeKey),
+        root,
+      ),
+    ).rejects.toThrow('TARGET_ATTACHMENT_EXCEEDS_CONDITIONAL_PUT_LIMIT');
+    expect(clients.calls).toEqual([]);
+  });
+
+  it('streams a 64-MiB sparse source from the held fd with chunks bounded to 1 MiB', async () => {
+    const root = temporaryRoot();
+    const relativeKey = 'large-report/large.bin';
+    const sourcePath = join(root, relativeKey);
+    mkdirSync(join(root, 'large-report'));
+    writeFileSync(sourcePath, '');
+    const byteSize = 64 * 1024 * 1024;
+    truncateSync(sourcePath, byteSize);
+    const digest = zeroFileSha256(byteSize);
+    const entry = {
+      sourceRelativeKey: relativeKey,
+      objectKey: `migration/daily-reports/2026-08-24#shift-day/${digest}-large.bin`,
+      byteSize,
+      sha256: digest,
+      reportKey: '2026-08-24#shift-day',
+    };
+    const clients = fakeAwsClients();
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    let uploaded = false;
+    let uploadedBytes = 0;
+    let maxChunkBytes = 0;
+    const uploadHash = createHash('sha256');
+    clients.s3.send = async (command) => {
+      const name = command.constructor?.name;
+      if (name === 'HeadObjectCommand') {
+        if (!uploaded) {
+          const error = new Error('missing');
+          error.name = 'NotFound';
+          throw error;
+        }
+        return {
+          ContentLength: byteSize,
+          Metadata: { sha256: digest, 'byte-size': String(byteSize) },
+        };
+      }
+      if (name === 'PutObjectCommand') {
+        const body = command.input?.Body as AsyncIterable<unknown> | undefined;
+        if (!body || typeof body[Symbol.asyncIterator] !== 'function') {
+          throw new Error('TEST_UPLOAD_BODY_NOT_ASYNC_ITERABLE');
+        }
+        for await (const chunk of body) {
+          if (!(chunk instanceof Uint8Array)) {
+            throw new Error('TEST_UPLOAD_CHUNK_INVALID');
+          }
+          maxChunkBytes = Math.max(maxChunkBytes, chunk.byteLength);
+          uploadedBytes += chunk.byteLength;
+          uploadHash.update(chunk);
+        }
+        uploaded = true;
+        return {};
+      }
+      throw new Error(`TEST_UNEXPECTED_S3_COMMAND:${name}`);
+    };
+    await expect(
+      target.putAttachment(entry, sourcePath, root),
+    ).resolves.toBe('created');
+    expect(uploadedBytes).toBe(byteSize);
+    expect(maxChunkBytes).toBeLessThanOrEqual(STREAM_CHUNK_BYTES);
+    expect(uploadHash.digest('hex')).toBe(digest);
+  });
+
+  it('streams GetObject verification without Buffer.concat or transformToByteArray', async () => {
+    const byteSize = 64 * 1024 * 1024;
+    const digest = zeroFileSha256(byteSize);
+    const clients = fakeAwsClients();
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    const chunk = Buffer.alloc(STREAM_CHUNK_BYTES);
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name === 'HeadObjectCommand') {
+        return {
+          ContentLength: byteSize,
+          Metadata: { sha256: digest, 'byte-size': String(byteSize) },
+        };
+      }
+      if (command.constructor?.name === 'GetObjectCommand') {
+        return {
+          Body: Readable.from(
+            Array.from({ length: byteSize / chunk.length }, () => chunk),
+          ),
+        };
+      }
+      throw new Error('TEST_UNEXPECTED_S3_COMMAND');
+    };
+    const concat = vi.spyOn(Buffer, 'concat').mockImplementation(() => {
+      throw new Error('TEST_FULL_BUFFER_CONCAT_FORBIDDEN');
+    });
+    try {
+      await expect(
+        target.readAttachment('migration/daily-reports/large/large.bin'),
+      ).resolves.toEqual({ byteSize, sha256: digest });
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
+  it('rejects a transformToByteArray-only GetObject body as non-streaming', async () => {
+    const clients = fakeAwsClients();
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name === 'HeadObjectCommand') {
+        return {
+          ContentLength: 1,
+          Metadata: { sha256: sha256('x'), 'byte-size': '1' },
+        };
+      }
+      if (command.constructor?.name === 'GetObjectCommand') {
+        return {
+          Body: { async transformToByteArray() { return Buffer.from('x'); } },
+        };
+      }
+      throw new Error('TEST_UNEXPECTED_S3_COMMAND');
+    };
+    await expect(
+      target.readAttachment('migration/daily-reports/report/x.txt'),
+    ).rejects.toThrow('TARGET_ATTACHMENT_BODY_INVALID');
+  });
+
+  it('rejects a streaming GetObject body that contains bytes beyond HeadObject size', async () => {
+    const clients = fakeAwsClients();
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name === 'HeadObjectCommand') {
+        return {
+          ContentLength: 1,
+          Metadata: { sha256: sha256('x'), 'byte-size': '1' },
+        };
+      }
+      if (command.constructor?.name === 'GetObjectCommand') {
+        return { Body: Readable.from([Buffer.from('xy')]) };
+      }
+      throw new Error('TEST_UNEXPECTED_S3_COMMAND');
+    };
+    await expect(
+      target.readAttachment('migration/daily-reports/report/x.txt'),
+    ).rejects.toThrow('TARGET_ATTACHMENT_BODY_SIZE_MISMATCH');
+  });
+
+  it('rejects malformed non-binary chunks from a streaming GetObject body', async () => {
+    const clients = fakeAwsClients();
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name === 'HeadObjectCommand') {
+        return {
+          ContentLength: 1,
+          Metadata: { sha256: sha256('x'), 'byte-size': '1' },
+        };
+      }
+      if (command.constructor?.name === 'GetObjectCommand') {
+        return { Body: Readable.from([{ not: 'binary' }]) };
+      }
+      throw new Error('TEST_UNEXPECTED_S3_COMMAND');
+    };
+    await expect(
+      target.readAttachment('migration/daily-reports/report/x.txt'),
+    ).rejects.toThrow('TARGET_ATTACHMENT_BODY_INVALID');
+  });
+
+  it('recovers a non-replayable PutObject exception only after independent exact Head and Get reads', async () => {
+    const root = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    const entry = bundle.attachments[0];
+    const clients = fakeAwsClients();
+    const originalSend = clients.s3.send.bind(clients.s3);
+    let headReads = 0;
+    let getReads = 0;
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name === 'HeadObjectCommand') headReads += 1;
+      if (command.constructor?.name === 'GetObjectCommand') getReads += 1;
+      if (command.constructor?.name === 'PutObjectCommand') {
+        await originalSend(command);
+        const error = new Error('synthetic unknown response');
+        error.name = 'SyntheticTransportFailure';
+        throw error;
+      }
+      return originalSend(command);
+    };
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    await expect(
+      target.putAttachment(
+        entry,
+        join(root, entry.sourceRelativeKey),
+        root,
+      ),
+    ).resolves.toBe('unchanged');
+    expect(
+      clients.calls.filter((call) => 'IfNoneMatch' in call.input),
+    ).toHaveLength(1);
+    expect(headReads).toBe(3);
+    expect(getReads).toBe(1);
+  });
+
+  it('preserves an unknown PutObject outcome when independent reads cannot prove exact content', async () => {
+    const root = temporaryRoot();
+    const bundle = fixtureBundle();
+    addAttachment(bundle, root);
+    const entry = bundle.attachments[0];
+    const clients = fakeAwsClients();
+    const originalSend = clients.s3.send.bind(clients.s3);
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name === 'PutObjectCommand') {
+        const error = new Error('synthetic unknown response');
+        error.name = 'SyntheticTransportFailure';
+        throw error;
+      }
+      return originalSend(command);
+    };
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    await expect(
+      target.putAttachment(
+        entry,
+        join(root, entry.sourceRelativeKey),
+        root,
+      ),
+    ).rejects.toThrow(`TARGET_ATTACHMENT_PUT_OUTCOME_UNKNOWN:${entry.objectKey}`);
+  });
+
+  it('accepts exact expected keys across small S3 inventory pages', async () => {
     const clients = fakeAwsClients();
     const originalSend = clients.s3.send.bind(clients.s3);
     clients.s3.send = async (command) => {
@@ -1073,12 +1408,12 @@ describe('attachment import and independent verification', () => {
     await target.assertSafeTarget();
     await expect(
       (target as unknown as {
-        listAttachmentObjectKeys(): Promise<string[]>;
-      }).listAttachmentObjectKeys(),
-    ).resolves.toEqual([
-      'migration/daily-reports/report-a/a.txt',
-      'migration/daily-reports/report-b/b.txt',
-    ]);
+        assertAttachmentObjectKeys(expected: ReadonlySet<string>): Promise<void>;
+      }).assertAttachmentObjectKeys(new Set([
+        'migration/daily-reports/report-a/a.txt',
+        'migration/daily-reports/report-b/b.txt',
+      ])),
+    ).resolves.toBeUndefined();
     const listCalls = clients.calls.filter(
       (call) => call.input.Prefix === 'migration/daily-reports/',
     );
@@ -1116,8 +1451,11 @@ describe('attachment import and independent verification', () => {
       await target.assertSafeTarget();
       await expect(
         (target as unknown as {
-          listAttachmentObjectKeys(): Promise<string[]>;
-        }).listAttachmentObjectKeys(),
+          assertAttachmentObjectKeys(expected: ReadonlySet<string>): Promise<void>;
+        }).assertAttachmentObjectKeys(new Set([
+          'migration/daily-reports/report-a/a.txt',
+          'migration/daily-reports/report-b/b.txt',
+        ])),
       ).rejects.toThrow(
         mode === 'duplicate'
           ? 'TARGET_ATTACHMENT_LIST_DUPLICATE'
@@ -1153,10 +1491,59 @@ describe('attachment import and independent verification', () => {
       await target.assertSafeTarget();
       await expect(
         (target as unknown as {
-          listAttachmentObjectKeys(): Promise<string[]>;
-        }).listAttachmentObjectKeys(),
+          assertAttachmentObjectKeys(expected: ReadonlySet<string>): Promise<void>;
+        }).assertAttachmentObjectKeys(new Set()),
       ).rejects.toThrow('TARGET_ATTACHMENT_LIST_INVALID');
     }
+  });
+
+  it('stops on an unexpected key in the first S3 page without reading polluted later pages', async () => {
+    const clients = fakeAwsClients();
+    const originalSend = clients.s3.send.bind(clients.s3);
+    let listCalls = 0;
+    clients.s3.send = async (command) => {
+      if (command.constructor?.name !== 'ListObjectsV2Command') {
+        return originalSend(command);
+      }
+      listCalls += 1;
+      return {
+        Contents: [
+          { Key: 'migration/daily-reports/unexpected/polluted.txt' },
+        ],
+        IsTruncated: true,
+        NextContinuationToken: 'must-not-be-read',
+      };
+    };
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    await expect(
+      (target as unknown as {
+        assertAttachmentObjectKeys(expected: ReadonlySet<string>): Promise<void>;
+      }).assertAttachmentObjectKeys(new Set([
+        'migration/daily-reports/report-a/a.txt',
+      ])),
+    ).rejects.toThrow('TARGET_ATTACHMENT_LIST_UNEXPECTED');
+    expect(listCalls).toBe(1);
+  });
+
+  it('rejects a truncated S3 page that makes no expected-key progress', async () => {
+    const clients = fakeAwsClients();
+    const originalSend = clients.s3.send.bind(clients.s3);
+    clients.s3.send = async (command) =>
+      command.constructor?.name === 'ListObjectsV2Command'
+        ? {
+            Contents: [],
+            IsTruncated: true,
+            NextContinuationToken: 'empty-page',
+          }
+        : originalSend(command);
+    const target = new AwsMigrationTarget(targetConfiguration(), clients);
+    await target.assertSafeTarget();
+    await expect(
+      target.assertAttachmentObjectKeys(new Set([
+        'migration/daily-reports/report-a/a.txt',
+      ])),
+    ).rejects.toThrow('TARGET_ATTACHMENT_LIST_PAGINATION_NO_PROGRESS');
   });
 
   it('independent verification rejects an extra object under the migration prefix', async () => {
@@ -1174,7 +1561,7 @@ describe('attachment import and independent verification', () => {
     });
     target.attachments.set(
       'migration/daily-reports/unexpected/extra.txt',
-      { bytes: Buffer.from('extra'), sha256: sha256('extra') },
+      { byteSize: 5, sha256: sha256('extra') },
     );
     await expect(verifyMigrationTarget({ bundle, target })).rejects.toThrow(
       'TARGET_VERIFICATION_MISMATCH:attachmentKeys',
@@ -1265,11 +1652,10 @@ describe('attachment import and independent verification', () => {
       Bucket: targetConfiguration().bucket.name,
       Key: entry.objectKey,
       IfNoneMatch: '*',
+      ContentLength: entry.byteSize,
       Metadata: { sha256: entry.sha256, 'byte-size': String(entry.byteSize) },
     });
-    expect(Buffer.from(puts[0].input.Body as Uint8Array).toString()).toBe(
-      'receipt-one',
-    );
+    expect(clients.objects.get(entry.objectKey)?.body.toString()).toBe('receipt-one');
     expect(await target.readAttachment(entry.objectKey)).toEqual({
       byteSize: entry.byteSize,
       sha256: entry.sha256,

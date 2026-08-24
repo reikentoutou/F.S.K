@@ -173,33 +173,25 @@ export async function verifyMigrationTarget(input: {
   attachments: MigrationSummary['targetAttachmentSummary'];
 }> {
   await input.target.assertSafeTarget();
-  const [shifts, persons, settings, reports, attachmentObjectKeys] = await Promise.all([
+  const expectedAttachmentObjectKeys = input.bundle.attachments
+    .map((entry) => entry.objectKey);
+  const expectedAttachmentObjectKeySet = new Set(expectedAttachmentObjectKeys);
+  if (expectedAttachmentObjectKeySet.size !== expectedAttachmentObjectKeys.length) {
+    throw new Error('TARGET_VERIFICATION_MISMATCH:attachmentKeys');
+  }
+  const [shifts, persons, settings, reports] = await Promise.all([
     input.target.listRecords('ShiftDefinition'),
     input.target.listRecords('ResponsiblePerson'),
     input.target.listRecords('AppSetting'),
     input.target.listRecords('DailyReport'),
-    input.target.listAttachmentObjectKeys(),
+    input.target.assertAttachmentObjectKeys(expectedAttachmentObjectKeySet),
   ]);
-  const expectedAttachmentObjectKeys = input.bundle.attachments
-    .map((entry) => entry.objectKey);
-  const expectedAttachmentObjectKeySet = new Set(expectedAttachmentObjectKeys);
-  const attachmentObjectKeySet = new Set(attachmentObjectKeys);
-  if (
-    expectedAttachmentObjectKeySet.size !== expectedAttachmentObjectKeys.length ||
-    attachmentObjectKeySet.size !== attachmentObjectKeys.length ||
-    expectedAttachmentObjectKeySet.size !== attachmentObjectKeySet.size ||
-    expectedAttachmentObjectKeys.some(
-      (objectKey) => !attachmentObjectKeySet.has(objectKey),
-    )
-  ) {
-    throw new Error('TARGET_VERIFICATION_MISMATCH:attachmentKeys');
-  }
   const modelCounts = {
     shifts: shifts.length,
     responsiblePersons: persons.length,
     appSettings: settings.length,
     dailyReports: reports.length,
-    attachments: attachmentObjectKeys.length,
+    attachments: expectedAttachmentObjectKeySet.size,
   };
   if (!same(modelCounts, input.bundle.sourceSummary.modelCounts)) {
     throw new Error('TARGET_VERIFICATION_MISMATCH:modelCounts');

@@ -10,6 +10,7 @@ import {
   type BigIntStats,
 } from 'node:fs';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { Readable } from 'node:stream';
 import {
   AmplifyClient,
   GetAppCommand,
@@ -58,6 +59,9 @@ export type MigrationModelName = (typeof TARGET_MODEL_ORDER)[number];
 export const AMPLIFY_MIGRATION_TECHNICAL_TIMESTAMP =
   '1970-01-01T00:00:00.000Z';
 
+export const S3_CONDITIONAL_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024;
+const ATTACHMENT_STREAM_CHUNK_BYTES = 1024 * 1024;
+
 function isCanonicalTimestamp(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   const epochMilliseconds = Date.parse(value);
@@ -98,7 +102,7 @@ export interface MigrationTarget {
     uploadsRoot: string,
   ): Promise<'created' | 'unchanged'>;
   listRecords(model: MigrationModelName): Promise<Record<string, unknown>[]>;
-  listAttachmentObjectKeys(): Promise<string[]>;
+  assertAttachmentObjectKeys(expected: ReadonlySet<string>): Promise<void>;
   readAttachment(objectKey: string): Promise<{ byteSize: number; sha256: string }>;
 }
 
@@ -363,17 +367,53 @@ function isMissingObject(error: unknown): boolean {
   return ['NotFound', 'NoSuchKey', 'NoSuchBucket'].includes(errorName(error));
 }
 
-async function bodyBytes(body: unknown): Promise<Uint8Array> {
-  if (body instanceof Uint8Array) return body;
-  if (isRecord(body) && typeof body.transformToByteArray === 'function') {
-    return (await (body.transformToByteArray as () => Promise<Uint8Array>)());
+async function streamBodyChecksum(
+  body: unknown,
+  expectedSize: number,
+): Promise<{ byteSize: number; sha256: string }> {
+  if (
+    body instanceof Uint8Array ||
+    !body ||
+    typeof (body as AsyncIterable<unknown>)[Symbol.asyncIterator] !== 'function'
+  ) {
+    throw new Error('TARGET_ATTACHMENT_BODY_INVALID');
   }
-  if (body && typeof (body as AsyncIterable<Uint8Array>)[Symbol.asyncIterator] === 'function') {
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of body as AsyncIterable<Uint8Array>) chunks.push(chunk);
-    return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+  const hash = createHash('sha256');
+  let byteSize = 0;
+  try {
+    for await (const chunk of body as AsyncIterable<unknown>) {
+      if (!(chunk instanceof Uint8Array)) {
+        throw new Error('TARGET_ATTACHMENT_BODY_INVALID');
+      }
+      for (
+        let offset = 0;
+        offset < chunk.byteLength;
+        offset += ATTACHMENT_STREAM_CHUNK_BYTES
+      ) {
+        const boundedChunk = chunk.subarray(
+          offset,
+          Math.min(offset + ATTACHMENT_STREAM_CHUNK_BYTES, chunk.byteLength),
+        );
+        byteSize += boundedChunk.byteLength;
+        if (byteSize > expectedSize) {
+          throw new Error('TARGET_ATTACHMENT_BODY_SIZE_MISMATCH');
+        }
+        hash.update(boundedChunk);
+      }
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith('TARGET_ATTACHMENT_BODY_')
+    ) {
+      throw error;
+    }
+    throw new Error('TARGET_ATTACHMENT_BODY_INVALID');
   }
-  throw new Error('TARGET_ATTACHMENT_BODY_INVALID');
+  if (byteSize !== expectedSize) {
+    throw new Error('TARGET_ATTACHMENT_BODY_SIZE_MISMATCH');
+  }
+  return { byteSize, sha256: hash.digest('hex') };
 }
 
 function assertAttachmentContract(entry: AttachmentManifestEntry): void {
@@ -384,6 +424,8 @@ function assertAttachmentContract(entry: AttachmentManifestEntry): void {
     Buffer.byteLength(fileName) > 255 ||
     /[\u0000-\u001f\u007f]/u.test(fileName) ||
     !/^[a-f0-9]{64}$/u.test(entry.sha256) ||
+    !Number.isSafeInteger(entry.byteSize) ||
+    entry.byteSize < 0 ||
     entry.objectKey !==
       `migration/daily-reports/${entry.reportKey}/${entry.sha256}-${fileName}`
   ) {
@@ -403,28 +445,34 @@ function sameFileState(left: BigIntStats, right: BigIntStats): boolean {
   );
 }
 
-function readHeldFile(fd: number, expectedSize: bigint): Buffer {
-  if (expectedSize > BigInt(Number.MAX_SAFE_INTEGER)) {
+function hashHeldFile(
+  fd: number,
+  expectedSize: bigint,
+): { byteSize: number; sha256: string } {
+  if (expectedSize > BigInt(Number.MAX_SAFE_INTEGER) || expectedSize < 0n) {
     throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
   }
-  const output = Buffer.alloc(Number(expectedSize));
+  const expectedByteSize = Number(expectedSize);
+  const buffer = Buffer.allocUnsafe(ATTACHMENT_STREAM_CHUNK_BYTES);
+  const hash = createHash('sha256');
   let offset = 0;
-  while (offset < output.length) {
+  while (offset < expectedByteSize) {
     const bytesRead = readSync(
       fd,
-      output,
-      offset,
-      output.length - offset,
+      buffer,
+      0,
+      Math.min(buffer.length, expectedByteSize - offset),
       offset,
     );
     if (bytesRead === 0) throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
+    hash.update(buffer.subarray(0, bytesRead));
     offset += bytesRead;
   }
-  const extra = Buffer.alloc(1);
+  const extra = Buffer.allocUnsafe(1);
   if (readSync(fd, extra, 0, 1, offset) !== 0) {
     throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
   }
-  return output;
+  return { byteSize: offset, sha256: hash.digest('hex') };
 }
 
 function pathOutside(root: string, candidate: string): boolean {
@@ -437,8 +485,9 @@ function pathOutside(root: string, candidate: string): boolean {
 }
 
 interface HeldAttachmentSource {
-  bytes: Buffer;
+  byteSize: number;
   sha256: string;
+  createBody(): Readable;
   assertStable(): void;
   close(): void;
 }
@@ -511,8 +560,13 @@ function bindAttachmentSource(
     if (!sameFileState(initialPathStat, initialFdStat)) {
       throw new Error('TARGET_ATTACHMENT_SOURCE_INVALID');
     }
-    const bytes = readHeldFile(fd, initialFdStat.size);
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    if (initialFdStat.size > BigInt(S3_CONDITIONAL_PUT_MAX_BYTES)) {
+      throw new Error(
+        'TARGET_ATTACHMENT_SOURCE_EXCEEDS_CONDITIONAL_PUT_LIMIT',
+      );
+    }
+    const initialChecksum = hashHeldFile(fd, initialFdStat.size);
+    const sha256 = initialChecksum.sha256;
     const assertStable = (): void => {
       try {
         const currentFdStat = fstatSync(fd!, { bigint: true });
@@ -534,10 +588,10 @@ function bindAttachmentSource(
         ) {
           throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
         }
-        const afterBytes = readHeldFile(fd!, currentFdStat.size);
+        const afterChecksum = hashHeldFile(fd!, currentFdStat.size);
         if (
-          afterBytes.length !== bytes.length ||
-          createHash('sha256').update(afterBytes).digest('hex') !== sha256
+          afterChecksum.byteSize !== initialChecksum.byteSize ||
+          afterChecksum.sha256 !== sha256
         ) {
           throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
         }
@@ -552,8 +606,26 @@ function bindAttachmentSource(
       }
     };
     return {
-      bytes,
+      byteSize: initialChecksum.byteSize,
       sha256,
+      createBody: () =>
+        Readable.from((async function* heldFileChunks() {
+          let offset = 0;
+          while (offset < initialChecksum.byteSize) {
+            const chunk = Buffer.allocUnsafe(
+              Math.min(
+                ATTACHMENT_STREAM_CHUNK_BYTES,
+                initialChecksum.byteSize - offset,
+              ),
+            );
+            const bytesRead = readSync(fd!, chunk, 0, chunk.length, offset);
+            if (bytesRead === 0) {
+              throw new Error('TARGET_ATTACHMENT_SOURCE_CHANGED');
+            }
+            offset += bytesRead;
+            yield chunk.subarray(0, bytesRead);
+          }
+        })()),
       assertStable,
       close: () => {
         if (fd !== undefined) {
@@ -770,8 +842,11 @@ export class AwsMigrationTarget implements MigrationTarget {
     sourcePath: string,
     uploadsRoot: string,
   ): Promise<'created' | 'unchanged'> {
-    this.requireSafe();
     assertAttachmentContract(entry);
+    if (entry.byteSize > S3_CONDITIONAL_PUT_MAX_BYTES) {
+      throw new Error('TARGET_ATTACHMENT_EXCEEDS_CONDITIONAL_PUT_LIMIT');
+    }
+    this.requireSafe();
     let source: HeldAttachmentSource;
     try {
       source = bindAttachmentSource(entry, sourcePath, uploadsRoot);
@@ -785,12 +860,14 @@ export class AwsMigrationTarget implements MigrationTarget {
       throw error;
     }
     try {
-      if (source.bytes.length !== entry.byteSize || source.sha256 !== entry.sha256) {
+      if (source.byteSize !== entry.byteSize || source.sha256 !== entry.sha256) {
         throw new Error(`TARGET_ATTACHMENT_SOURCE_MISMATCH:${entry.objectKey}`);
       }
       const existing = await this.headAttachment(entry.objectKey, true);
       if (existing) {
-        this.assertHeadMatches(entry, existing);
+        if (!(await this.attachmentMatches(entry, existing))) {
+          throw new Error(`TARGET_ATTACHMENT_CONFLICT:${entry.objectKey}`);
+        }
         try {
           source.assertStable();
         } catch {
@@ -799,19 +876,30 @@ export class AwsMigrationTarget implements MigrationTarget {
         return 'unchanged';
       }
       let created = true;
+      const body = source.createBody();
       try {
         await this.clients.s3.send(
           new PutObjectCommand({
             Bucket: this.config.bucket.name,
             Key: entry.objectKey,
-            Body: source.bytes,
+            Body: body,
+            ContentLength: entry.byteSize,
             IfNoneMatch: '*',
             Metadata: { sha256: entry.sha256, 'byte-size': String(entry.byteSize) },
           }) as unknown as { input?: Record<string, unknown> },
         );
       } catch (error) {
-        if (!['PreconditionFailed', 'ConditionalRequestConflict'].includes(errorName(error))) {
-          throw error;
+        const conditionalConflict = [
+          'PreconditionFailed',
+          'ConditionalRequestConflict',
+        ].includes(errorName(error));
+        if (!(await this.attachmentMatches(entry))) {
+          if (conditionalConflict) {
+            throw new Error(`TARGET_ATTACHMENT_CONFLICT:${entry.objectKey}`);
+          }
+          throw new Error(
+            `TARGET_ATTACHMENT_PUT_OUTCOME_UNKNOWN:${entry.objectKey}`,
+          );
         }
         created = false;
       }
@@ -856,6 +944,27 @@ export class AwsMigrationTarget implements MigrationTarget {
     }
   }
 
+  private async attachmentMatches(
+    entry: AttachmentManifestEntry,
+    knownHead?: { ContentLength?: number; Metadata?: Record<string, string> },
+  ): Promise<boolean> {
+    try {
+      const head = knownHead ?? (await this.headAttachment(entry.objectKey, true));
+      if (!head) return false;
+      this.assertHeadMatches(entry, head);
+      const object = (await this.clients.s3.send(
+        new GetObjectCommand({
+          Bucket: this.config.bucket.name,
+          Key: entry.objectKey,
+        }) as unknown as { input?: Record<string, unknown> },
+      )) as { Body?: unknown };
+      const checksum = await streamBodyChecksum(object.Body, entry.byteSize);
+      return checksum.sha256 === entry.sha256;
+    } catch {
+      return false;
+    }
+  }
+
   async listRecords(model: MigrationModelName): Promise<Record<string, unknown>[]> {
     this.requireSafe();
     const records: Record<string, unknown>[] = [];
@@ -880,18 +989,33 @@ export class AwsMigrationTarget implements MigrationTarget {
     return records;
   }
 
-  async listAttachmentObjectKeys(): Promise<string[]> {
+  async assertAttachmentObjectKeys(
+    expected: ReadonlySet<string>,
+  ): Promise<void> {
     this.requireSafe();
     const prefix = 'migration/daily-reports/';
-    const keys: string[] = [];
-    const seenKeys = new Set<string>();
+    if (
+      [...expected].some(
+        (key) => key.length <= prefix.length || !key.startsWith(prefix),
+      )
+    ) {
+      throw new Error('TARGET_ATTACHMENT_LIST_EXPECTED_INVALID');
+    }
+    const seenExpectedKeys = new Set<string>();
     const seenTokens = new Set<string>();
+    const maxPages = expected.size + 1;
+    let pageCount = 0;
     let continuationToken: string | undefined;
     do {
+      pageCount += 1;
+      if (pageCount > maxPages) {
+        throw new Error('TARGET_ATTACHMENT_LIST_PAGINATION_NO_PROGRESS');
+      }
       const page = (await this.clients.s3.send(
         new ListObjectsV2Command({
           Bucket: this.config.bucket.name,
           Prefix: prefix,
+          MaxKeys: 1000,
           ContinuationToken: continuationToken,
         }) as unknown as { input?: Record<string, unknown> },
       )) as {
@@ -899,9 +1023,14 @@ export class AwsMigrationTarget implements MigrationTarget {
         IsTruncated?: boolean;
         NextContinuationToken?: string;
       };
-      if (!Array.isArray(page.Contents ?? []) || typeof page.IsTruncated !== 'boolean') {
+      if (
+        !Array.isArray(page.Contents ?? []) ||
+        (page.Contents?.length ?? 0) > 1000 ||
+        typeof page.IsTruncated !== 'boolean'
+      ) {
         throw new Error('TARGET_ATTACHMENT_LIST_INVALID');
       }
+      const seenBeforePage = seenExpectedKeys.size;
       for (const object of page.Contents ?? []) {
         if (
           !isRecord(object) ||
@@ -911,11 +1040,13 @@ export class AwsMigrationTarget implements MigrationTarget {
         ) {
           throw new Error('TARGET_ATTACHMENT_LIST_INVALID');
         }
-        if (seenKeys.has(object.Key)) {
+        if (!expected.has(object.Key)) {
+          throw new Error('TARGET_ATTACHMENT_LIST_UNEXPECTED');
+        }
+        if (seenExpectedKeys.has(object.Key)) {
           throw new Error('TARGET_ATTACHMENT_LIST_DUPLICATE');
         }
-        seenKeys.add(object.Key);
-        keys.push(object.Key);
+        seenExpectedKeys.add(object.Key);
       }
       const nextToken = page.NextContinuationToken;
       if (
@@ -927,13 +1058,18 @@ export class AwsMigrationTarget implements MigrationTarget {
       }
       continuationToken = page.IsTruncated ? nextToken : undefined;
       if (continuationToken) {
+        if (seenExpectedKeys.size === seenBeforePage) {
+          throw new Error('TARGET_ATTACHMENT_LIST_PAGINATION_NO_PROGRESS');
+        }
         if (seenTokens.has(continuationToken)) {
           throw new Error('TARGET_ATTACHMENT_LIST_PAGINATION_CYCLE');
         }
         seenTokens.add(continuationToken);
       }
     } while (continuationToken);
-    return keys.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+    if (seenExpectedKeys.size !== expected.size) {
+      throw new Error('TARGET_ATTACHMENT_LIST_MISSING');
+    }
   }
 
   async readAttachment(objectKey: string): Promise<{ byteSize: number; sha256: string }> {
@@ -943,16 +1079,17 @@ export class AwsMigrationTarget implements MigrationTarget {
     const object = (await this.clients.s3.send(
       new GetObjectCommand({ Bucket: this.config.bucket.name, Key: objectKey }) as unknown as { input?: Record<string, unknown> },
     )) as { Body?: unknown };
-    const bytes = await bodyBytes(object.Body);
-    const digest = createHash('sha256').update(bytes).digest('hex');
+    if (!Number.isSafeInteger(head.ContentLength) || head.ContentLength! < 0) {
+      throw new Error('TARGET_ATTACHMENT_BODY_SIZE_MISMATCH');
+    }
+    const checksum = await streamBodyChecksum(object.Body, head.ContentLength!);
     if (
-      head.ContentLength !== bytes.length ||
-      head.Metadata?.sha256 !== digest ||
-      head.Metadata['byte-size'] !== String(bytes.length)
+      head.Metadata?.sha256 !== checksum.sha256 ||
+      head.Metadata['byte-size'] !== String(checksum.byteSize)
     ) {
       throw new Error(`TARGET_ATTACHMENT_CHECKSUM_MISMATCH:${objectKey}`);
     }
-    return { byteSize: bytes.length, sha256: digest };
+    return checksum;
   }
 }
 

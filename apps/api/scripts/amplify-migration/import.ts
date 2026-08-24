@@ -23,6 +23,7 @@ import type { MigrationBundle } from './contracts';
 import { buildMigrationSummary } from './report';
 import {
   TARGET_MODEL_ORDER,
+  S3_CONDITIONAL_PUT_MAX_BYTES,
   amplifyDataTargetRecord,
   assertExplicitTargetConfiguration,
   createAwsMigrationTarget,
@@ -425,6 +426,9 @@ function assertLinkedAttachmentBundleContract(bundle: MigrationBundle): void {
   for (const entry of bundle.attachments) {
     const fileName = entry.sourceRelativeKey.split('/').at(-1);
     const sourceSegments = entry.sourceRelativeKey.split('/');
+    if (entry.byteSize > S3_CONDITIONAL_PUT_MAX_BYTES) {
+      throw new Error('IMPORT_ATTACHMENT_EXCEEDS_CONDITIONAL_PUT_LIMIT');
+    }
     if (
       !reportKeys.has(entry.reportKey) ||
       !fileName ||
@@ -512,7 +516,7 @@ function errorCode(error: unknown): string {
   }
   if (
     error instanceof Error &&
-    /^TARGET_(?:RECORD|ATTACHMENT)_(?:CONFLICT|CONDITIONAL_RACE):[A-Za-z0-9_.:#/-]+$/u.test(
+    /^TARGET_(?:(?:RECORD|ATTACHMENT)_(?:CONFLICT|CONDITIONAL_RACE)|ATTACHMENT_PUT_OUTCOME_UNKNOWN):[A-Za-z0-9_.:#/-]+$/u.test(
       error.message,
     )
   ) {
@@ -700,7 +704,7 @@ export async function runImportCli(argv: string[]): Promise<unknown> {
       async putRecord() { throw new Error('DRY_RUN_TARGET_CALLED'); },
       async putAttachment() { throw new Error('DRY_RUN_TARGET_CALLED'); },
       async listRecords() { throw new Error('DRY_RUN_TARGET_CALLED'); },
-      async listAttachmentObjectKeys() { throw new Error('DRY_RUN_TARGET_CALLED'); },
+      async assertAttachmentObjectKeys() { throw new Error('DRY_RUN_TARGET_CALLED'); },
       async readAttachment() { throw new Error('DRY_RUN_TARGET_CALLED'); },
     };
     return importMigrationBundle({
