@@ -216,7 +216,7 @@ case "$operation" in
     if [[ " $* " == *" --query app.name "* ]]; then printf 'FSK\\n'; exit 0; fi
     rules='[{"source":"</^[^.]+$/>","target":"/index.html","status":"200"}]'
     if [ "\${FAKE_UNKNOWN_RULES:-0}" = 1 ]; then rules='[{"source":"/<*>","target":"/index.html","status":"200"}]'; fi
-    FAKE_RULES="$rules" node -e 'const e=process.env; console.log(JSON.stringify({app:{appId:e.FSK_AMPLIFY_APP_ID,appArn:["arn","aws","amplify",e.FSK_EXPECTED_AWS_REGION,e.FSK_EXPECTED_AWS_ACCOUNT_ID,"apps/"+e.FSK_AMPLIFY_APP_ID].join(":"),name:"FSK",repository:e.FSK_GIT_REMOTE_URL,platform:"WEB_COMPUTE",tags:{Project:"FSK",Environment:"production",ManagedBy:"AmplifyGen2",CostCenter:"FSK"},customRules:JSON.parse(e.FAKE_RULES)}}))'
+    FAKE_RULES="$rules" node -e 'const e=process.env; console.log(JSON.stringify({app:{appId:e.FSK_AMPLIFY_APP_ID,appArn:["arn","aws","amplify",e.FSK_EXPECTED_AWS_REGION,e.FSK_EXPECTED_AWS_ACCOUNT_ID,"apps/"+e.FSK_AMPLIFY_APP_ID].join(":"),name:"FSK",repository:e.FSK_GIT_REMOTE_URL,platform:e.FAKE_APP_PLATFORM??"WEB",iamServiceRoleArn:e.FAKE_APP_ROLE_ARN??e.FSK_AMPLIFY_SERVICE_ROLE_ARN,tags:{Project:"FSK",Environment:"production",ManagedBy:"AmplifyGen2",CostCenter:"FSK"},customRules:JSON.parse(e.FAKE_RULES)}}))'
     ;;
   get-branch)
     if [ "\${FAKE_BRANCH_ERROR:-0}" = 1 ]; then printf 'AccessDeniedException\\n' >&2; exit 254; fi
@@ -226,11 +226,24 @@ case "$operation" in
     node -e 'const e=process.env; const values={FSK_EXPECTED_AWS_ACCOUNT_ID:e.FSK_EXPECTED_AWS_ACCOUNT_ID,FSK_EXPECTED_AWS_REGION:e.FSK_EXPECTED_AWS_REGION,FSK_EXPECTED_AMPLIFY_APP_ID:e.FSK_AMPLIFY_APP_ID,FSK_EXPECTED_AMPLIFY_BRANCH:e.FSK_AMPLIFY_BRANCH,FSK_EXPECTED_DEPLOY_COMMIT:e.FSK_DEPLOY_COMMIT}; const environmentVariables=e.FAKE_REVERSE_ENV==="1"?Object.fromEntries(Object.entries(values).reverse()):values; console.log(JSON.stringify({branch:{branchName:e.FSK_AMPLIFY_BRANCH,stage:e.FAKE_BRANCH_DRIFT==="1"?"DEVELOPMENT":"PRODUCTION",framework:"Vue",enableAutoBuild:false,environmentVariables}}))'
     ;;
   create-branch|update-branch|update-app) printf '{}\\n' ;;
-  start-job) printf 'job-1\\n' ;;
+  start-job) : > "$FAKE_JOB_STARTED_STATE"; printf '1\\n' ;;
+  stop-job) : > "$FAKE_JOB_STOP_STATE"; printf '{}\\n' ;;
   get-job)
+    if [ "\${FAKE_JOB_INVALID_JSON:-0}" = 1 ] && [ ! -e "$FAKE_JOB_STOP_STATE" ]; then printf '{\\n'; exit 0; fi
+    state_file="$FAKE_JOB_STATE"
+    sequence="\${FAKE_JOB_SEQUENCE:-CREATED,PENDING,PROVISIONING,RUNNING,SUCCEED}"
+    if [ -e "$FAKE_JOB_STOP_STATE" ]; then state_file="$FAKE_JOB_STOP_POLL_STATE"; sequence="\${FAKE_JOB_STOP_SEQUENCE:-CANCELLING,CANCELLED}"; fi
+    index=0
+    if [ -e "$state_file" ]; then index="$(cat "$state_file")"; fi
+    IFS=',' read -r -a statuses <<< "$sequence"
+    last_index="$((\${#statuses[@]} - 1))"
+    selected="$index"
+    if [ "$selected" -gt "$last_index" ]; then selected="$last_index"; fi
+    status="\${statuses[$selected]}"
+    printf '%s\\n' "$((index + 1))" > "$state_file"
     commit="$FSK_DEPLOY_COMMIT"
     if [ "\${FAKE_STALE_JOB:-0}" = 1 ]; then commit=0000000000000000000000000000000000000000; fi
-    FAKE_JOB_COMMIT="$commit" node -e 'console.log(JSON.stringify({job:{summary:{jobId:"job-1",status:"SUCCEED",commitId:process.env.FAKE_JOB_COMMIT}}}))'
+    FAKE_JOB_COMMIT="$commit" FAKE_JOB_STATUS="$status" node -e 'console.log(JSON.stringify({job:{summary:{jobId:"1",status:process.env.FAKE_JOB_STATUS,commitId:process.env.FAKE_JOB_COMMIT}}}))'
     ;;
   *) printf '{}\\n' ;;
 esac
@@ -253,13 +266,42 @@ set -euo pipefail
 printf 'curl %s\\n' "$*" >> "$FAKE_COMMAND_LOG"
 output=''
 headers=''
+write_format=''
+url=''
 while [ "$#" -gt 0 ]; do
-  case "$1" in -o) output="$2"; shift 2 ;; -D) headers="$2"; shift 2 ;; *) shift ;; esac
+  case "$1" in -o) output="$2"; shift 2 ;; -D) headers="$2"; shift 2 ;; -w) write_format="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac
 done
-if [ -n "$headers" ]; then printf 'content-type: application/manifest+json\\n' > "$headers"; fi
-case "$output" in *manifest.json) printf '{"display":"standalone"}\\n' > "$output" ;; *) printf '<div id="app"></div>\\n' > "$output" ;; esac
+path="/\${url#*://*/}"
+status=200
+content_type='text/html; charset=utf-8'
+cache_control='no-cache, no-store, must-revalidate'
+body_kind=html
+case "$path" in
+  /manifest.json) content_type='application/manifest+json; charset=utf-8'; body_kind=manifest ;;
+  /icons/icon-180.png) content_type='image/png'; cache_control='public, max-age=86400'; body_kind=png ;;
+  "$FSK_ASSET_JS_PATH") content_type='application/javascript; charset=utf-8'; cache_control='public, max-age=31536000, immutable'; body_kind=js ;;
+  /index.html|/owner/reports|/kitchen/report/new) ;;
+  /missing.json|/missing.js|/missing.png|/missing.bin) status=404; content_type='text/plain; charset=utf-8'; cache_control='no-cache'; body_kind=missing ;;
+  *) status=404; content_type='text/plain; charset=utf-8'; cache_control='no-cache'; body_kind=missing ;;
+esac
+if [ "\${FAKE_HTTP_BAD_ICON:-0}" = 1 ] && [ "$path" = /icons/icon-180.png ]; then content_type='text/html; charset=utf-8'; body_kind=html; fi
+if [ "\${FAKE_HTTP_UNKNOWN_200:-0}" = 1 ] && [ "$path" = /missing.json ]; then status=200; content_type='text/html; charset=utf-8'; cache_control='no-cache, no-store, must-revalidate'; body_kind=html; fi
+if [ -n "$headers" ]; then printf 'HTTP/2 %s\\r\\ncontent-type: %s\\r\\ncache-control: %s\\r\\n\\r\\n' "$status" "$content_type" "$cache_control" > "$headers"; fi
+case "$body_kind" in
+  manifest) printf '{"display":"standalone"}\\n' > "$output" ;;
+  png) printf '\\211PNG\\r\\n\\032\\nsynthetic' > "$output" ;;
+  js) printf 'console.log("synthetic");\\n' > "$output" ;;
+  html) printf '<div id="app"></div>\\n' > "$output" ;;
+  missing) printf 'Not Found\\n' > "$output" ;;
+esac
+if [ -n "$write_format" ]; then printf '%s' "$status"; fi
 `);
-  executable(join(bin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+  executable(join(bin, 'sleep'), '#!/usr/bin/env bash\nprintf "sleep %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\nexit 0\n');
+  executable(join(bin, 'date'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'date %s\\n' "$*" >> "$FAKE_COMMAND_LOG"
+if [ "\${FAKE_EXPIRE_WHEN_JOB_STARTED:-0}" = 1 ] && [ -e "$FAKE_JOB_STARTED_STATE" ]; then printf '4102444801\\n'; else printf '2000000000\\n'; fi
+`);
   executable(join(bin, 'corepack'), '#!/usr/bin/env bash\nprintf "corepack %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n');
   executable(join(bin, 'pnpm'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -271,11 +313,33 @@ if [[ " $* " == *" pipeline-deploy "* ]]; then mkdir -p apps/web/public; printf 
 
 function gateEnvironment(root: string, bin: string): NodeJS.ProcessEnv {
   const commit = '1234567890abcdef1234567890abcdef12345678';
+  const serviceRoleArn = 'arn:aws:iam::444083008754:role/service-role/FSKAmplifyGen2ServiceRole';
+  const serviceRoleEvidencePath = join(root, 'service-role-policy-evidence.json');
+  writeFileSync(serviceRoleEvidencePath, `${JSON.stringify({
+    schemaVersion: 1,
+    roleArn: serviceRoleArn,
+    accountId: '444083008754',
+    region: 'ap-northeast-1',
+    project: 'FSK',
+    trustPrincipal: 'amplify.amazonaws.com',
+    resourceScope: 'FSK_ONLY',
+    gameListAccess: 'DENY',
+    policyDocumentsSha256: 'a'.repeat(64),
+    leastPrivilegeReview: {
+      approved: true,
+      reviewer: 'security-owner',
+      reviewedAt: '2026-08-25T00:00:00.000Z',
+    },
+  }, null, 2)}\n`);
   return {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
     FAKE_COMMAND_LOG: join(root, 'commands.log'),
     FAKE_BRANCH_STATE: join(root, 'branch.state'),
+    FAKE_JOB_STATE: join(root, 'job.state'),
+    FAKE_JOB_STOP_STATE: join(root, 'job.stop'),
+    FAKE_JOB_STOP_POLL_STATE: join(root, 'job-stop-poll.state'),
+    FAKE_JOB_STARTED_STATE: join(root, 'job.started'),
     FSK_GATE_A_APPROVAL_ID: 'gate-a-approved',
     FSK_GATE_B_APPROVAL_ID: 'gate-b-approved',
     FSK_GATE_C_APPROVAL_ID: 'gate-c-approved',
@@ -288,7 +352,11 @@ function gateEnvironment(root: string, bin: string): NodeJS.ProcessEnv {
     FSK_DEPLOY_COMMIT: commit,
     FSK_EXPECTED_DEPLOY_COMMIT: commit,
     FSK_AMPLIFY_APP_NAME: 'FSK',
+    FSK_AMPLIFY_SERVICE_ROLE_ARN: serviceRoleArn,
+    FSK_AMPLIFY_SERVICE_ROLE_POLICY_EVIDENCE: serviceRoleEvidencePath,
+    FSK_AMPLIFY_SERVICE_ROLE_POLICY_EVIDENCE_SHA256: sha256(serviceRoleEvidencePath),
     FSK_HOSTING_URL: 'https://fsk.example.test',
+    FSK_ASSET_JS_PATH: '/assets/index-a1b2c3.js',
     FSK_GIT_REMOTE: 'origin',
     FSK_GIT_REMOTE_URL: 'https://example.test/fsk.git',
     FSK_DEPLOY_DEADLINE_EPOCH: '4102444800',
@@ -372,6 +440,49 @@ function writeRetirementFixture(root: string, mutate?: (input: {
 }
 
 describe('DynamoDB Hosting deployment contract', () => {
+  it('binds the static Vue Hosting App to the AWS CLI WEB platform and service-role field', () => {
+    const skeleton = spawnSync(
+      'aws',
+      ['amplify', 'create-app', '--generate-cli-skeleton', 'input'],
+      { encoding: 'utf8' },
+    );
+    expect(skeleton.status, skeleton.stderr).toBe(0);
+    expect(JSON.parse(skeleton.stdout)).toMatchObject({
+      platform: 'WEB',
+      iamServiceRoleArn: '',
+    });
+    const readbackSkeleton = spawnSync(
+      'aws',
+      [
+        'amplify',
+        'get-app',
+        '--app-id',
+        'd1234567890abc',
+        '--region',
+        'ap-northeast-1',
+        '--generate-cli-skeleton',
+        'output',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(readbackSkeleton.status, readbackSkeleton.stderr).toBe(0);
+    expect(JSON.parse(readbackSkeleton.stdout).app).toMatchObject({
+      platform: 'platform',
+      iamServiceRoleArn: 'iamServiceRoleArn',
+    });
+
+    const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');
+    const root = temporaryRoot('fsk-task12-platform-');
+    const { bin } = createFakeCommandBin(root);
+    const execution = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...gateEnvironment(root, bin), FAKE_JOB_SEQUENCE: 'SUCCEED' },
+      timeout: 30_000,
+    });
+    expect(execution.status, `${execution.stdout}\n${execution.stderr}`).toBe(0);
+  }, 30_000);
+
   it('installs immutably, validates an exact target, deploys Gen 2 outputs, checks, then builds the Web artifact', () => {
     const config = parseJsonYaml<BuildSpec>('amplify.yml');
     const backend = config.backend.phases.build.commands;
@@ -575,10 +686,31 @@ describe('DynamoDB Hosting deployment contract', () => {
     expect(calls.some((value) => value.includes('amplify update-branch'))).toBe(true);
     expect(calls.some((value) => value.includes('amplify update-app') && value.includes('--custom-rules'))).toBe(true);
     expect(calls.some((value) => value.startsWith('git push ') && value.includes('--force-with-lease='))).toBe(true);
-    const successfulJob = calls.findIndex((value) => value.includes('amplify get-job'));
+    const mutable = /^(?:aws amplify (?:create-branch|update-branch|update-app|start-job)|git push )/;
+    for (const index of calls.flatMap((value, index) => mutable.test(value) ? [index] : [])) {
+      expect(calls[index - 1], calls[index]).toBe('date +%s');
+    }
+    let successfulJob = -1;
+    calls.forEach((value, index) => {
+      if (value.includes('amplify get-job')) successfulJob = index;
+    });
     const firstHttp = calls.findIndex((value) => value.startsWith('curl '));
     expect(successfulJob).toBeGreaterThanOrEqual(0);
     expect(firstHttp).toBeGreaterThan(successfulJob);
+    for (const path of [
+      '/manifest.json',
+      '/icons/icon-180.png',
+      '/assets/index-a1b2c3.js',
+      '/index.html',
+      '/owner/reports',
+      '/kitchen/report/new',
+      '/missing.json',
+      '/missing.js',
+      '/missing.png',
+      '/missing.bin',
+    ]) {
+      expect(calls.some((value) => value.startsWith('curl ') && value.includes(path)), path).toBe(true);
+    }
   }, 30_000);
 
   it.each([
@@ -599,6 +731,59 @@ describe('DynamoDB Hosting deployment contract', () => {
   });
 
   it.each([
+    ['stale commit', { FAKE_STALE_JOB: '1', FAKE_JOB_SEQUENCE: 'RUNNING' }],
+    ['expired deployment lease', { FAKE_EXPIRE_WHEN_JOB_STARTED: '1', FAKE_JOB_SEQUENCE: 'RUNNING' }],
+    ['unexpected job state', { FAKE_JOB_SEQUENCE: 'UNEXPECTED' }],
+    ['malformed job readback', { FAKE_JOB_INVALID_JSON: '1' }],
+  ])('stops and bounded-polls a stoppable job after %s', (_name, extraEnvironment) => {
+    const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');
+    const root = temporaryRoot('fsk-task12-gate-a-stop-');
+    const { bin, log } = createFakeCommandBin(root);
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...gateEnvironment(root, bin), ...extraEnvironment },
+      timeout: 30_000,
+    });
+    expect(result.status).not.toBe(0);
+    const calls = readFileSync(log, 'utf8').trim().split('\n');
+    const stopIndex = calls.findIndex((value) => value.includes('amplify stop-job'));
+    expect(stopIndex).toBeGreaterThanOrEqual(0);
+    expect(calls.slice(stopIndex + 1).filter((value) => value.includes('amplify get-job'))).toHaveLength(2);
+    expect(calls).not.toContain(expect.stringMatching(/^curl /));
+  }, 30_000);
+
+  it('treats a terminal FAILED job as failure without attempting a terminal stop', () => {
+    const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');
+    const root = temporaryRoot('fsk-task12-gate-a-failed-');
+    const { bin, log } = createFakeCommandBin(root);
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...gateEnvironment(root, bin), FAKE_JOB_SEQUENCE: 'RUNNING,FAILED' },
+      timeout: 30_000,
+    });
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(log, 'utf8')).not.toMatch(/amplify stop-job|curl /);
+  }, 30_000);
+
+  it.each([
+    ['wrong icon MIME', { FAKE_HTTP_BAD_ICON: '1' }],
+    ['SPA rewrite swallowing an unknown extension', { FAKE_HTTP_UNKNOWN_200: '1' }],
+  ])('rejects live HTTP evidence with %s', (_name, extraEnvironment) => {
+    const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');
+    const root = temporaryRoot('fsk-task12-gate-a-http-negative-');
+    const { bin } = createFakeCommandBin(root);
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...gateEnvironment(root, bin), FAKE_JOB_SEQUENCE: 'SUCCEED', ...extraEnvironment },
+      timeout: 30_000,
+    });
+    expect(result.status).not.toBe(0);
+  }, 30_000);
+
+  it.each([
     ['non-NotFound branch read error', { FAKE_BRANCH_ERROR: '1' }],
     ['unknown existing branch state', { FAKE_BRANCH_DRIFT: '1' }],
     ['unapproved Git remote URL', { FAKE_REMOTE_URL_OVERRIDE: 'https://example.test/wrong.git' }],
@@ -606,6 +791,26 @@ describe('DynamoDB Hosting deployment contract', () => {
   ])('rejects %s before a mutable deployment command', (_name, extraEnvironment) => {
     const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');
     const root = temporaryRoot('fsk-task12-gate-a-bootstrap-negative-');
+    const { bin, log } = createFakeCommandBin(root);
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...gateEnvironment(root, bin), ...extraEnvironment },
+      timeout: 30_000,
+    });
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(log, 'utf8')).not.toMatch(
+      /amplify (?:create-branch|update-branch|update-app|start-job)|git push |curl /,
+    );
+  });
+
+  it.each([
+    ['dynamic Hosting platform', { FAKE_APP_PLATFORM: 'WEB_COMPUTE' }],
+    ['foreign service role', { FAKE_APP_ROLE_ARN: 'arn:aws:iam::111111111111:role/service-role/FSKAmplifyGen2ServiceRole' }],
+    ['unapproved service-role evidence hash', { FSK_AMPLIFY_SERVICE_ROLE_POLICY_EVIDENCE_SHA256: '0'.repeat(64) }],
+  ])('rejects %s before a mutable deployment command', (_name, extraEnvironment) => {
+    const [script] = extractFences(read('docs/aws/dynamodb-deployment-runbook.md'), 'bash');
+    const root = temporaryRoot('fsk-task12-gate-a-role-negative-');
     const { bin, log } = createFakeCommandBin(root);
     const result = spawnSync('bash', ['-c', script], {
       cwd: repoRoot,
@@ -718,6 +923,49 @@ describe('DynamoDB Hosting deployment contract', () => {
       const result = run(mutate);
       expect(result.status, `${name}: ${result.stderr}`).not.toBe(0);
     }
+
+    const root = temporaryRoot('fsk-task12-gate-c-byte-swap-');
+    const { bin } = createFakeCommandBin(root);
+    const fixture = writeRetirementFixture(root);
+    const replacementPath = join(root, 'replacement-manifest.json');
+    const replacement = JSON.parse(readFileSync(fixture.manifestPath, 'utf8'));
+    replacement.retire[0].owner = 'different-approved-looking-owner';
+    writeFileSync(replacementPath, `${JSON.stringify(replacement, null, 2)}\n`);
+    const hookPath = join(root, 'swap-read-buffer.cjs');
+    writeFileSync(hookPath, `
+const fs = require('node:fs');
+const originalOpenSync = fs.openSync.bind(fs);
+const originalReadFileSync = fs.readFileSync.bind(fs);
+const opened = new Map();
+fs.openSync = (...args) => {
+  const fd = originalOpenSync(...args);
+  opened.set(fd, String(args[0]));
+  return fd;
+};
+fs.readFileSync = (target, ...args) => {
+  const path = typeof target === 'number' ? opened.get(target) : String(target);
+  if (path === process.env.FAKE_SWAP_TARGET) return originalReadFileSync(process.env.FAKE_SWAP_REPLACEMENT, ...args);
+  return originalReadFileSync(target, ...args);
+};
+`);
+    const swapped = spawnSync('bash', ['-c', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...gateEnvironment(root, bin),
+        NODE_OPTIONS: `--require=${hookPath}`,
+        FAKE_SWAP_TARGET: fixture.manifestPath,
+        FAKE_SWAP_REPLACEMENT: replacementPath,
+        FSK_RETIREMENT_MANIFEST: fixture.manifestPath,
+        FSK_RETIREMENT_MANIFEST_SHA256: sha256(fixture.manifestPath),
+        FSK_NEW_FSK_PROTECT_SET: fixture.newFskPath,
+        FSK_NEW_FSK_PROTECT_SET_SHA256: sha256(fixture.newFskPath),
+        FSK_GAMELIST_PROTECT_SET: fixture.gameListPath,
+        FSK_GAMELIST_PROTECT_SET_SHA256: sha256(fixture.gameListPath),
+      },
+      timeout: 10_000,
+    });
+    expect(swapped.status, swapped.stderr).not.toBe(0);
   }, 30_000);
 
   it('keeps every executable runbook block syntax-valid, strict, and fail-closed on its authorization tuple', () => {

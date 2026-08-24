@@ -66,19 +66,32 @@ case "$FSK_NEW_FSK_PROTECT_SET" in /*) ;; *) exit 3 ;; esac
 case "$FSK_GAMELIST_PROTECT_SET" in /*) ;; *) exit 3 ;; esac
 test "$(aws sts get-caller-identity --query Account --output text)" = "$FSK_EXPECTED_AWS_ACCOUNT_ID"
 test "$(git rev-parse HEAD)" = "$FSK_DEPLOY_COMMIT"
-test "$(shasum -a 256 "$FSK_RETIREMENT_MANIFEST" | awk '{print $1}')" = "$FSK_RETIREMENT_MANIFEST_SHA256"
-test "$(shasum -a 256 "$FSK_NEW_FSK_PROTECT_SET" | awk '{print $1}')" = "$FSK_NEW_FSK_PROTECT_SET_SHA256"
-test "$(shasum -a 256 "$FSK_GAMELIST_PROTECT_SET" | awk '{print $1}')" = "$FSK_GAMELIST_PROTECT_SET_SHA256"
-FSK_GATE_C_APPROVAL_ID="$FSK_GATE_C_APPROVAL_ID" FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" FSK_NEW_FSK_PROTECT_SET_SHA256="$FSK_NEW_FSK_PROTECT_SET_SHA256" FSK_GAMELIST_PROTECT_SET_SHA256="$FSK_GAMELIST_PROTECT_SET_SHA256" node - "$FSK_RETIREMENT_MANIFEST" "$FSK_NEW_FSK_PROTECT_SET" "$FSK_GAMELIST_PROTECT_SET" <<'NODE'
+FSK_GATE_C_APPROVAL_ID="$FSK_GATE_C_APPROVAL_ID" FSK_EXPECTED_AWS_ACCOUNT_ID="$FSK_EXPECTED_AWS_ACCOUNT_ID" FSK_EXPECTED_AWS_REGION="$FSK_EXPECTED_AWS_REGION" FSK_AMPLIFY_APP_ID="$FSK_AMPLIFY_APP_ID" FSK_DEPLOY_COMMIT="$FSK_DEPLOY_COMMIT" FSK_RETIREMENT_MANIFEST_SHA256="$FSK_RETIREMENT_MANIFEST_SHA256" FSK_NEW_FSK_PROTECT_SET_SHA256="$FSK_NEW_FSK_PROTECT_SET_SHA256" FSK_GAMELIST_PROTECT_SET_SHA256="$FSK_GAMELIST_PROTECT_SET_SHA256" node - "$FSK_RETIREMENT_MANIFEST" "$FSK_NEW_FSK_PROTECT_SET" "$FSK_GAMELIST_PROTECT_SET" <<'NODE'
 const fs = require('node:fs');
+const { createHash } = require('node:crypto');
 const [manifestPath, newFskPath, gameListPath] = process.argv.slice(2);
-for (const path of [manifestPath, newFskPath, gameListPath]) {
-  const stat = fs.lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) process.exit(1);
-}
-const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-const newFsk = JSON.parse(fs.readFileSync(newFskPath, 'utf8'));
-const gameList = JSON.parse(fs.readFileSync(gameListPath, 'utf8'));
+const readEvidence = (path, expectedSha256) => {
+  let fd;
+  try {
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const before = fs.fstatSync(fd, { bigint: true });
+    if (!before.isFile()) process.exit(1);
+    const buffer = fs.readFileSync(fd);
+    const after = fs.fstatSync(fd, { bigint: true });
+    const pathAfter = fs.lstatSync(path, { bigint: true });
+    const stable = before.dev === after.dev && before.ino === after.ino && before.size === after.size && before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs && after.dev === pathAfter.dev && after.ino === pathAfter.ino && after.size === pathAfter.size && after.mtimeNs === pathAfter.mtimeNs && after.ctimeNs === pathAfter.ctimeNs && before.size === BigInt(buffer.length) && !pathAfter.isSymbolicLink();
+    if (!stable || createHash('sha256').update(buffer).digest('hex') !== expectedSha256) process.exit(1);
+    return buffer;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+};
+const manifestBuffer = readEvidence(manifestPath, process.env.FSK_RETIREMENT_MANIFEST_SHA256);
+const newFskBuffer = readEvidence(newFskPath, process.env.FSK_NEW_FSK_PROTECT_SET_SHA256);
+const gameListBuffer = readEvidence(gameListPath, process.env.FSK_GAMELIST_PROTECT_SET_SHA256);
+const manifest = JSON.parse(manifestBuffer.toString('utf8'));
+const newFsk = JSON.parse(newFskBuffer.toString('utf8'));
+const gameList = JSON.parse(gameListBuffer.toString('utf8'));
 const exactKeys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join() === [...expected].sort().join();
 const itemKeys = ['category', 'arn', 'resourceType', 'retentionPolicy', 'owner'];
 const newFskCategoryType = {
