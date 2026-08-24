@@ -194,7 +194,7 @@ describe('master data repositories', () => {
   });
 
   it('rejects OWNER model errors even when Data includes a record', async () => {
-    const errors = [{ errorType: 'Unauthorized', message: 'denied' }];
+    const errors = [{ errorType: 'ResolverError', message: 'operation failed' }];
     const shift = successfulModel();
     shift.create.mockResolvedValue({
       data: { id: 'day', name: '日班', sortOrder: 10, active: true },
@@ -216,5 +216,87 @@ describe('master data repositories', () => {
 
     expect(error.code).toBe('DATA_OPERATION_FAILED');
     expect(error.cause).toBe(errors);
+  });
+
+  it.each([
+    ['null data', null],
+    ['non-array data', { id: 'not-a-list' }],
+  ])('rejects OWNER list %s using DATA_PAGINATION_FAILED', async (_case, data) => {
+    const shift = successfulModel();
+    shift.list.mockResolvedValue({ data, nextToken: null, errors: [] });
+    const repository = loadedModule().createOwnerMasterDataRepository({
+      models: {
+        ShiftDefinition: shift,
+        ResponsiblePerson: successfulModel(),
+        AppSetting: successfulModel(),
+      },
+    });
+
+    const error = caughtError(
+      await repository.listShifts!().catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_PAGINATION_FAILED');
+  });
+
+  it('rejects a repeated OWNER list nextToken using DATA_PAGINATION_FAILED', async () => {
+    const shift = successfulModel();
+    shift.list
+      .mockResolvedValueOnce({ data: [], nextToken: 'same', errors: [] })
+      .mockResolvedValueOnce({ data: [], nextToken: 'same', errors: [] });
+    const repository = loadedModule().createOwnerMasterDataRepository({
+      models: {
+        ShiftDefinition: shift,
+        ResponsiblePerson: successfulModel(),
+        AppSetting: successfulModel(),
+      },
+    });
+
+    const error = caughtError(
+      await repository.listShifts!().catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_PAGINATION_FAILED');
+    expect(shift.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps structured OWNER authorization errors without exposing SDK details to pages', async () => {
+    const errors = [{ errorType: 'UnauthorizedException', message: 'denied' }];
+    const setting = successfulModel();
+    setting.get.mockResolvedValue({ data: null, errors });
+    const repository = loadedModule().createOwnerMasterDataRepository({
+      models: {
+        ShiftDefinition: successfulModel(),
+        ResponsiblePerson: successfulModel(),
+        AppSetting: setting,
+      },
+    });
+
+    const error = caughtError(
+      await repository.getSetting!('default' as never).catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_UNAUTHORIZED');
+    expect(error.cause).toBe(errors);
+  });
+
+  it('maps thrown OWNER network failures to DATA_NETWORK_ERROR', async () => {
+    const cause = new TypeError('Failed to fetch');
+    const setting = successfulModel();
+    setting.get.mockRejectedValue(cause);
+    const repository = loadedModule().createOwnerMasterDataRepository({
+      models: {
+        ShiftDefinition: successfulModel(),
+        ResponsiblePerson: successfulModel(),
+        AppSetting: setting,
+      },
+    });
+
+    const error = caughtError(
+      await repository.getSetting!('default' as never).catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_NETWORK_ERROR');
+    expect(error.cause).toBe(cause);
   });
 });

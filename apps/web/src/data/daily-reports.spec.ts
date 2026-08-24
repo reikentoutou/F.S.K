@@ -129,7 +129,8 @@ describe('daily reports repository', () => {
 
   it.each([
     [[{ errorType: 'DynamoDB:ConditionalCheckFailedException', message: 'condition failed' }]],
-    [[{ extensions: { code: 'DUPLICATE_KEY' }, message: 'duplicate report' }]],
+    [[{ extensions: { code: 'DuplicateKey' }, message: 'duplicate report' }]],
+    [[{ name: 'AlreadyExistsException', message: 'record exists' }]],
   ])('maps conditional and duplicate GraphQL errors to REPORT_ALREADY_EXISTS', async (errors) => {
     const repository = loadedModule().createDailyReportsRepository({
       models: {
@@ -144,6 +145,31 @@ describe('daily reports repository', () => {
 
     expect(error.code).toBe('REPORT_ALREADY_EXISTS');
     expect(error.message).toBe('REPORT_ALREADY_EXISTS');
+    expect(error.cause).toBe(errors);
+  });
+
+  it.each([
+    [[{ message: 'generic duplicate report' }]],
+    [[{ errorType: 'ResolverError', message: 'generic conflict' }]],
+    [[{ extensions: { code: 'CONFLICT' }, message: 'conflict' }]],
+    [[{
+      errorType: 'ResolverError',
+      message: 'request rejected',
+      request: { payload: { expenseReason: 'duplicate conflict already exists' } },
+    }]],
+  ])('keeps untrusted duplicate/conflict text as an unknown submission result', async (errors) => {
+    const repository = loadedModule().createDailyReportsRepository({
+      models: {
+        DailyReport: {
+          create: vi.fn().mockResolvedValue({ data: null, errors }),
+          dailyReportsByBusinessDate: vi.fn(),
+        },
+      },
+    });
+
+    const error = caughtError(await repository.create(command).catch((caught) => caught));
+
+    expect(error.code).toBe('SUBMISSION_RESULT_UNKNOWN');
     expect(error.cause).toBe(errors);
   });
 
@@ -342,6 +368,73 @@ describe('daily reports repository', () => {
     expect(error.cause).toBe(errors);
   });
 
+  it.each([
+    ['get', [{ errorType: 'UnauthorizedException', message: 'denied' }], 'DATA_UNAUTHORIZED'],
+    ['update', [{ extensions: { code: 'ConflictException' }, message: 'version conflict' }], 'DATA_CONFLICT'],
+    ['get', [{ name: 'NotFoundException', message: 'missing' }], 'REPORT_NOT_FOUND'],
+    ['update', [{ message: 'generic conflict duplicate text' }], 'DATA_OPERATION_FAILED'],
+  ])('maps structured %s failures to the expected stable code', async (operation, errors, expectedCode) => {
+    const get = vi.fn().mockResolvedValue({ data: createdReport, errors: [] });
+    const update = vi.fn().mockResolvedValue({ data: createdReport, errors: [] });
+    (operation === 'get' ? get : update).mockResolvedValue({
+      data: createdReport,
+      errors,
+    });
+    const repository = loadedModule().createDailyReportsRepository({
+      models: {
+        DailyReport: {
+          create: vi.fn(),
+          get,
+          update,
+          dailyReportsByBusinessDate: vi.fn(),
+        },
+      },
+    });
+    const editable = updateCommand();
+
+    const error = caughtError(
+      await (operation === 'get'
+        ? repository.getByReportKey('2026-08-24#shift-day')
+        : repository.updateByReportKey(
+            '2026-08-24#shift-day',
+            editable,
+          )
+      ).catch((caught) => caught),
+    );
+
+    expect(error.code).toBe(expectedCode);
+    expect(error.cause).toBe(errors);
+  });
+
+  it.each(['get', 'update'])('maps a thrown %s network failure to DATA_NETWORK_ERROR', async (operation) => {
+    const cause = new TypeError('Failed to fetch');
+    const get = vi.fn().mockRejectedValue(cause);
+    const update = vi.fn().mockRejectedValue(cause);
+    const repository = loadedModule().createDailyReportsRepository({
+      models: {
+        DailyReport: {
+          create: vi.fn(),
+          get,
+          update,
+          dailyReportsByBusinessDate: vi.fn(),
+        },
+      },
+    });
+
+    const error = caughtError(
+      await (operation === 'get'
+        ? repository.getByReportKey('2026-08-24#shift-day')
+        : repository.updateByReportKey(
+            '2026-08-24#shift-day',
+            updateCommand(),
+          )
+      ).catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_NETWORK_ERROR');
+    expect(error.cause).toBe(cause);
+  });
+
   it.each(['get', 'update'])('rejects a null %s Data result', async (operation) => {
     const get = vi.fn().mockResolvedValue({ data: createdReport, errors: [] });
     const update = vi.fn().mockResolvedValue({ data: createdReport, errors: [] });
@@ -383,7 +476,9 @@ describe('daily reports repository', () => {
     ).catch((caught) => caught);
     const error = caughtError(result);
 
-    expect(error.code).toBe('DATA_OPERATION_FAILED');
+    expect(error.code).toBe(
+      operation === 'get' ? 'REPORT_NOT_FOUND' : 'DATA_OPERATION_FAILED',
+    );
   });
 
   it('rejects an index page that contains Data errors even when data is present', async () => {
@@ -406,7 +501,66 @@ describe('daily reports repository', () => {
     expect(error.code).toBe('DATA_OPERATION_FAILED');
     expect(error.cause).toBe(errors);
   });
+
+  it.each([
+    ['null data', { data: null, nextToken: null, errors: [] }],
+    ['non-array data', { data: { reportKey: 'bad' }, nextToken: null, errors: [] }],
+  ])('rejects an index page with %s using DATA_PAGINATION_FAILED', async (_case, page) => {
+    const repository = loadedModule().createDailyReportsRepository({
+      models: {
+        DailyReport: {
+          create: vi.fn(),
+          dailyReportsByBusinessDate: vi.fn().mockResolvedValue(page),
+        },
+      },
+    });
+
+    const error = caughtError(
+      await repository.listByBusinessDate('2026-08-24').catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_PAGINATION_FAILED');
+  });
+
+  it('rejects a repeated index nextToken using DATA_PAGINATION_FAILED', async () => {
+    const dailyReportsByBusinessDate = vi
+      .fn()
+      .mockResolvedValueOnce({ data: [createdReport], nextToken: 'same', errors: [] })
+      .mockResolvedValueOnce({ data: [createdReport], nextToken: 'same', errors: [] });
+    const repository = loadedModule().createDailyReportsRepository({
+      models: {
+        DailyReport: { create: vi.fn(), dailyReportsByBusinessDate },
+      },
+    });
+
+    const error = caughtError(
+      await repository.listByBusinessDate('2026-08-24').catch((caught) => caught),
+    );
+
+    expect(error.code).toBe('DATA_PAGINATION_FAILED');
+    expect(dailyReportsByBusinessDate).toHaveBeenCalledTimes(2);
+  });
 });
+
+function updateCommand(): UpdateDailyReportCommand {
+  return {
+    shiftNameSnapshot: command.shiftNameSnapshot,
+    responsiblePersonId: command.responsiblePersonId,
+    responsiblePersonSnapshot: command.responsiblePersonSnapshot,
+    startMinuteOfDay: command.startMinuteOfDay,
+    endMinuteOfDay: command.endMinuteOfDay,
+    timeRangeLabelSnapshot: command.timeRangeLabelSnapshot,
+    previousImosBalanceYen: command.previousImosBalanceYen,
+    currentImosBalanceYen: command.currentImosBalanceYen,
+    newageYen: command.newageYen,
+    cashTotalYen: command.cashTotalYen,
+    expenseYen: command.expenseYen,
+    expenseReason: command.expenseReason,
+    staffMealCashYen: command.staffMealCashYen,
+    staffMealAlipayYen: command.staffMealAlipayYen,
+    attachmentKeys: command.attachmentKeys,
+  };
+}
 
 function createdReportInput(): Record<string, unknown> {
   return {

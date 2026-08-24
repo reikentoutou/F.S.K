@@ -1,4 +1,6 @@
 const STORAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const COGNITO_IDENTITY_ID_PATTERN =
+  /^[a-z]{2}(?:-[a-z]+)+-\d:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/gu;
 const UNSAFE_FORMAT_CONTROL_PATTERN =
   /[\u00ad\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|\u{e0001}|[\u{e0020}-\u{e007f}]/u;
@@ -8,6 +10,12 @@ export const MAX_STORAGE_FILE_NAME_BYTES = 255;
 function assertStorageId(value: string, field: string): void {
   if (!STORAGE_ID_PATTERN.test(value)) {
     throw new Error(`INVALID_STORAGE_ID:${field}`);
+  }
+}
+
+function assertCognitoIdentityId(value: string): void {
+  if (!COGNITO_IDENTITY_ID_PATTERN.test(value)) {
+    throw new Error('INVALID_STORAGE_ID:identityId');
   }
 }
 
@@ -52,7 +60,7 @@ export function submissionKey(
   attachmentId: string,
   fileName: string,
 ): string {
-  assertStorageId(identityId, 'identityId');
+  assertCognitoIdentityId(identityId);
   assertStorageId(draftId, 'draftId');
   assertStorageId(attachmentId, 'attachmentId');
 
@@ -66,7 +74,11 @@ export function pendingKey(
   attachmentId: string,
   fileName: string,
 ): string {
-  return submissionKey(subject, draftId, attachmentId, fileName);
+  assertStorageId(subject, 'subject');
+  assertStorageId(draftId, 'draftId');
+  assertStorageId(attachmentId, 'attachmentId');
+
+  return `submissions/${subject}/${draftId}/${attachmentId}/${sanitizeFileName(fileName)}`;
 }
 
 export function formalAttachmentKey(

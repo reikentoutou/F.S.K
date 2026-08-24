@@ -29,23 +29,49 @@ function loadedModule(): AttachmentsModule {
 
 describe('attachment repositories', () => {
   it('uploads kitchen files only to the canonical identity submission key', async () => {
-    const result = Promise.resolve({ path: 'ignored-sdk-path' });
+    const identityId =
+      'ap-northeast-1:123e4567-e89b-12d3-a456-426614174000';
+    const key = `submissions/${identityId}/draft-1/att-1/票据.jpg`;
+    const result = Promise.resolve({ path: key });
     const uploadData = vi.fn().mockReturnValue({ result });
     const repository = loadedModule().createKitchenAttachmentRepository({ uploadData });
     const data = new Blob(['receipt'], { type: 'image/jpeg' });
 
     await expect(
       repository.upload({
-        identityId: 'sub-a',
+        identityId,
         draftId: 'draft-1',
         attachmentId: 'att-1',
         fileName: '../票据.jpg',
         data,
       }),
-    ).resolves.toBe('submissions/sub-a/draft-1/att-1/票据.jpg');
+    ).resolves.toBe(key);
     expect(uploadData).toHaveBeenCalledWith({
-      path: 'submissions/sub-a/draft-1/att-1/票据.jpg',
+      path: key,
       data,
+    });
+  });
+
+  it('rejects an upload result whose returned path differs from the canonical key', async () => {
+    const uploadData = vi.fn().mockReturnValue({
+      result: Promise.resolve({ path: 'submissions/another-identity/file.jpg' }),
+    });
+    const repository = loadedModule().createKitchenAttachmentRepository({
+      uploadData,
+    });
+
+    await expect(
+      repository.upload({
+        identityId:
+          'ap-northeast-1:123e4567-e89b-12d3-a456-426614174000',
+        draftId: 'draft-1',
+        attachmentId: 'att-1',
+        fileName: '票据.jpg',
+        data: new Blob(['receipt']),
+      }),
+    ).rejects.toMatchObject({
+      code: 'ATTACHMENT_PATH_MISMATCH',
+      message: 'ATTACHMENT_PATH_MISMATCH',
     });
   });
 

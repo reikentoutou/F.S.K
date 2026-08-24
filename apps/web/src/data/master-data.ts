@@ -3,7 +3,9 @@ import { MAX_YEN } from '@fsk/domain';
 import { getDataClient, type FskDataClient } from './client';
 import {
   DataRepositoryError,
+  classifyDataFailure,
   dataOperationFailed,
+  dataPaginationFailed,
   hasDataErrors,
 } from './errors';
 
@@ -54,13 +56,20 @@ function assertSetting(value: AppSettingInput): void {
   }
 }
 
-async function unwrap<T>(result: {
-  data: T | null;
-  errors?: readonly unknown[];
-}): Promise<T> {
-  if (hasDataErrors(result.errors)) throw dataOperationFailed(result.errors);
-  if (result.data === null) throw dataOperationFailed();
-  return result.data;
+async function dataResult<T>(
+  load: () => Promise<{ data: T | null; errors?: readonly unknown[] }>,
+): Promise<T> {
+  try {
+    const result = await load();
+    if (hasDataErrors(result.errors)) {
+      throw classifyDataFailure(result.errors);
+    }
+    if (result.data === null) throw dataOperationFailed();
+    return result.data;
+  } catch (cause) {
+    if (cause instanceof DataRepositoryError) throw cause;
+    throw classifyDataFailure(cause);
+  }
 }
 
 export function createKitchenContextRepository(
@@ -69,7 +78,7 @@ export function createKitchenContextRepository(
   const resolveClient = () => client ?? getDataClient();
   return {
     async getContext() {
-      return unwrap(await resolveClient().queries.getKitchenContext());
+      return dataResult(() => resolveClient().queries.getKitchenContext());
     },
   };
 }
@@ -81,14 +90,20 @@ export function createOwnerMasterDataRepository(
   return {
     async createShift(value: ShiftDefinitionInput) {
       assertShift(value);
-      return unwrap(await resolveClient().models.ShiftDefinition.create(value));
+      return dataResult(() =>
+        resolveClient().models.ShiftDefinition.create(value),
+      );
     },
     async updateShift(value: ShiftDefinitionInput) {
       assertShift(value);
-      return unwrap(await resolveClient().models.ShiftDefinition.update(value));
+      return dataResult(() =>
+        resolveClient().models.ShiftDefinition.update(value),
+      );
     },
     async deleteShift(id: string) {
-      return unwrap(await resolveClient().models.ShiftDefinition.delete({ id }));
+      return dataResult(() =>
+        resolveClient().models.ShiftDefinition.delete({ id }),
+      );
     },
     async listShifts() {
       return listAll((options) =>
@@ -97,19 +112,19 @@ export function createOwnerMasterDataRepository(
     },
     async createResponsiblePerson(value: ResponsiblePersonInput) {
       assertPerson(value);
-      return unwrap(
-        await resolveClient().models.ResponsiblePerson.create(value),
+      return dataResult(() =>
+        resolveClient().models.ResponsiblePerson.create(value),
       );
     },
     async updateResponsiblePerson(value: ResponsiblePersonInput) {
       assertPerson(value);
-      return unwrap(
-        await resolveClient().models.ResponsiblePerson.update(value),
+      return dataResult(() =>
+        resolveClient().models.ResponsiblePerson.update(value),
       );
     },
     async deleteResponsiblePerson(id: string) {
-      return unwrap(
-        await resolveClient().models.ResponsiblePerson.delete({ id }),
+      return dataResult(() =>
+        resolveClient().models.ResponsiblePerson.delete({ id }),
       );
     },
     async listResponsiblePersons() {
@@ -119,23 +134,23 @@ export function createOwnerMasterDataRepository(
     },
     async createSetting(value: AppSettingInput) {
       assertSetting(value);
-      return unwrap(await resolveClient().models.AppSetting.create(value));
+      return dataResult(() => resolveClient().models.AppSetting.create(value));
     },
     async updateSetting(value: AppSettingInput) {
       assertSetting(value);
-      return unwrap(await resolveClient().models.AppSetting.update(value));
+      return dataResult(() => resolveClient().models.AppSetting.update(value));
     },
     async deleteSetting(id: string) {
-      return unwrap(await resolveClient().models.AppSetting.delete({ id }));
+      return dataResult(() => resolveClient().models.AppSetting.delete({ id }));
     },
     async getSetting(id: string) {
-      return unwrap(await resolveClient().models.AppSetting.get({ id }));
+      return dataResult(() => resolveClient().models.AppSetting.get({ id }));
     },
   };
 }
 
 interface ListPage<T> {
-  data: T[];
+  data: T[] | null;
   nextToken?: string | null;
   errors?: readonly unknown[];
 }
@@ -145,11 +160,28 @@ async function listAll<T>(
 ): Promise<T[]> {
   const values: T[] = [];
   let nextToken: string | null | undefined;
+  const observedTokens = new Set<string>();
   do {
-    const result = await load(nextToken ? { nextToken } : undefined);
-    if (hasDataErrors(result.errors)) throw dataOperationFailed(result.errors);
+    let result: ListPage<T>;
+    try {
+      result = await load(nextToken ? { nextToken } : undefined);
+    } catch (cause) {
+      throw classifyDataFailure(cause);
+    }
+    if (hasDataErrors(result.errors)) {
+      throw classifyDataFailure(result.errors);
+    }
+    if (!Array.isArray(result.data)) {
+      throw dataPaginationFailed(result.data);
+    }
     values.push(...result.data);
     nextToken = result.nextToken;
+    if (nextToken) {
+      if (observedTokens.has(nextToken)) {
+        throw dataPaginationFailed(new Error('REPEATED_DATA_NEXT_TOKEN'));
+      }
+      observedTokens.add(nextToken);
+    }
   } while (nextToken);
   return values;
 }

@@ -3,9 +3,12 @@ import { dailyReportKey } from '@fsk/domain';
 import { getDataClient, type FskDataClient } from './client';
 import {
   DataRepositoryError,
+  classifyDataFailure,
   dataOperationFailed,
+  dataPaginationFailed,
   hasDataErrors,
   isDuplicateDataFailure,
+  reportNotFound,
 } from './errors';
 
 export interface CreateDailyReportCommand {
@@ -37,13 +40,25 @@ export type UpdateDailyReportCommand = Omit<
   'businessDate' | 'shiftId'
 >;
 
-function unwrapOwnerResult<T>(result: {
-  data: T | null;
-  errors?: readonly unknown[];
-}): T {
-  if (hasDataErrors(result.errors)) throw dataOperationFailed(result.errors);
-  if (result.data === null) throw dataOperationFailed();
-  return result.data;
+async function ownerResult<T>(
+  load: () => Promise<{ data: T | null; errors?: readonly unknown[] }>,
+  nullResult: 'NOT_FOUND' | 'OPERATION_FAILED',
+): Promise<T> {
+  try {
+    const result = await load();
+    if (hasDataErrors(result.errors)) {
+      throw classifyDataFailure(result.errors);
+    }
+    if (result.data === null) {
+      throw nullResult === 'NOT_FOUND'
+        ? reportNotFound()
+        : dataOperationFailed();
+    }
+    return result.data;
+  } catch (cause) {
+    if (cause instanceof DataRepositoryError) throw cause;
+    throw classifyDataFailure(cause);
+  }
 }
 
 export function createDailyReportsRepository(
@@ -102,33 +117,36 @@ export function createDailyReportsRepository(
       }
     },
     async getByReportKey(reportKey: string) {
-      return unwrapOwnerResult(
-        await resolveClient().models.DailyReport.get({ reportKey }),
+      return ownerResult(
+        () => resolveClient().models.DailyReport.get({ reportKey }),
+        'NOT_FOUND',
       );
     },
     async updateByReportKey(
       reportKey: string,
       command: UpdateDailyReportCommand,
     ) {
-      return unwrapOwnerResult(
-        await resolveClient().models.DailyReport.update({
-          reportKey,
-          shiftNameSnapshot: command.shiftNameSnapshot,
-          responsiblePersonId: command.responsiblePersonId,
-          responsiblePersonSnapshot: command.responsiblePersonSnapshot,
-          startMinuteOfDay: command.startMinuteOfDay,
-          endMinuteOfDay: command.endMinuteOfDay,
-          timeRangeLabelSnapshot: command.timeRangeLabelSnapshot,
-          previousImosBalanceYen: command.previousImosBalanceYen,
-          currentImosBalanceYen: command.currentImosBalanceYen,
-          newageYen: command.newageYen,
-          cashTotalYen: command.cashTotalYen,
-          expenseYen: command.expenseYen,
-          expenseReason: command.expenseReason,
-          staffMealCashYen: command.staffMealCashYen,
-          staffMealAlipayYen: command.staffMealAlipayYen,
-          attachmentKeys: [...command.attachmentKeys],
-        }),
+      return ownerResult(
+        () =>
+          resolveClient().models.DailyReport.update({
+            reportKey,
+            shiftNameSnapshot: command.shiftNameSnapshot,
+            responsiblePersonId: command.responsiblePersonId,
+            responsiblePersonSnapshot: command.responsiblePersonSnapshot,
+            startMinuteOfDay: command.startMinuteOfDay,
+            endMinuteOfDay: command.endMinuteOfDay,
+            timeRangeLabelSnapshot: command.timeRangeLabelSnapshot,
+            previousImosBalanceYen: command.previousImosBalanceYen,
+            currentImosBalanceYen: command.currentImosBalanceYen,
+            newageYen: command.newageYen,
+            cashTotalYen: command.cashTotalYen,
+            expenseYen: command.expenseYen,
+            expenseReason: command.expenseReason,
+            staffMealCashYen: command.staffMealCashYen,
+            staffMealAlipayYen: command.staffMealAlipayYen,
+            attachmentKeys: [...command.attachmentKeys],
+          }),
+        'OPERATION_FAILED',
       );
     },
     async listByBusinessDate(businessDate: string) {
@@ -137,19 +155,28 @@ export function createDailyReportsRepository(
       const observedTokens = new Set<string>();
 
       do {
-        const result =
-          await resolveClient().models.DailyReport.dailyReportsByBusinessDate(
+        const loadPage = () =>
+          resolveClient().models.DailyReport.dailyReportsByBusinessDate(
             { businessDate },
             nextToken ? { nextToken } : undefined,
           );
+        let result: Awaited<ReturnType<typeof loadPage>>;
+        try {
+          result = await loadPage();
+        } catch (cause) {
+          throw classifyDataFailure(cause);
+        }
         if (hasDataErrors(result.errors)) {
-          throw dataOperationFailed(result.errors);
+          throw classifyDataFailure(result.errors);
+        }
+        if (!Array.isArray(result.data)) {
+          throw dataPaginationFailed(result.data);
         }
         reports.push(...result.data);
         nextToken = result.nextToken;
         if (nextToken) {
           if (observedTokens.has(nextToken)) {
-            throw dataOperationFailed(new Error('REPEATED_DATA_NEXT_TOKEN'));
+            throw dataPaginationFailed(new Error('REPEATED_DATA_NEXT_TOKEN'));
           }
           observedTokens.add(nextToken);
         }

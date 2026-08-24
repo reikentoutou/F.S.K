@@ -1,6 +1,7 @@
 import { getUrl, remove, uploadData } from 'aws-amplify/storage';
 
 import { submissionKey } from '../../../../amplify/storage/key-policy';
+import { DataRepositoryError } from './errors';
 
 export interface KitchenAttachmentUpload {
   identityId: string;
@@ -33,8 +34,14 @@ export function createKitchenAttachmentRepository(
         input.attachmentId,
         input.fileName,
       );
-      await storage.uploadData({ path: key, data: input.data }).result;
-      return key;
+      const result = await storage.uploadData({ path: key, data: input.data })
+        .result;
+      if (result.path !== key) {
+        throw new DataRepositoryError('ATTACHMENT_PATH_MISMATCH', {
+          cause: result,
+        });
+      }
+      return result.path;
     },
   };
 }

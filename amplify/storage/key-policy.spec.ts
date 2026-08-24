@@ -28,24 +28,44 @@ describe('Storage key construction', () => {
         ) => string;
       }>
     ).submissionKey;
+    const identityId =
+      'ap-northeast-1:123e4567-e89b-12d3-a456-426614174000';
 
     expect(submissionKey).toBeTypeOf('function');
-    expect(submissionKey?.('sub-a', 'draft-1', 'att-1', '../票据.jpg')).toBe(
-      'submissions/sub-a/draft-1/att-1/票据.jpg',
+    expect(submissionKey?.(identityId, 'draft-1', 'att-1', '../票据.jpg')).toBe(
+      `submissions/${identityId}/draft-1/att-1/票据.jpg`,
     );
   });
 
   it('builds UTF-8 bounded submission keys without a Node Buffer global', () => {
     vi.stubGlobal('Buffer', undefined);
+    const identityId =
+      'ap-northeast-1:123e4567-e89b-12d3-a456-426614174000';
 
     expect(
       keyPolicy.submissionKey(
-        'sub-a',
+        identityId,
         'draft-1',
         'att-1',
         `${'票'.repeat(83)}文件`,
       ),
-    ).toBe(`submissions/sub-a/draft-1/att-1/${'票'.repeat(83)}文件`);
+    ).toBe(`submissions/${identityId}/draft-1/att-1/${'票'.repeat(83)}文件`);
+  });
+
+  it.each([
+    'sub-a',
+    'ap-northeast-1',
+    'ap-northeast-1:not-a-uuid',
+    'AP-NORTHEAST-1:123e4567-e89b-12d3-a456-426614174000',
+    'ap-northeast-1:123E4567-E89B-12D3-A456-426614174000',
+    'ap-northeast-1/123e4567-e89b-12d3-a456-426614174000',
+    String.raw`ap-northeast-1\123e4567-e89b-12d3-a456-426614174000`,
+    '../ap-northeast-1:123e4567-e89b-12d3-a456-426614174000',
+    'ap-northeast-1:123e4567-e89b-12d3-a456-426614174000\u0000',
+  ])('rejects non-canonical Cognito identity ID %j', (identityId) => {
+    expect(() =>
+      keyPolicy.submissionKey(identityId, 'draft-1', 'att-1', 'x.jpg'),
+    ).toThrow('INVALID_STORAGE_ID:identityId');
   });
 
   it('builds the exact identity-scoped submission namespace and basenames filename input', () => {
