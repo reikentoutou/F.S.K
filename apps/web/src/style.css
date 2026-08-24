@@ -25,17 +25,6 @@
   /* Delight：易出易收的过渡曲线（業務 UI は短く） */
   --fs-ease-out: cubic-bezier(0.25, 1, 0.5, 1);
 
-  /*
-   * 视口高：100dvh が使える環境では動的ツールバーに追従（responsive-design / 移动 vh 問題の緩和）。
-   * 非対応ブラウザは 100vh のまま。
-   */
-  --fs-vh-100: 100vh;
-}
-
-@supports (height: 100dvh) {
-  :root {
-    --fs-vh-100: 100dvh;
-  }
 }
 
 *,
@@ -46,11 +35,25 @@
 
 html {
   color-scheme: light;
+  min-height: 100%;
+  height: -webkit-fill-available;
+}
+
+body,
+#app {
+  min-height: 100vh;
+  min-height: -webkit-fill-available;
+}
+
+@supports (height: 100dvh) {
+  body,
+  #app {
+    min-height: 100dvh;
+  }
 }
 
 body {
   margin: 0;
-  min-height: var(--fs-vh-100);
   font-family: var(--el-font-family);
   font-size: 15px;
   line-height: 1.55;
@@ -58,6 +61,7 @@ body {
   background: var(--fs-page);
   -webkit-font-smoothing: antialiased;
   /* safe-area：ノッチ・ホームインジケータ（viewport-fit=cover と併用） */
+  padding-top: env(safe-area-inset-top, 0px);
   padding-left: env(safe-area-inset-left, 0px);
   padding-right: env(safe-area-inset-right, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
