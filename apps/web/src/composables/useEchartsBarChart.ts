@@ -7,7 +7,7 @@ export type BarChartSeries = {
 };
 
 export function useEchartsBarChart(
-  chartEl: Ref<HTMLDivElement | null>,
+  chartEl: Readonly<Ref<HTMLDivElement | null>>,
 ) {
   const chart = shallowRef<echarts.ECharts | null>(null);
 
