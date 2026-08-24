@@ -143,18 +143,29 @@ export function computeDailyReportTotals(
   assertDailyReportRawAmounts(rawAmounts);
   assertYenAmount(effectiveRegisterFloatYen);
 
-  const imosSalesYen =
-    rawAmounts.currentImosBalanceYen - rawAmounts.previousImosBalanceYen;
-  const cashDepositYen = rawAmounts.cashTotalYen - effectiveRegisterFloatYen;
-  const totalSalesYen =
-    rawAmounts.newageYen + cashDepositYen - rawAmounts.staffMealCashYen;
+  const imosSales = imosSalesYen(
+    rawAmounts.previousImosBalanceYen,
+    rawAmounts.currentImosBalanceYen,
+  );
+  const cashDeposit = cashDepositYen(
+    rawAmounts.cashTotalYen,
+    effectiveRegisterFloatYen,
+  );
+  const totalSales = actualSalesYen(
+    rawAmounts.newageYen,
+    rawAmounts.cashTotalYen,
+    effectiveRegisterFloatYen,
+    rawAmounts.staffMealCashYen,
+  );
   const totals: DailyReportTotals = {
-    imosSalesYen,
-    cashDepositYen,
-    totalSalesYen,
-    deviationYen: totalSalesYen + rawAmounts.expenseYen - imosSalesYen,
-    staffMealTotalYen:
-      rawAmounts.staffMealCashYen + rawAmounts.staffMealAlipayYen,
+    imosSalesYen: imosSales,
+    cashDepositYen: cashDeposit,
+    totalSalesYen: totalSales,
+    deviationYen: deviationYen(totalSales, rawAmounts.expenseYen, imosSales),
+    staffMealTotalYen: staffMealTotalYen(
+      rawAmounts.staffMealCashYen,
+      rawAmounts.staffMealAlipayYen,
+    ),
   };
 
   if (isLegacyCall) {

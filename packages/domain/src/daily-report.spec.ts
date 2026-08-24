@@ -81,6 +81,7 @@ describe('daily report domain', () => {
   );
 
   it('accepts every raw amount and register float at the inclusive bounds', () => {
+    expect(() => computeDailyReportTotals(rawAmounts(), 0)).not.toThrow();
     expect(() =>
       assertDailyReportRawAmounts(
         rawAmounts({
