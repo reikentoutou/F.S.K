@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
   <title id="title">FSK financial app icon</title>
-  <rect width="512" height="512" rx="96" fill="#165f58" />
+  <rect width="512" height="512" fill="#165f58" />
   <rect x="22" y="22" width="468" height="468" rx="78" fill="none" stroke="#f7f4ec" stroke-width="12" />
   <path d="M72 104h112v38h-70v42h62v38h-62v74H72V104Z" fill="#fdfcf8" />
   <path d="M304 130c-21-24-78-27-92 8-16 40 24 53 57 59 45 8 48 66 14 89-29 20-71 11-91-13" fill="none" stroke="#fdfcf8" stroke-width="38" stroke-linecap="round" stroke-linejoin="round" />
