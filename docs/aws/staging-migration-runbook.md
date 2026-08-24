@@ -12,31 +12,31 @@
 - **worker** 只准备 exact source、构造进程内数据库 URL、执行 migration 两次和 verify、发布状态；worker 绝不删除自己的路由或 SG。
 - 三个临时 SSM `String` parameters 只传 operation state/status、持久化 cleanup failure latch 和非敏感资源 ID。worker 只能在临时 NAT 就绪后访问它们。它们不是长期 endpoint 的替代品，最终必须删除。
 
-Migration ApprovalId 必须给出：account `444083008754`、region `ap-northeast-1`、exact foundation commit/tag、TaskId、UUIDv4 OperationToken、operation deadline、稍晚的 cleanup deadline、临时 public CIDR/AZ、两个 application route table IDs、CostOwner 和 CleanupOwner。OperationToken 是非秘密所有权证据，不是授权凭据。
+Migration ApprovalId 必须分别给出：account `444083008754`、region `ap-northeast-1`、已部署 Foundation commit/tag、独立且不可变的 migration source commit/tag、TaskId、UUIDv4 OperationToken、operation deadline、稍晚的 cleanup deadline、临时 public CIDR/AZ、两个 application route table IDs、CostOwner 和 CleanupOwner。OperationToken 是非秘密所有权证据，不是授权凭据。
 
 ## 1. 远程源码和初始残留门
 
-control 和 worker 都只接受 immutable remote tag、remote `staging` 和批准 commit 三者精确相等。clone/fetch 后使用 detached HEAD；origin URL 不得含 credentials，工作树必须 clean。
+control 和 worker 都只接受独立的 immutable migration source tag、remote `staging` 和批准的 migration source commit 三者精确相等。clone/fetch 后使用 detached HEAD；origin URL 不得含 credentials，工作树必须 clean。已部署 Foundation 的 commit/tag 只用于核对现有 stack，不可作为 migration source 的隐式默认值；在 Amplify Auto build 关闭的前提下更新 migration source tag/`staging` 只发布源码，不触发 Foundation 重新部署。
 
 ```bash
 set -euo pipefail
 : "${FSK_GIT_REMOTE_URL:=https://github.com/reikentoutou/F.S.K.git}"
-: "${FSK_FOUNDATION_TAG:=fsk-staging-data-api-foundation-v1}"
-: "${FSK_FOUNDATION_COMMIT:?use the approved 40-character commit}"
-case "$FSK_FOUNDATION_COMMIT" in
-  *[!0-9a-f]*|'') echo 'FOUNDATION_COMMIT_INVALID_STOP' >&2; exit 1 ;;
+: "${FSK_MIGRATION_SOURCE_TAG:?use the separately approved immutable migration source tag}"
+: "${FSK_MIGRATION_SOURCE_COMMIT:?use the approved 40-character migration source commit}"
+case "$FSK_MIGRATION_SOURCE_COMMIT" in
+  *[!0-9a-f]*|'') echo 'MIGRATION_SOURCE_COMMIT_INVALID_STOP' >&2; exit 1 ;;
 esac
-test "${#FSK_FOUNDATION_COMMIT}" -eq 40
+test "${#FSK_MIGRATION_SOURCE_COMMIT}" -eq 40
 FSK_REMOTE_TAG_COMMIT="$(
   git ls-remote --tags "$FSK_GIT_REMOTE_URL" \
-    "refs/tags/${FSK_FOUNDATION_TAG}^{}" | awk 'NF { print $1 }'
+    "refs/tags/${FSK_MIGRATION_SOURCE_TAG}^{}" | awk 'NF { print $1 }'
 )"
 FSK_REMOTE_STAGING_COMMIT="$(
   git ls-remote --heads "$FSK_GIT_REMOTE_URL" refs/heads/staging |
     awk 'NF { print $1 }'
 )"
-test "$FSK_REMOTE_TAG_COMMIT" = "$FSK_FOUNDATION_COMMIT"
-test "$FSK_REMOTE_STAGING_COMMIT" = "$FSK_FOUNDATION_COMMIT"
+test "$FSK_REMOTE_TAG_COMMIT" = "$FSK_MIGRATION_SOURCE_COMMIT"
+test "$FSK_REMOTE_STAGING_COMMIT" = "$FSK_MIGRATION_SOURCE_COMMIT"
 ```
 
 任何同 ownership tuple 的残留都先进入恢复/清理，不得新建第二套资源。同 TaskId 但不同 OperationToken 的资源属于未知所有者，只报告并 `STOP`，不得删除。
@@ -823,10 +823,10 @@ fsk_worker_run() {
   trap 'exit 129' HUP
   trap 'exit 130' INT TERM
   test "$FSK_MIGRATION_SHELL_ROLE" = worker
-  test "$(git rev-parse HEAD)" = "$FSK_FOUNDATION_COMMIT"
+  test "$(git rev-parse HEAD)" = "$FSK_MIGRATION_SOURCE_COMMIT"
   test -z "$(git status --short)"
-  fsk_run_before_migration_deadline pnpm install --frozen-lockfile
   fsk_prepare_rds_ca_trust
+  fsk_run_before_migration_deadline pnpm install --frozen-lockfile
   fsk_worker_run_database_migration
 }
 ```

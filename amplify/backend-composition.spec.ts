@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -695,7 +696,6 @@ describe('staging deployment documentation contracts', () => {
   it.each([
     ['deployment approval', DEPLOYMENT_RUNBOOK, 'FSK_APPROVED_TAG'],
     ['deployment foundation', DEPLOYMENT_RUNBOOK, 'FSK_FOUNDATION_TAG'],
-    ['migration foundation', MIGRATION_RUNBOOK, 'FSK_FOUNDATION_TAG'],
   ])('defaults %s execution to the Data API recovery tag', (_name, runbook, variable) => {
     const assignment = extractBashDefaultAssignment(runbook, variable);
     const result = spawnSync(
@@ -717,6 +717,69 @@ printf '%s' "$${variable}"
 });
 
 describe('staging migration runbook executable contracts', () => {
+  it('requires a separately approved immutable migration source', () => {
+    const [sourceGate] = extractBashBlocks(MIGRATION_RUNBOOK);
+    const approvedCommit = '705c6d78b8070201d161a23fefd95f96f5644876';
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+git() {
+  test "$1" = ls-remote
+  printf '%s\trefs/fixed\n' "$FSK_MIGRATION_SOURCE_COMMIT"
+}
+unset FSK_FOUNDATION_COMMIT FSK_FOUNDATION_TAG
+${sourceGate}
+printf '%s/%s' "$FSK_MIGRATION_SOURCE_COMMIT" "$FSK_MIGRATION_SOURCE_TAG"
+`,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FSK_GIT_REMOTE_URL: 'https://github.com/reikentoutou/F.S.K.git',
+          FSK_MIGRATION_SOURCE_COMMIT: approvedCommit,
+          FSK_MIGRATION_SOURCE_TAG: 'fsk-staging-data-api-migration-v2',
+        },
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(
+      `${approvedCommit}/fsk-staging-data-api-migration-v2`,
+    );
+  });
+
+  it('fails closed when the migration source tag is not explicitly bound', () => {
+    const [sourceGate] = extractBashBlocks(MIGRATION_RUNBOOK);
+    const approvedCommit = '705c6d78b8070201d161a23fefd95f96f5644876';
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+git() {
+  test "$1" = ls-remote
+  printf '%s\trefs/fixed\n' "$FSK_MIGRATION_SOURCE_COMMIT"
+}
+unset FSK_MIGRATION_SOURCE_TAG
+${sourceGate}
+`,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FSK_FOUNDATION_COMMIT: approvedCommit,
+          FSK_MIGRATION_SOURCE_COMMIT: approvedCommit,
+        },
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+  });
+
   it('prepares the pinned RDS CA before the worker starts PostgreSQL migration', () => {
     const certificatePath = join(
       process.cwd(),
@@ -741,6 +804,7 @@ git() {
 }
 pnpm() {
   test "$*" = 'install --frozen-lockfile'
+  test "$NODE_EXTRA_CA_CERTS" = "$FSK_EXPECTED_CA_PATH"
 }
 fsk_run_before_migration_deadline() { "$@"; }
 fsk_worker_run_database_migration() {
@@ -761,7 +825,8 @@ fsk_worker_exit() { exit "$1"; }
 ${prepareTrust}
 ${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_run')}
 FSK_MIGRATION_SHELL_ROLE=worker
-FSK_FOUNDATION_COMMIT=dcff57ebc9bc6d77fbb51072b996834f5a5ca715
+FSK_FOUNDATION_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
+FSK_MIGRATION_SOURCE_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
 FSK_RDS_CA_IDENTIFIER=rds-ca-rsa2048-g1
 FSK_RDS_CA_BUNDLE_PATH="$FSK_EXPECTED_CA_PATH"
 fsk_worker_run
@@ -781,6 +846,84 @@ fsk_worker_run
       subject:
         'C=US\nO=Amazon Web Services\\, Inc.\nOU=Amazon RDS\nST=WA\nCN=Amazon RDS ap-northeast-1 Root CA RSA2048 G1\nL=Seattle',
     });
+  });
+
+  it('rejects an invalid RDS CA guard before pnpm or migration starts', () => {
+    const certificatePath = join(
+      process.cwd(),
+      'amplify/database/certificates/rds-ca-rsa2048-g1-ap-northeast-1.pem',
+    );
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'fsk-rds-ca-'));
+    const modifiedCertificatePath = join(temporaryDirectory, 'modified.pem');
+    const symlinkCertificatePath = join(temporaryDirectory, 'symlink.pem');
+    writeFileSync(
+      modifiedCertificatePath,
+      `${readFileSync(certificatePath, 'utf8')}\n`,
+    );
+    symlinkSync(certificatePath, symlinkCertificatePath);
+
+    try {
+      const invalidCases = [
+        {
+          identifier: 'rds-ca-rsa4096-g1',
+          path: certificatePath,
+        },
+        {
+          identifier: 'rds-ca-rsa2048-g1',
+          path: modifiedCertificatePath,
+        },
+        {
+          identifier: 'rds-ca-rsa2048-g1',
+          path: symlinkCertificatePath,
+        },
+      ];
+
+      for (const invalidCase of invalidCases) {
+        const script = `set -euo pipefail
+git() {
+  case "$*" in
+    'rev-parse HEAD') printf '%s\\n' "$FSK_MIGRATION_SOURCE_COMMIT" ;;
+    'status --short') : ;;
+    *) return 91 ;;
+  esac
+}
+pnpm() {
+  printf 'PNPM_CALLED'
+  return 99
+}
+fsk_run_before_migration_deadline() { "$@"; }
+fsk_worker_run_database_migration() {
+  printf 'MIGRATION_CALLED'
+  return 98
+}
+fsk_worker_exit() { exit "$1"; }
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_prepare_rds_ca_trust')}
+${extractBashFunction(MIGRATION_RUNBOOK, 'fsk_worker_run')}
+FSK_MIGRATION_SHELL_ROLE=worker
+FSK_FOUNDATION_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
+FSK_MIGRATION_SOURCE_COMMIT=705c6d78b8070201d161a23fefd95f96f5644876
+FSK_RDS_CA_IDENTIFIER="$FSK_TEST_CA_IDENTIFIER"
+FSK_RDS_CA_BUNDLE_PATH="$FSK_TEST_CA_PATH"
+fsk_worker_run
+`;
+        const result = spawnSync('bash', ['-c', script], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            FSK_TEST_CA_IDENTIFIER: invalidCase.identifier,
+            FSK_TEST_CA_PATH: invalidCase.path,
+          },
+        });
+
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).not.toContain('PNPM_CALLED');
+        expect(`${result.stdout}${result.stderr}`).not.toContain(
+          'MIGRATION_CALLED',
+        );
+      }
+    } finally {
+      rmSync(temporaryDirectory, { force: true, recursive: true });
+    }
   });
 
   it('builds a verify-full database URL without exposing the secret', () => {
