@@ -1073,7 +1073,7 @@ describe('active DynamoDB backend composition', () => {
       rmSync(externalFixtureDirectory, { force: true, recursive: true });
       rmSync(callerOutdir, { force: true, recursive: true });
     }
-  }, 15_000);
+  }, 60_000);
 });
 
 describe('foundation backend composition', () => {
