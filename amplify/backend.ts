@@ -1,5 +1,10 @@
 import { defineBackend } from '@aws-amplify/backend';
 import { CfnParameter, Tags } from 'aws-cdk-lib';
+import {
+  AwsCustomResource,
+  AwsCustomResourcePolicy,
+  PhysicalResourceId,
+} from 'aws-cdk-lib/custom-resources';
 import { Policy, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 
 import { applyProductionAuthOverrides } from './auth/overrides.js';
@@ -74,6 +79,41 @@ for (const construct of backend.data.stack.node.findAll()) {
   if (construct.node.id === 'DynamoDBEnablePointInTimeRecovery') {
     construct.default = 'true';
   }
+}
+
+// Amplify's table manager accepts the PITR flag but does not apply it to the live tables.
+for (const [modelName, table] of Object.entries(
+  backend.data.resources.tables,
+)) {
+  const enablePointInTimeRecovery = {
+    action: 'updateContinuousBackups',
+    outputPaths: [],
+    parameters: {
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      TableName: table.tableName,
+    },
+    service: 'DynamoDB',
+  };
+  const pitrEnforcer = new AwsCustomResource(
+    backend.data.stack,
+    `Enable${modelName}PointInTimeRecovery`,
+    {
+      installLatestAwsSdk: false,
+      onCreate: {
+        ...enablePointInTimeRecovery,
+        physicalResourceId: PhysicalResourceId.of(
+          `${modelName}-point-in-time-recovery`,
+        ),
+      },
+      onUpdate: enablePointInTimeRecovery,
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [table.tableArn],
+      }),
+    },
+  );
+  pitrEnforcer.node.addDependency(table);
 }
 
 for (const stack of [

@@ -579,6 +579,25 @@ describe('active DynamoDB backend composition', () => {
         left.path.localeCompare(right.path) ||
         left.name.localeCompare(right.name),
       );
+    const pitrEnforcers = resources
+      .filter(({ resource }) => resource.Type === 'Custom::AWS')
+      .map(({ logicalId, resource }) => ({
+        create: resource.Properties?.Create,
+        delete: resource.Properties?.Delete,
+        logicalId,
+        update: resource.Properties?.Update,
+      }))
+      .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+    const pitrStatements = resources
+      .filter(({ resource }) => resource.Type === 'AWS::IAM::Policy')
+      .flatMap(({ resource }) =>
+        resource.Properties?.PolicyDocument?.Statement ?? [],
+      )
+      .filter(({ Action }) =>
+        (Array.isArray(Action) ? Action : [Action]).includes(
+          'dynamodb:UpdateContinuousBackups',
+        ),
+      );
     const buckets = resources
       .filter(({ resource }) => resource.Type === 'AWS::S3::Bucket')
       .map(({ logicalId, resource }) => ({
@@ -684,6 +703,8 @@ describe('active DynamoDB backend composition', () => {
       businessLambdas,
       dynamoParameterDefaults,
       dynamoTables,
+      pitrEnforcers,
+      pitrStatements,
       kitchenContextResolvers,
       kitchenGroup,
       kitchenStoragePolicies,
@@ -855,6 +876,11 @@ describe('active DynamoDB backend composition', () => {
             runtime: 'nodejs24.x',
           },
           {
+            logicalId: 'AWS679f53fac002430cb0da5b7982bd2287',
+            handler: 'index.handler',
+            runtime: 'nodejs24.x',
+          },
+          {
             logicalId:
               'CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C1536MiB',
             handler: 'index.handler',
@@ -952,6 +978,63 @@ describe('active DynamoDB backend composition', () => {
         runtime: 'nodejs22.x',
       });
       expect(evidence.dynamoTables).toHaveLength(4);
+      expect(evidence.pitrEnforcers).toHaveLength(4);
+      expect(evidence.pitrStatements).toHaveLength(4);
+      for (const statement of evidence.pitrStatements) {
+        expect(statement).toMatchObject({
+          Action: 'dynamodb:UpdateContinuousBackups',
+          Effect: 'Allow',
+          Resource: {
+            'Fn::GetAtt': [
+              expect.stringMatching(/^amplifyData.*NestedStackResource[A-F0-9]+$/),
+              expect.stringMatching(/^Outputs\..*TableArn$/),
+            ],
+          },
+        });
+      }
+      expect(
+        evidence.pitrStatements.map(
+          ({ Resource }: { Resource: { 'Fn::GetAtt': [string, string] } }) =>
+            Resource['Fn::GetAtt'][1],
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/AppSettingTable.*TableArn$/),
+          expect.stringMatching(/DailyReportTable.*TableArn$/),
+          expect.stringMatching(/ResponsiblePersonTable.*TableArn$/),
+          expect.stringMatching(/ShiftDefinitionTable.*TableArn$/),
+        ]),
+      );
+      const pitrCallPrefix =
+        '{"action":"updateContinuousBackups","outputPaths":[],"parameters":{"PointInTimeRecoverySpecification":{"PointInTimeRecoveryEnabled":true},"TableName":"';
+      const pitrTableReferences: string[] = [];
+      for (const enforcer of evidence.pitrEnforcers) {
+        const create = enforcer.create as {
+          'Fn::Join': [string, [string, unknown, string]];
+        };
+        const update = enforcer.update as {
+          'Fn::Join': [string, [string, unknown, string]];
+        };
+        expect(enforcer.delete).toBeUndefined();
+        expect(create['Fn::Join'][0]).toBe('');
+        expect(update['Fn::Join'][0]).toBe('');
+        expect(create['Fn::Join'][1][0]).toBe(pitrCallPrefix);
+        expect(update['Fn::Join'][1][0]).toBe(pitrCallPrefix);
+        expect(create['Fn::Join'][1][1]).toEqual(update['Fn::Join'][1][1]);
+        expect(create['Fn::Join'][1][2]).toMatch(
+          /^"},"service":"DynamoDB","physicalResourceId":\{"id":"(?:AppSetting|DailyReport|ResponsiblePerson|ShiftDefinition)-point-in-time-recovery"}}$/,
+        );
+        expect(update['Fn::Join'][1][2]).toBe('"},"service":"DynamoDB"}');
+        pitrTableReferences.push(JSON.stringify(create['Fn::Join'][1][1]));
+      }
+      expect(pitrTableReferences).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/AppSettingTable.*TableArn/),
+          expect.stringMatching(/DailyReportTable.*TableArn/),
+          expect.stringMatching(/ResponsiblePersonTable.*TableArn/),
+          expect.stringMatching(/ShiftDefinitionTable.*TableArn/),
+        ]),
+      );
       expect(
         evidence.dynamoTables.map(
           ({ logicalId }: { logicalId: string }) => logicalId,
