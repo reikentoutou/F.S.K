@@ -17,6 +17,7 @@ export interface KitchenContextResult {
   registerFloatAmount: number;
   shifts: Array<{ id: string; name: string; sortOrder: number }>;
   responsiblePersons: Array<{ id: string; name: string }>;
+  submittedShiftIds: string[];
 }
 
 interface ReadCommand {
@@ -33,9 +34,11 @@ interface ReadResponse {
 export interface KitchenContextInput {
   readonly tableNames: {
     readonly appSetting: string;
+    readonly dailyReport: string;
     readonly shiftDefinition: string;
     readonly responsiblePerson: string;
   };
+  readonly businessDate: string;
   send(command: ReadCommand): Promise<unknown>;
 }
 
@@ -81,6 +84,7 @@ const scanAll = async (
 
 export async function loadKitchenContext({
   tableNames,
+  businessDate,
   send,
 }: KitchenContextInput): Promise<KitchenContextResult> {
   const settingResponse = (await send({
@@ -112,22 +116,37 @@ export async function loadKitchenContext({
     }),
   ]);
 
+  const shifts = shiftItems
+    .filter(isActive)
+    .map((item) => ({
+      id: requiredString(item, 'id'),
+      name: requiredString(item, 'name'),
+      sortOrder: requiredInteger(item, 'sortOrder'),
+    }))
+    .sort(
+      (left, right) =>
+        left.sortOrder - right.sortOrder || compareText(left.id, right.id),
+    );
+  const submitted = await Promise.all(
+    shifts.map(async (shift) => {
+      const response = (await send({
+        operation: 'GetItem',
+        input: {
+          Key: { reportKey: { S: `${businessDate}#${shift.id}` } },
+          ProjectionExpression: 'reportKey',
+          TableName: tableNames.dailyReport,
+        },
+      })) as ReadResponse;
+      return response.Item ? shift.id : null;
+    }),
+  );
+
   return {
     registerFloatAmount: requiredInteger(
       settingResponse.Item,
       'registerFloatAmount',
     ),
-    shifts: shiftItems
-      .filter(isActive)
-      .map((item) => ({
-        id: requiredString(item, 'id'),
-        name: requiredString(item, 'name'),
-        sortOrder: requiredInteger(item, 'sortOrder'),
-      }))
-      .sort(
-        (left, right) =>
-          left.sortOrder - right.sortOrder || compareText(left.id, right.id),
-      ),
+    shifts,
     responsiblePersons: responsiblePersonItems
       .filter(isActive)
       .map((item) => ({
@@ -138,6 +157,9 @@ export async function loadKitchenContext({
         (left, right) =>
           compareText(left.name, right.name) || compareText(left.id, right.id),
       ),
+    submittedShiftIds: submitted.filter(
+      (shiftId): shiftId is string => shiftId !== null,
+    ),
   };
 }
 
@@ -158,7 +180,9 @@ interface DynamoDbSdk {
   ScanCommand: new (input: Record<string, unknown>) => unknown;
 }
 
-export const handler = async (): Promise<KitchenContextResult> => {
+export const handler = async (event: {
+  arguments: { businessDate: string };
+}): Promise<KitchenContextResult> => {
   // Lambda Node.js runtimes provide AWS SDK v3. Keeping the module name dynamic
   // prevents bundling a second SDK copy into this small read-only function.
   const sdkModuleName = '@aws-sdk/client-dynamodb';
@@ -167,9 +191,11 @@ export const handler = async (): Promise<KitchenContextResult> => {
   return loadKitchenContext({
     tableNames: {
       appSetting: requiredEnvironment('APP_SETTING_TABLE_NAME'),
+      dailyReport: requiredEnvironment('DAILY_REPORT_TABLE_NAME'),
       shiftDefinition: requiredEnvironment('SHIFT_DEFINITION_TABLE_NAME'),
       responsiblePerson: requiredEnvironment('RESPONSIBLE_PERSON_TABLE_NAME'),
     },
+    businessDate: event.arguments.businessDate,
     send({ operation, input }) {
       const Command =
         operation === 'GetItem'

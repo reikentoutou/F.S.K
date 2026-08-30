@@ -6,13 +6,14 @@ import { DataRepositoryError } from '@/data/errors';
 
 import {
   createKitchenBusinessDateTracker,
+  kitchenShiftNavigation,
   loadKitchenHomeContext,
 } from './KitchenHomeView.vue';
 import {
   createKitchenReport,
   kitchenHomePath,
   kitchenReportMode,
-  isCurrentKitchenBusinessDate,
+  isKitchenBusinessDateAllowed,
   kitchenBusinessDateSubmissionError,
   handleKitchenHeaderBack,
   isKitchenHeaderBackDisabled,
@@ -27,13 +28,14 @@ describe('kitchen create-only views', () => {
       registerFloatAmount: 5_000,
       shifts: [{ id: 'day', name: '日班', sortOrder: 10 }],
       responsiblePersons: [{ id: 'p1', name: '张三' }],
+      submittedShiftIds: [],
     };
     const getContext = vi.fn().mockResolvedValue(context);
 
-    await expect(loadKitchenHomeContext({ getContext })).resolves.toEqual(
-      context,
-    );
-    expect(getContext).toHaveBeenCalledOnce();
+    await expect(
+      loadKitchenHomeContext('2026-08-23', { getContext }),
+    ).resolves.toEqual(context);
+    expect(getContext).toHaveBeenCalledWith('2026-08-23');
   });
 
   it('rejects a missing context and removes nullable generated list entries', async () => {
@@ -41,6 +43,7 @@ describe('kitchen create-only views', () => {
       registerFloatAmount: 5_000,
       shifts: [null, { id: 'day', name: '日班', sortOrder: 10 }],
       responsiblePersons: [undefined, { id: 'p1', name: '张三' }],
+      submittedShiftIds: [null, 'night'],
     };
 
     await expect(
@@ -49,15 +52,17 @@ describe('kitchen create-only views', () => {
           getContext: vi.fn().mockResolvedValue(context),
         },
         '2026-08-24',
+        'day',
         '2026-08-24',
       ),
     ).resolves.toEqual({
       registerFloatAmount: 5_000,
       shifts: [{ id: 'day', name: '日班', sortOrder: 10 }],
       responsiblePersons: [{ id: 'p1', name: '张三' }],
+      submittedShiftIds: ['night'],
     });
     await expect(
-      loadKitchenHomeContext({
+      loadKitchenHomeContext('2026-08-24', {
         getContext: vi.fn().mockResolvedValue(undefined),
       }),
     ).rejects.toThrow('KITCHEN_CONTEXT_UNAVAILABLE');
@@ -89,6 +94,7 @@ describe('kitchen create-only views', () => {
     let shownDate = today;
     const tracker = createKitchenBusinessDateTracker({
       today: () => today,
+      getBusinessDate: () => shownDate,
       setBusinessDate: (value) => {
         shownDate = value;
       },
@@ -107,41 +113,105 @@ describe('kitchen create-only views', () => {
     windowSource.dispatch('pageshow');
     expect(shownDate).toBe('2026-08-26');
 
-    tracker.dispose();
+    shownDate = '2026-08-23';
     today = '2026-08-27';
+    windowSource.dispatch('pageshow');
+    expect(shownDate).toBe('2026-08-23');
+
+    tracker.dispose();
+    shownDate = '2026-08-27';
+    today = '2026-08-28';
     documentSource.dispatch('visibilitychange');
     windowSource.dispatch('pageshow');
-    expect(shownDate).toBe('2026-08-26');
+    expect(shownDate).toBe('2026-08-27');
     expect(documentSource.listeners.get('visibilitychange')?.size).toBe(0);
     expect(windowSource.listeners.get('pageshow')?.size).toBe(0);
   });
 
-  it('rejects a hand-edited historical or future kitchen date before loading context', async () => {
-    const getContext = vi.fn();
+  it('allows historical business dates and rejects future or invalid route dates', async () => {
+    const context = {
+      registerFloatAmount: 5_000,
+      shifts: [{ id: 'night', name: '夜班', sortOrder: 20 }],
+      responsiblePersons: [{ id: 'p1', name: '张三' }],
+      submittedShiftIds: [],
+    };
+    const getContext = vi.fn().mockResolvedValue(context);
 
     expect(
-      isCurrentKitchenBusinessDate('2026-08-24', '2026-08-24'),
+      isKitchenBusinessDateAllowed('2026-08-24', '2026-08-24'),
     ).toBe(true);
     expect(
-      isCurrentKitchenBusinessDate('2026-08-23', '2026-08-24'),
-    ).toBe(false);
+      isKitchenBusinessDateAllowed('2026-08-23', '2026-08-24'),
+    ).toBe(true);
     expect(
-      isCurrentKitchenBusinessDate('2026-08-25', '2026-08-24'),
+      isKitchenBusinessDateAllowed('2026-08-25', '2026-08-24'),
     ).toBe(false);
+    expect(isKitchenBusinessDateAllowed('2026-02-30', '2026-08-24')).toBe(
+      false,
+    );
     expect(
       kitchenBusinessDateSubmissionError('2026-08-24', '2026-08-24'),
     ).toBeNull();
     expect(
       kitchenBusinessDateSubmissionError('2026-08-23', '2026-08-24'),
-    ).toBe('营业日已更新，请返回厨房首页重新选择班次');
+    ).toBeNull();
     await expect(
       loadKitchenReportContext(
         { getContext },
         '2026-08-23',
+        'night',
         '2026-08-24',
       ),
-    ).rejects.toThrow('KITCHEN_BUSINESS_DATE_NOT_CURRENT');
-    expect(getContext).not.toHaveBeenCalled();
+    ).resolves.toEqual(context);
+    expect(getContext).toHaveBeenCalledWith('2026-08-23');
+
+    await expect(
+      loadKitchenReportContext(
+        { getContext },
+        '2026-08-25',
+        'night',
+        '2026-08-24',
+      ),
+    ).rejects.toThrow('KITCHEN_BUSINESS_DATE_NOT_ALLOWED');
+    expect(getContext).toHaveBeenCalledOnce();
+  });
+
+  it('blocks an already submitted shift without exposing the report', async () => {
+    const getContext = vi.fn().mockResolvedValue({
+      registerFloatAmount: 5_000,
+      shifts: [{ id: 'night', name: '夜班', sortOrder: 20 }],
+      responsiblePersons: [{ id: 'p1', name: '张三' }],
+      submittedShiftIds: ['night'],
+    });
+
+    await expect(
+      loadKitchenReportContext(
+        { getContext },
+        '2026-08-23',
+        'night',
+        '2026-08-24',
+      ),
+    ).rejects.toThrow('KITCHEN_REPORT_ALREADY_SUBMITTED');
+  });
+
+  it('does not create a navigation target for an already submitted shift', () => {
+    const context = {
+      registerFloatAmount: 5_000,
+      shifts: [
+        { id: 'day', name: '日班', sortOrder: 10 },
+        { id: 'night', name: '夜班', sortOrder: 20 },
+      ],
+      responsiblePersons: [{ id: 'p1', name: '张三' }],
+      submittedShiftIds: ['night'],
+    };
+
+    expect(
+      kitchenShiftNavigation(context, '2026-08-23', 'night'),
+    ).toBeNull();
+    expect(kitchenShiftNavigation(context, '2026-08-23', 'day')).toEqual({
+      name: 'kitchen-report',
+      params: { date: '2026-08-23', shiftId: 'day' },
+    });
   });
 
   it('submits a report only through the create capability', async () => {

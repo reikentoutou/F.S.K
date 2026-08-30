@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 
 interface MasterDataModule {
   createKitchenContextRepository(client: unknown): {
-    getContext(): Promise<unknown>;
+    getContext(businessDate: string): Promise<unknown>;
   };
   createOwnerMasterDataRepository(client: unknown): Record<
     string,
@@ -61,6 +61,7 @@ describe('master data repositories', () => {
       registerFloatAmount: 5_000,
       shifts: [{ id: 'day', name: '日班', sortOrder: 10 }],
       responsiblePersons: [{ id: 'p1', name: '张三' }],
+      submittedShiftIds: ['night'],
     };
     const getKitchenContext = vi.fn().mockResolvedValue({ data: context, errors: [] });
     const forbiddenModelAccess = new Proxy(
@@ -76,9 +77,10 @@ describe('master data repositories', () => {
       models: forbiddenModelAccess,
     });
 
-    await expect(repository.getContext()).resolves.toEqual(context);
-    expect(getKitchenContext).toHaveBeenCalledOnce();
-    expect(getKitchenContext).toHaveBeenCalledWith();
+    await expect(repository.getContext('2026-08-23')).resolves.toEqual(context);
+    expect(getKitchenContext).toHaveBeenCalledWith({
+      businessDate: '2026-08-23',
+    });
     expect(Object.keys(repository)).toEqual(['getContext']);
   });
 
@@ -93,7 +95,9 @@ describe('master data repositories', () => {
       },
     });
 
-    const error = caughtError(await repository.getContext().catch((caught) => caught));
+    const error = caughtError(
+      await repository.getContext('2026-08-23').catch((caught) => caught),
+    );
 
     expect(error.code).toBe('DATA_OPERATION_FAILED');
     expect(error.cause).toBe(errors);

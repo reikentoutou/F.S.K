@@ -6,7 +6,13 @@ import { dailyReportsRepository } from '@/data/daily-reports';
 import { DataRepositoryError } from '@/data/errors';
 import { todayTokyo } from '@/utils/tokyo';
 import type { KitchenContext } from './KitchenHomeView.vue';
+import {
+  isKitchenBusinessDateAllowed,
+  KITCHEN_BUSINESS_DATE_NOT_ALLOWED_MESSAGE,
+} from './kitchen-business-date';
 import type { SubmissionStatus } from './submission-state';
+
+export { isKitchenBusinessDateAllowed } from './kitchen-business-date';
 
 export type KitchenReportMode = 'create' | null;
 
@@ -15,9 +21,6 @@ export function kitchenReportMode(routeName: unknown): KitchenReportMode {
 }
 
 export const kitchenHomePath = '/kitchen';
-export const KITCHEN_BUSINESS_DATE_CHANGED_MESSAGE =
-  '营业日已更新，请返回厨房首页重新选择班次';
-
 export function isKitchenHeaderBackDisabled(
   status: SubmissionStatus,
 ): boolean {
@@ -36,20 +39,13 @@ export async function handleKitchenHeaderBack(
   await actions.goHome();
 }
 
-export function isCurrentKitchenBusinessDate(
-  businessDate: string,
-  currentBusinessDate = todayTokyo(),
-): boolean {
-  return businessDate === currentBusinessDate;
-}
-
 export function kitchenBusinessDateSubmissionError(
   businessDate: string,
   currentBusinessDate = todayTokyo(),
 ): string | null {
-  return isCurrentKitchenBusinessDate(businessDate, currentBusinessDate)
+  return isKitchenBusinessDateAllowed(businessDate, currentBusinessDate)
     ? null
-    : KITCHEN_BUSINESS_DATE_CHANGED_MESSAGE;
+    : KITCHEN_BUSINESS_DATE_NOT_ALLOWED_MESSAGE;
 }
 
 export function loadKitchenReportContext(
@@ -58,14 +54,15 @@ export function loadKitchenReportContext(
     'getContext'
   >,
   businessDate: string,
+  shiftId: string,
   currentBusinessDate = todayTokyo(),
 ): Promise<KitchenContext> {
-  if (!isCurrentKitchenBusinessDate(businessDate, currentBusinessDate)) {
-    return Promise.reject(new Error('KITCHEN_BUSINESS_DATE_NOT_CURRENT'));
+  if (!isKitchenBusinessDateAllowed(businessDate, currentBusinessDate)) {
+    return Promise.reject(new Error('KITCHEN_BUSINESS_DATE_NOT_ALLOWED'));
   }
-  return repository.getContext().then((value) => {
+  return repository.getContext(businessDate).then((value) => {
     if (!value) throw new Error('KITCHEN_CONTEXT_UNAVAILABLE');
-    return {
+    const context = {
       registerFloatAmount: value.registerFloatAmount,
       shifts: value.shifts.filter(
         (shift): shift is NonNullable<typeof shift> => shift != null,
@@ -73,7 +70,15 @@ export function loadKitchenReportContext(
       responsiblePersons: value.responsiblePersons.filter(
         (person): person is NonNullable<typeof person> => person != null,
       ),
+      submittedShiftIds: value.submittedShiftIds.filter(
+        (submittedShiftId): submittedShiftId is NonNullable<typeof submittedShiftId> =>
+          submittedShiftId != null,
+      ),
     };
+    if (context.submittedShiftIds.includes(shiftId)) {
+      throw new Error('KITCHEN_REPORT_ALREADY_SUBMITTED');
+    }
+    return context;
   });
 }
 
@@ -238,6 +243,7 @@ watch(
       const loaded = await loadKitchenReportContext(
         kitchenContextRepository,
         businessDate.value,
+        shiftId.value,
       );
       context.value = loaded;
       setDefaultResponsiblePerson(loaded.responsiblePersons[0]?.id);
@@ -276,8 +282,8 @@ function selectReceipt(event: Event): void {
 }
 
 function buildCommand(): CreateDailyReportCommand {
-  if (!isCurrentKitchenBusinessDate(businessDate.value)) {
-    throw new Error('KITCHEN_BUSINESS_DATE_NOT_CURRENT');
+  if (!isKitchenBusinessDateAllowed(businessDate.value)) {
+    throw new Error('KITCHEN_BUSINESS_DATE_NOT_ALLOWED');
   }
   const selectedShift = shift.value;
   const selectedPerson = persons.value.find(

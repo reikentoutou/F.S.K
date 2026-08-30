@@ -9,6 +9,7 @@ export interface KitchenContext {
   registerFloatAmount: number;
   shifts: Array<{ id: string; name: string; sortOrder: number }>;
   responsiblePersons: Array<{ id: string; name: string }>;
+  submittedShiftIds: string[];
 }
 
 interface KitchenDateEventSource {
@@ -22,11 +23,19 @@ interface KitchenVisibilitySource extends KitchenDateEventSource {
 
 export function createKitchenBusinessDateTracker(options: {
   today(): string;
+  getBusinessDate(): string;
   setBusinessDate(value: string): void;
   documentSource: KitchenVisibilitySource;
   windowSource: KitchenDateEventSource;
 }): { dispose(): void } {
-  const refresh = () => options.setBusinessDate(options.today());
+  let observedToday = options.today();
+  const refresh = () => {
+    const nextToday = options.today();
+    if (options.getBusinessDate() === observedToday) {
+      options.setBusinessDate(nextToday);
+    }
+    observedToday = nextToday;
+  };
   const refreshWhenVisible = () => {
     if (options.documentSource.visibilityState === 'visible') refresh();
   };
@@ -58,23 +67,43 @@ function normalizeKitchenContext(value: RawKitchenContext): KitchenContext {
     responsiblePersons: value.responsiblePersons.filter(
       (person): person is NonNullable<typeof person> => person != null,
     ),
+    submittedShiftIds: value.submittedShiftIds.filter(
+      (shiftId): shiftId is NonNullable<typeof shiftId> => shiftId != null,
+    ),
   };
 }
 
 export function loadKitchenHomeContext(
+  businessDate: string,
   repository: Pick<typeof kitchenContextRepository, 'getContext'> =
     kitchenContextRepository,
 ): Promise<KitchenContext> {
-  return repository.getContext().then(normalizeKitchenContext);
+  return repository.getContext(businessDate).then(normalizeKitchenContext);
+}
+
+export function kitchenShiftNavigation(
+  context: KitchenContext,
+  businessDate: string,
+  shiftId: string,
+): {
+  name: 'kitchen-report';
+  params: { date: string; shiftId: string };
+} | null {
+  if (context.submittedShiftIds.includes(shiftId)) return null;
+  return {
+    name: 'kitchen-report',
+    params: { date: businessDate, shiftId },
+  };
 }
 </script>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, shallowRef } from 'vue';
+import { onMounted, onUnmounted, shallowRef, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { useAuthStore } from '@/stores/auth';
 import { todayTokyo } from '@/utils/tokyo';
+import { isKitchenDatePickerDisabled } from './kitchen-business-date';
 
 const auth = useAuthStore();
 const router = useRouter();
@@ -87,6 +116,7 @@ let dateTracker: { dispose(): void } | undefined;
 onMounted(() => {
   dateTracker = createKitchenBusinessDateTracker({
     today: todayTokyo,
+    getBusinessDate: () => businessDate.value,
     setBusinessDate: (value) => {
       businessDate.value = value;
     },
@@ -99,15 +129,41 @@ onUnmounted(() => {
   dateTracker?.dispose();
 });
 
-onMounted(async () => {
-  try {
-    context.value = await loadKitchenHomeContext();
-  } catch {
-    loadError.value = true;
-  } finally {
-    loading.value = false;
-  }
-});
+watch(
+  businessDate,
+  async (date, _previousDate, onCleanup) => {
+    let active = true;
+    onCleanup(() => {
+      active = false;
+    });
+    loading.value = true;
+    loadError.value = false;
+    context.value = null;
+    try {
+      const loaded = await loadKitchenHomeContext(date);
+      if (active) context.value = loaded;
+    } catch {
+      if (active) loadError.value = true;
+    } finally {
+      if (active) loading.value = false;
+    }
+  },
+  { immediate: true },
+);
+
+function isSubmitted(shiftId: string): boolean {
+  return context.value?.submittedShiftIds.includes(shiftId) ?? false;
+}
+
+async function goToShift(shiftId: string): Promise<void> {
+  if (!context.value) return;
+  const target = kitchenShiftNavigation(
+    context.value,
+    businessDate.value,
+    shiftId,
+  );
+  if (target) await router.push(target);
+}
 
 async function logout(): Promise<void> {
   await auth.logout();
@@ -132,8 +188,16 @@ async function logout(): Promise<void> {
 
     <main class="main" v-loading="loading">
       <section class="panel" aria-labelledby="entry-heading">
-        <p class="date-label">業務日</p>
-        <h2 id="entry-heading" class="date">{{ businessDate }}</h2>
+        <div class="date-field">
+          <label id="entry-heading" class="date-label">業務日</label>
+          <el-date-picker
+            v-model="businessDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            :disabled-date="isKitchenDatePickerDisabled"
+            aria-labelledby="entry-heading"
+          />
+        </div>
 
         <p v-if="loadError" class="error" role="alert">
           入力情報を読み込めませんでした。通信を確認して再読み込みしてください。
@@ -141,18 +205,18 @@ async function logout(): Promise<void> {
         <template v-else-if="context">
           <p class="guide">入力するシフトを選択してください。</p>
           <div class="shift-list">
-            <RouterLink
+            <button
               v-for="shift in context.shifts"
               :key="shift.id"
-              :to="{
-                name: 'kitchen-report',
-                params: { date: businessDate, shiftId: shift.id },
-              }"
+              type="button"
               class="shift-link"
+              :class="{ 'is-submitted': isSubmitted(shift.id) }"
+              :disabled="isSubmitted(shift.id)"
+              @click="goToShift(shift.id)"
             >
               <span>{{ shift.name }}</span>
-              <span aria-hidden="true">→</span>
-            </RouterLink>
+              <span>{{ isSubmitted(shift.id) ? '提出済' : '入力する →' }}</span>
+            </button>
           </div>
           <p v-if="context.shifts.length === 0" class="empty">
             現在入力できるシフトがありません。老板へ連絡してください。
@@ -194,8 +258,7 @@ async function logout(): Promise<void> {
   color: var(--fs-muted);
 }
 
-.title,
-.date {
+.title {
   margin: 0;
   color: var(--fs-ink);
 }
@@ -204,9 +267,11 @@ async function logout(): Promise<void> {
   font-size: 1.25rem;
 }
 
-.date {
-  font-size: 1.5rem;
-  font-variant-numeric: tabular-nums;
+.date-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
 }
 
 .right {
@@ -259,9 +324,19 @@ async function logout(): Promise<void> {
   border: 1px solid var(--fs-border-strong, var(--fs-border));
   border-radius: var(--fs-radius-sm);
   color: var(--el-color-primary);
+  font: inherit;
   font-weight: 700;
+  text-align: left;
   text-decoration: none;
   background: var(--fs-surface);
+  cursor: pointer;
+}
+
+.shift-link.is-submitted {
+  color: var(--fs-muted);
+  cursor: default;
+  border-color: var(--fs-border);
+  background: color-mix(in srgb, var(--el-color-success) 6%, var(--fs-surface));
 }
 
 .error {

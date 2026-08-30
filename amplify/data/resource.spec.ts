@@ -132,4 +132,14 @@ describe('Amplify Data schema contract', () => {
       '@model @auth(rules: [{allow: groups, groups: ["OWNER"]}])',
     );
   });
+
+  it('exposes only submitted shift ids in the dated kitchen context query', () => {
+    const output = transformedSchema();
+
+    expect(output).toContain('submittedShiftIds: [ID]!');
+    expect(output).toContain(
+      'getKitchenContext(businessDate: String!): KitchenContext',
+    );
+    expect(output).not.toMatch(/type KitchenContext[\s\S]*cashTotalYen/);
+  });
 });

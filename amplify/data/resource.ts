@@ -82,10 +82,12 @@ const KitchenContext = a.customType({
   registerFloatAmount: a.integer().required(),
   shifts: a.ref('KitchenShift').array().required(),
   responsiblePersons: a.ref('KitchenResponsiblePerson').array().required(),
+  submittedShiftIds: a.id().array().required(),
 });
 
 const getKitchenContext = a
   .query()
+  .arguments({ businessDate: a.string().required() })
   .returns(a.ref('KitchenContext'))
   .authorization((allow) => [allow.groups(['OWNER', 'KITCHEN'])])
   .handler(a.handler.function(kitchenContext));

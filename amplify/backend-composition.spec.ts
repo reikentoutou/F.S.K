@@ -964,13 +964,14 @@ describe('active DynamoDB backend composition', () => {
       ]);
       expect(evidence.kitchenContextSchemaLines).toEqual([
         'type KitchenContext @aws_cognito_user_pools(cognito_groups: ["OWNER", "KITCHEN"])',
-        '  getKitchenContext: KitchenContext @function(name: "FnGetKitchenContext") @auth(rules: [{allow: groups, groups: ["OWNER", "KITCHEN"]}])',
+        '  getKitchenContext(businessDate: String!): KitchenContext @function(name: "FnGetKitchenContext") @auth(rules: [{allow: groups, groups: ["OWNER", "KITCHEN"]}])',
       ]);
       expect(evidence.businessLambdas).toHaveLength(1);
       expect(evidence.businessLambdas[0]).toMatchObject({
         environmentVariableNames: [
           'AMPLIFY_SSM_ENV_CONFIG',
           'APP_SETTING_TABLE_NAME',
+          'DAILY_REPORT_TABLE_NAME',
           'RESPONSIBLE_PERSON_TABLE_NAME',
           'SHIFT_DEFINITION_TABLE_NAME',
         ],
@@ -1146,7 +1147,7 @@ describe('active DynamoDB backend composition', () => {
       expect(businessPolicy).toContain('AppSetting');
       expect(businessPolicy).toContain('ShiftDefinition');
       expect(businessPolicy).toContain('ResponsiblePerson');
-      expect(businessPolicy).not.toContain('DailyReport');
+      expect(businessPolicy).toContain('DailyReport');
       expect(businessPolicy).not.toContain('s3:');
       expect(businessPolicy).not.toContain('cognito-idp:');
       expect(businessPolicy).not.toContain('GameList');

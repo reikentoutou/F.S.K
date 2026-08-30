@@ -4,15 +4,18 @@ interface KitchenContextResult {
   registerFloatAmount: number;
   shifts: Array<{ id: string; name: string; sortOrder: number }>;
   responsiblePersons: Array<{ id: string; name: string }>;
+  submittedShiftIds: string[];
 }
 
 interface KitchenContextModule {
   loadKitchenContext(input: {
     tableNames: {
       appSetting: string;
+      dailyReport: string;
       shiftDefinition: string;
       responsiblePerson: string;
     };
+    businessDate: string;
     send(command: {
       operation: 'GetItem' | 'Query' | 'Scan';
       input: unknown;
@@ -32,7 +35,7 @@ beforeAll(async () => {
 });
 
 describe('getKitchenContext', () => {
-  it('returns only register float and active, sorted fill-in options', async () => {
+  it('returns only register float, fill-in options, and submitted shift ids', async () => {
     expect(kitchenContextLoadError).toBeUndefined();
     expect(kitchenContextModule).toBeDefined();
 
@@ -59,15 +62,26 @@ describe('getKitchenContext', () => {
           { id: { S: 'p1' }, name: { S: '张三' }, active: { BOOL: true } },
         ],
       },
+      {},
+      {
+        Item: {
+          reportKey: { S: '2026-08-23#night' },
+          businessDate: { S: '2026-08-23' },
+          shiftId: { S: 'night' },
+          cashTotalYen: { N: '999999' },
+        },
+      },
     ];
     const commands: unknown[] = [];
 
     const result = await kitchenContextModule!.loadKitchenContext({
       tableNames: {
         appSetting: 'app-setting-table',
+        dailyReport: 'daily-report-table',
         shiftDefinition: 'shift-table',
         responsiblePerson: 'person-table',
       },
+      businessDate: '2026-08-23',
       async send(command) {
         commands.push(command);
         return responses[commands.length - 1];
@@ -84,12 +98,13 @@ describe('getKitchenContext', () => {
         { id: 'p1', name: '张三' },
         { id: 'p2', name: '李四' },
       ],
+      submittedShiftIds: ['night'],
     });
     expect(JSON.stringify(result)).not.toContain('setupCompleted');
     expect(JSON.stringify(result)).not.toContain('internalNote');
     expect(JSON.stringify(result)).not.toContain('DailyReport');
     expect(JSON.stringify(result)).not.toContain('attachment');
-    expect(commands).toHaveLength(3);
+    expect(commands).toHaveLength(5);
     expect(commands).toEqual([
       {
         operation: 'GetItem',
@@ -117,6 +132,22 @@ describe('getKitchenContext', () => {
           FilterExpression: '#active = :active',
           ProjectionExpression: 'id, #name, #active',
           TableName: 'person-table',
+        },
+      },
+      {
+        operation: 'GetItem',
+        input: {
+          Key: { reportKey: { S: '2026-08-23#day' } },
+          ProjectionExpression: 'reportKey',
+          TableName: 'daily-report-table',
+        },
+      },
+      {
+        operation: 'GetItem',
+        input: {
+          Key: { reportKey: { S: '2026-08-23#night' } },
+          ProjectionExpression: 'reportKey',
+          TableName: 'daily-report-table',
         },
       },
     ]);

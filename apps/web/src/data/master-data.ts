@@ -81,8 +81,10 @@ export function createKitchenContextRepository(
 ) {
   const resolveClient = () => client ?? getDataClient();
   return {
-    async getContext() {
-      return dataResult(() => resolveClient().queries.getKitchenContext());
+    async getContext(businessDate: string) {
+      return dataResult(() =>
+        resolveClient().queries.getKitchenContext({ businessDate }),
+      );
     },
   };
 }

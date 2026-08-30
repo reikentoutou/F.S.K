@@ -69,6 +69,19 @@ for (const [environmentName, modelName] of kitchenContextTables) {
   backend.kitchenContext.addEnvironment(environmentName, table.tableName);
 }
 
+const dailyReportTable = backend.data.resources.tables.DailyReport;
+if (!dailyReportTable) {
+  throw new Error('KITCHEN_CONTEXT_TABLE_NOT_FOUND:DailyReport');
+}
+dailyReportTable.grant(
+  backend.kitchenContext.resources.lambda,
+  'dynamodb:GetItem',
+);
+backend.kitchenContext.addEnvironment(
+  'DAILY_REPORT_TABLE_NAME',
+  dailyReportTable.tableName,
+);
+
 for (const construct of backend.data.stack.node.findAll()) {
   if (!(construct instanceof CfnParameter)) {
     continue;
