@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "generate:icons": "node scripts/generate-app-icons.mjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
@@ -15,7 +16,8 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
-    "axios": "^1.7.9",
+    "@fsk/domain": "workspace:*",
+    "aws-amplify": "^6.20.0",
     "echarts": "^5.6.0",
     "element-plus": "^2.9.2",
     "luxon": "^3.5.0",
@@ -29,6 +31,7 @@
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/tsconfig": "^0.7.0",
     "impeccable": "^2.1.7",
+    "sharp": "0.34.3",
     "typescript": "~5.7.2",
     "vite": "^6.0.7",
     "vitest": "^3.0.5",

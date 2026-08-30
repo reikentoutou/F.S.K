@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">FSK financial app icon</title>
+  <rect width="512" height="512" fill="#165f58" />
+  <rect x="22" y="22" width="468" height="468" rx="78" fill="none" stroke="#f7f4ec" stroke-width="12" />
+  <path d="M72 104h112v38h-70v42h62v38h-62v74H72V104Z" fill="#fdfcf8" />
+  <path d="M304 130c-21-24-78-27-92 8-16 40 24 53 57 59 45 8 48 66 14 89-29 20-71 11-91-13" fill="none" stroke="#fdfcf8" stroke-width="38" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M340 104h42v78l57-78h49l-70 94 76 98h-52l-60-80v80h-42V104Z" fill="#fdfcf8" />
+  <path d="M96 417h58v-48H96v48Zm86 0h58v-82h-58v82Zm86 0h58V301h-58v116Zm86 0h58V259h-58v158Z" fill="#f2c14e" />
+  <path d="M82 432h348" stroke="#fdfcf8" stroke-width="16" stroke-linecap="round" />
+</svg>

@@ -17,8 +17,3 @@ export type ResponsiblePersonOption = {
   id: string;
   name: string;
 };
-
-export type WebmasterOption = {
-  id: string;
-  username: string;
-};

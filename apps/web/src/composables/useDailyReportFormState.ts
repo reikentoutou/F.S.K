@@ -52,6 +52,7 @@ export function useDailyReportFormState() {
   });
 
   function reset(defaultResponsiblePersonId?: string) {
+    form.responsiblePersonId = defaultResponsiblePersonId ?? '';
     form.startStr = DEFAULT_START_STR;
     form.endStr = DEFAULT_END_STR;
     form.previousImosBalanceYen = 0;
@@ -63,9 +64,6 @@ export function useDailyReportFormState() {
     form.expenseYen = 0;
     form.expenseReason = '';
     form.expenseReceiptStored = false;
-    if (defaultResponsiblePersonId) {
-      form.responsiblePersonId = defaultResponsiblePersonId;
-    }
   }
 
   function applyExisting(data: DailyReportExistingData) {

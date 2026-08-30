@@ -1,129 +1,217 @@
-<script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
-import { useRouter } from 'vue-router';
-import { http } from '@/api/http';
-import { ElMessage } from 'element-plus';
-import { todayTokyo, isoMonthsAgoTokyo } from '@/utils/tokyo';
-import { httpErrorMessage } from '@/utils/http-error-message';
-import { staffMealTotalYen } from '@/utils/daily-report-calc';
+<script lang="ts">
+import { recentTokyoBusinessDateRange as recentRange } from '@/data/date-range';
 
-type Row = {
-  id: string;
-  reportDate: string;
-  shiftId: string;
-  shiftNameSnapshot: string;
-  totalSalesYen: number;
-  staffMealCashYen: number;
-  staffMealAlipayYen: number;
-  createdBy: { username: string };
-};
+export async function loadOwnerDailyReports<T>(options: {
+  now?: Date;
+  dates?: string[];
+  isCurrent?: () => boolean;
+  listByBusinessDate(date: string): Promise<Array<T | null>>;
+  getSetting(id: string): Promise<{ registerFloatAmount: number }>;
+}): Promise<{ rows: T[]; registerFloatAmount: number }> {
+  const dates = options.dates ?? recentRange(90, options.now);
+  const setting = await options.getSetting('default');
+  const dailyResults: Array<Array<T | null>> = [];
+  for (let offset = 0; offset < dates.length; offset += 10) {
+    if (options.isCurrent && !options.isCurrent()) break;
+    dailyResults.push(
+      ...(await Promise.all(
+        dates
+          .slice(offset, offset + 10)
+          .map((businessDate) => options.listByBusinessDate(businessDate)),
+      )),
+    );
+  }
+  return {
+    rows: dailyResults
+      .flat()
+      .filter((report): report is T => report != null),
+    registerFloatAmount: setting.registerFloatAmount,
+  };
+}
+</script>
+
+<script setup lang="ts">
+import { computeDailyReportTotals, staffMealTotalYen } from '@fsk/domain';
+import { ElMessage } from 'element-plus';
+import { computed, onBeforeUnmount, shallowRef } from 'vue';
+import { useRouter } from 'vue-router';
+
+import { businessDateRange, recentTokyoBusinessDateRange } from '@/data/date-range';
+import { dailyReportsRepository } from '@/data/daily-reports';
+import { DataRepositoryError } from '@/data/errors';
+import { ownerMasterDataRepository } from '@/data/master-data';
+import { todayTokyo } from '@/utils/tokyo';
+
+type ListedReport = NonNullable<
+  Awaited<ReturnType<typeof dailyReportsRepository.listByBusinessDate>>[number]
+>;
+
+function ownerDataErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof DataRepositoryError)) return fallback;
+  switch (error.code) {
+    case 'DATA_UNAUTHORIZED':
+      return '权限不足，请重新以老板账号登录';
+    case 'DATA_NOT_FOUND':
+      return '未找到指定数据，可能已被修改';
+    case 'REPORT_ALREADY_EXISTS':
+    case 'DATA_CONFLICT':
+      return '数据发生冲突，请刷新后重试';
+    case 'DATA_PAGINATION_FAILED':
+      return '分页读取失败，请重试';
+    case 'DATA_NETWORK_ERROR':
+    case 'SUBMISSION_RESULT_UNKNOWN':
+      return '网络异常，请确认连接后重试';
+    default:
+      return fallback;
+  }
+}
 
 const router = useRouter();
-const loading = ref(true);
-const rows = ref<Row[]>([]);
-const expanded = ref<string[]>([]);
+const defaultDates = recentTokyoBusinessDateRange(90);
+const fromDate = shallowRef(defaultDates[0]!);
+const toDate = shallowRef(defaultDates.at(-1)!);
+const loading = shallowRef(false);
+const rows = shallowRef<ListedReport[]>([]);
+const expanded = shallowRef<string[]>([]);
+const registerFloatAmount = shallowRef(0);
+let loadGeneration = 0;
+let isUnmounted = false;
 
 const byDate = computed(() => {
-  const m = new Map<string, Row[]>();
-  for (const r of rows.value) {
-    const k = r.reportDate;
-    if (!m.has(k)) m.set(k, []);
-    m.get(k)!.push(r);
+  const grouped = new Map<string, ListedReport[]>();
+  for (const report of rows.value) {
+    const list = grouped.get(report.businessDate) ?? [];
+    list.push(report);
+    grouped.set(report.businessDate, list);
   }
-  return [...m.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  return [...grouped.entries()].sort(([left], [right]) =>
+    left < right ? 1 : -1,
+  );
 });
 
 const totalReports = computed(() => rows.value.length);
 const totalDays = computed(() => byDate.value.length);
-
 const totalSalesAll = computed(() =>
-  rows.value.reduce((s, r) => s + r.totalSalesYen, 0),
+  rows.value.reduce((sum, report) => sum + reportTotalSales(report), 0),
 );
 const totalStaffMealAll = computed(() =>
   rows.value.reduce(
-    (sum, row) =>
-      sum + staffMealTotalYen(row.staffMealCashYen, row.staffMealAlipayYen),
+    (sum, report) =>
+      sum +
+      staffMealTotalYen(
+        report.staffMealCashYen,
+        report.staffMealAlipayYen,
+      ),
     0,
   ),
 );
 
-function daySalesYen(list: Row[]): number {
-  return list.reduce((s, r) => s + r.totalSalesYen, 0);
+function reportTotalSales(report: ListedReport): number {
+  return computeDailyReportTotals(report, registerFloatAmount.value)
+    .totalSalesYen;
 }
 
-function rowStaffMealTotalYen(row: Row): number {
-  return staffMealTotalYen(row.staffMealCashYen, row.staffMealAlipayYen);
+function daySalesYen(reports: ListedReport[]): number {
+  return reports.reduce((sum, report) => sum + reportTotalSales(report), 0);
 }
 
-function formatYen(n: number): string {
-  return `${n.toLocaleString('ja-JP')} 円`;
+function rowStaffMealTotalYen(report: ListedReport): number {
+  return staffMealTotalYen(
+    report.staffMealCashYen,
+    report.staffMealAlipayYen,
+  );
 }
 
-async function load() {
+function submittedBy(report: ListedReport): string {
+  const audit = report as ListedReport & {
+    owner?: string | null;
+    legacySubmittedByUsername?: string | null;
+  };
+  return audit.legacySubmittedByUsername || audit.owner || '老板补录';
+}
+
+function formatYen(value: number): string {
+  return `${value.toLocaleString('ja-JP')} 円`;
+}
+
+async function load(): Promise<void> {
+  const generation = ++loadGeneration;
+  const isCurrent = (): boolean =>
+    !isUnmounted && generation === loadGeneration;
   loading.value = true;
   try {
-    const { data } = await http.get<Row[]>('/daily-reports', {
-      params: {
-        from: isoMonthsAgoTokyo(24),
-        to: todayTokyo(),
-        limit: 3000,
-      },
+    const dates = businessDateRange(fromDate.value, toDate.value);
+    const loaded = await loadOwnerDailyReports({
+      dates,
+      isCurrent,
+      listByBusinessDate: (businessDate) =>
+        dailyReportsRepository.listByBusinessDate(businessDate),
+      getSetting: (id) => ownerMasterDataRepository.getSetting(id),
     });
-    rows.value = data;
-  } catch (e: unknown) {
-    ElMessage.error(
-      httpErrorMessage(e, '日報一覧の読み込みに失敗しました'),
-    );
+    if (!isCurrent()) return;
+    registerFloatAmount.value = loaded.registerFloatAmount;
+    rows.value = loaded.rows;
+  } catch (error: unknown) {
+    if (!isCurrent()) return;
+    rows.value = [];
+    ElMessage.error(ownerDataErrorMessage(error, '日報一覧の読み込みに失敗しました'));
   } finally {
-    loading.value = false;
+    if (isCurrent()) loading.value = false;
   }
 }
 
-onMounted(load);
-
-const dlg = ref(false);
-const newForm = ref({
-  reportDate: '',
-  shiftId: '',
-  createdByUserId: '',
+onBeforeUnmount(() => {
+  isUnmounted = true;
+  loadGeneration += 1;
 });
-const shifts = ref<{ id: string; name: string }[]>([]);
-const webmasters = ref<{ id: string; username: string }[]>([]);
 
-async function openNew() {
-  const [{ data: s }, { data: w }] = await Promise.all([
-    http.get('/meta/shifts'),
-    http.get('/meta/webmaster-users'),
-  ]);
-  shifts.value = s;
-  webmasters.value = w;
-  newForm.value = {
-    reportDate: '',
-    shiftId: s[0]?.id || '',
-    createdByUserId: w[0]?.id || '',
-  };
-  dlg.value = true;
+const dialogOpen = shallowRef(false);
+const newForm = shallowRef({
+  businessDate: todayTokyo(),
+  shiftId: '',
+});
+const shifts = shallowRef<Array<{ id: string; name: string }>>([]);
+
+async function openNew(): Promise<void> {
+  try {
+    const loaded = await ownerMasterDataRepository.listShifts();
+    shifts.value = loaded
+      .filter(
+        (shift): shift is NonNullable<typeof shift> =>
+          shift != null && shift.active,
+      )
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+      .map((shift) => ({ id: shift.id, name: shift.name }));
+    newForm.value = {
+      businessDate: todayTokyo(),
+      shiftId: shifts.value[0]?.id ?? '',
+    };
+    dialogOpen.value = true;
+  } catch (error: unknown) {
+    ElMessage.error(ownerDataErrorMessage(error, 'シフトの読み込みに失敗しました'));
+  }
 }
 
-function confirmNew() {
-  if (!newForm.value.reportDate || !newForm.value.shiftId || !newForm.value.createdByUserId) {
-    ElMessage.error('日付・シフト・網管を指定してください');
+async function confirmNew(): Promise<void> {
+  if (!newForm.value.businessDate || !newForm.value.shiftId) {
+    ElMessage.error('日付・シフトを指定してください');
     return;
   }
-  dlg.value = false;
-  router.push({
-    path: '/admin/report/new',
+  dialogOpen.value = false;
+  await router.push({
+    name: 'owner-report-new',
     query: {
-      reportDate: newForm.value.reportDate,
+      businessDate: newForm.value.businessDate,
       shiftId: newForm.value.shiftId,
-      createdByUserId: newForm.value.createdByUserId,
     },
   });
 }
 
-function edit(id: string) {
-  router.push(`/admin/report/${id}`);
+async function edit(reportKey: string): Promise<void> {
+  await router.push({ name: 'owner-report-edit', params: { reportKey } });
 }
+
+void load();
 </script>
 
 <template>
@@ -136,24 +224,38 @@ function edit(id: string) {
             <span class="meta-strong">{{ totalDays }}</span> 業務日 ·
             <span class="meta-strong">{{ totalReports }}</span> 件
             <template v-if="totalReports > 0">
-              <span class="meta-dot" aria-hidden="true">·</span>
-              表示期間の実際売上計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
-              <span class="meta-dot" aria-hidden="true">·</span>
-              网管餐費計 <span class="meta-strong">{{ formatYen(totalStaffMealAll) }}</span>
+              · 実際売上計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
+              · 网管餐費計 <span class="meta-strong">{{ formatYen(totalStaffMealAll) }}</span>
             </template>
           </p>
-          <p class="panel-hint">業務日を開くとシフト別の一覧が表示されます。</p>
+          <p class="panel-hint">初期表示は最近90日です。最大366日まで読み込めます。</p>
         </div>
-        <el-button type="primary" class="head-action" @click="openNew">空シフトを補録</el-button>
+        <el-button type="primary" class="head-action" @click="openNew">
+          老板補録
+        </el-button>
       </header>
+
+      <div class="filters">
+        <el-date-picker
+          v-model="fromDate"
+          value-format="YYYY-MM-DD"
+          type="date"
+          aria-label="開始業務日"
+        />
+        <span>—</span>
+        <el-date-picker
+          v-model="toDate"
+          value-format="YYYY-MM-DD"
+          type="date"
+          aria-label="終了業務日"
+        />
+        <el-button :loading="loading" @click="load">読み込む</el-button>
+      </div>
 
       <div class="panel-body">
         <el-empty v-if="!loading && totalReports === 0" :image-size="80">
           <template #description>
-            <div class="empty-desc">
-              <p class="empty-title">この期間にはまだ日報がありません</p>
-              <p class="empty-hint">網管が提出すると、ここに日付ごとに並びます。</p>
-            </div>
+            <p>この期間にはまだ日報がありません</p>
           </template>
         </el-empty>
         <el-collapse v-else v-model="expanded" class="list-collapse">
@@ -165,63 +267,60 @@ function edit(id: string) {
                 <span class="day-sum">{{ formatYen(daySalesYen(list)) }}</span>
               </div>
             </template>
-            <el-table :data="list" size="small" stripe border class="day-table">
-              <el-table-column prop="shiftNameSnapshot" label="シフト" width="108" />
-              <el-table-column label="実際売上" min-width="120">
-                <template #default="{ row }">
-                  {{ formatYen(row.totalSalesYen) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="网管餐費（現金）" min-width="138">
-                <template #default="{ row }">
-                  {{ formatYen(row.staffMealCashYen) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="网管餐費（支付宝）" min-width="148">
-                <template #default="{ row }">
-                  {{ formatYen(row.staffMealAlipayYen) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="网管餐費合計" min-width="128">
-                <template #default="{ row }">
-                  {{ formatYen(rowStaffMealTotalYen(row)) }}
-                </template>
-              </el-table-column>
-              <el-table-column prop="createdBy.username" label="提出者" min-width="100" />
-              <el-table-column label="" width="100" align="right" fixed="right">
-                <template #default="{ row }">
-                  <el-button type="primary" link @click.stop="edit(row.id)">編集</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
+            <div
+              class="table-scroll"
+              role="region"
+              aria-label="横スクロール可能な日報明細"
+              tabindex="0"
+            >
+              <el-table :data="list" size="small" stripe border class="day-table">
+                <el-table-column prop="shiftNameSnapshot" label="シフト" width="108" />
+                <el-table-column label="実際売上" min-width="120">
+                  <template #default="{ row }">{{ formatYen(reportTotalSales(row)) }}</template>
+                </el-table-column>
+                <el-table-column label="网管餐費（現金）" min-width="138">
+                  <template #default="{ row }">{{ formatYen(row.staffMealCashYen) }}</template>
+                </el-table-column>
+                <el-table-column label="网管餐費（支付宝）" min-width="148">
+                  <template #default="{ row }">{{ formatYen(row.staffMealAlipayYen) }}</template>
+                </el-table-column>
+                <el-table-column label="网管餐費合計" min-width="128">
+                  <template #default="{ row }">{{ formatYen(rowStaffMealTotalYen(row)) }}</template>
+                </el-table-column>
+                <el-table-column label="提出者" min-width="150">
+                  <template #default="{ row }">{{ submittedBy(row) }}</template>
+                </el-table-column>
+                <el-table-column label="" width="100" align="right" fixed="right">
+                  <template #default="{ row }">
+                    <el-button type="primary" link @click.stop="edit(row.reportKey)">編集</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
           </el-collapse-item>
         </el-collapse>
       </div>
     </section>
 
-    <el-dialog v-model="dlg" title="補録（新規行）" width="480px" destroy-on-close>
+    <el-dialog v-model="dialogOpen" title="老板補録（新規）" width="480px" destroy-on-close>
+      <p class="dialog-note">現在のCognito老板账号を作成主体として保存します。</p>
       <el-form label-position="top" require-asterisk-position="right">
         <el-form-item label="業務日" required>
           <el-date-picker
-            v-model="newForm.reportDate"
+            v-model="newForm.businessDate"
             value-format="YYYY-MM-DD"
             type="date"
-            class="dlg-field"
+            class="dialog-field"
           />
         </el-form-item>
         <el-form-item label="シフト" required>
-          <el-select v-model="newForm.shiftId" class="dlg-field">
-            <el-option v-for="s in shifts" :key="s.id" :label="s.name" :value="s.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="提出元（網管）" required>
-          <el-select v-model="newForm.createdByUserId" class="dlg-field">
-            <el-option v-for="w in webmasters" :key="w.id" :label="w.username" :value="w.id" />
+          <el-select v-model="newForm.shiftId" class="dialog-field">
+            <el-option v-for="shift in shifts" :key="shift.id" :label="shift.name" :value="shift.id" />
           </el-select>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dlg = false">キャンセル</el-button>
+        <el-button @click="dialogOpen = false">キャンセル</el-button>
         <el-button type="primary" @click="confirmNew">フォームへ</el-button>
       </template>
     </el-dialog>
@@ -229,171 +328,19 @@ function edit(id: string) {
 </template>
 
 <style scoped>
-.page {
-  display: flex;
-  flex-direction: column;
-}
-
-.panel {
-  display: flex;
-  flex-direction: column;
-  padding: 18px 20px 16px;
-  border: 1px solid var(--fs-border);
-  border-radius: var(--fs-radius-md);
-  background: var(--fs-surface-elevated);
-  box-shadow: var(--fs-shadow-soft);
-}
-
-.panel-head {
-  flex-shrink: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px 20px;
-  padding-bottom: 14px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--fs-border);
-}
-
-.panel-intro {
-  min-width: 0;
-}
-
-.panel-title {
-  margin: 0 0 6px;
-  font-size: 1.1rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--fs-ink);
-}
-
-.panel-meta {
-  margin: 0 0 6px;
-  font-size: 0.88rem;
-  line-height: 1.45;
-  color: var(--fs-muted);
-}
-
-.meta-strong {
-  font-weight: 700;
-  color: var(--fs-ink);
-  font-variant-numeric: tabular-nums;
-}
-
-.meta-dot {
-  margin: 0 0.35em;
-  color: var(--fs-faint);
-}
-
-.panel-hint {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--fs-faint);
-  line-height: 1.4;
-  max-width: 56ch;
-}
-
-.head-action {
-  flex-shrink: 0;
-  font-weight: 600;
-}
-
-.panel-body {
-  padding-top: 10px;
-}
-
-.list-collapse {
-  border: none;
-  --el-collapse-header-height: 48px;
-}
-
-.list-collapse :deep(.el-collapse-item) {
-  margin-bottom: 8px;
-  border: 1px solid var(--fs-border);
-  border-radius: var(--fs-radius-sm);
-  overflow: hidden;
-  background: var(--fs-surface);
-}
-
-.list-collapse :deep(.el-collapse-item__header) {
-  padding: 0 14px;
-  font-size: 0.95rem;
-  font-weight: 600;
-  background: var(--fs-surface);
-  border: none;
-}
-
-.list-collapse :deep(.el-collapse-item__wrap) {
-  border: none;
-  background: var(--fs-surface-elevated);
-}
-
-.list-collapse :deep(.el-collapse-item__content) {
-  padding: 0 0 10px;
-}
-
-.list-collapse :deep(.el-collapse-item__arrow) {
-  margin: 0 0 0 10px;
-}
-
-.day-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 14px;
-  width: 100%;
-  padding-right: 4px;
-}
-
-.day-date {
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--fs-ink);
-  letter-spacing: 0.02em;
-}
-
-.day-sum {
-  margin-left: auto;
-  font-size: 0.88rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--fs-muted);
-}
-
-.day-table {
-  margin: 0 12px;
-  border-radius: var(--fs-radius-sm);
-  overflow: hidden;
-}
-
-.day-table :deep(.el-table__header th) {
-  font-weight: 700;
-  font-size: 12px;
-}
-
-.dlg-field {
-  width: 100%;
-  max-width: 100%;
-}
-
-.empty-desc {
-  text-align: center;
-  max-width: 32ch;
-  margin: 0 auto;
-}
-
-.empty-title {
-  margin: 0 0 6px;
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--fs-ink);
-}
-
-.empty-hint {
-  margin: 0;
-  font-size: 0.82rem;
-  line-height: 1.45;
-  color: var(--fs-muted);
-}
+.page { display: flex; flex-direction: column; }
+.panel { padding: 18px 20px 16px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); box-shadow: var(--fs-shadow-soft); }
+.panel-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px 20px; padding-bottom: 14px; border-bottom: 1px solid var(--fs-border); }
+.panel-title { margin: 0 0 6px; font-size: 1.1rem; color: var(--fs-ink); }
+.panel-meta, .panel-hint, .dialog-note { margin: 0 0 6px; color: var(--fs-muted); font-size: 0.86rem; }
+.meta-strong { font-weight: 700; color: var(--fs-ink); font-variant-numeric: tabular-nums; }
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 6px; }
+.panel-body { padding-top: 10px; }
+.list-collapse { border: none; }
+.day-title { display: flex; align-items: center; gap: 12px; width: 100%; padding-right: 8px; }
+.day-date { font-weight: 700; font-variant-numeric: tabular-nums; }
+.day-sum { margin-left: auto; font-weight: 700; color: var(--fs-muted); }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.day-table { min-width: 980px; }
+.dialog-field { width: 100%; }
 </style>

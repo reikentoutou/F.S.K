@@ -3,9 +3,10 @@
 import 'vue-router';
 
 declare module 'vue-router' {
-  /** 受保护路由所需角色；与 `stores/auth` 的 `Role` 一致 */
+  /** 受保护路由所需角色；与 `stores/auth` 的 `AppRole` 一致 */
   interface RouteMeta {
-    role?: 'WEBMASTER' | 'ADMIN';
+    role?: 'OWNER' | 'KITCHEN';
+    public?: boolean;
   }
 }
 

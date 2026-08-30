@@ -24,18 +24,11 @@
 
   /* Delight：易出易收的过渡曲线（業務 UI は短く） */
   --fs-ease-out: cubic-bezier(0.25, 1, 0.5, 1);
-
-  /*
-   * 视口高：100dvh が使える環境では動的ツールバーに追従（responsive-design / 移动 vh 問題の緩和）。
-   * 非対応ブラウザは 100vh のまま。
-   */
-  --fs-vh-100: 100vh;
-}
-
-@supports (height: 100dvh) {
-  :root {
-    --fs-vh-100: 100dvh;
-  }
+  --fs-safe-area-top: env(safe-area-inset-top, 0px);
+  --fs-safe-area-right: env(safe-area-inset-right, 0px);
+  --fs-safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --fs-safe-area-left: env(safe-area-inset-left, 0px);
+  --fs-vh-100: calc(100vh - var(--fs-safe-area-top) - var(--fs-safe-area-bottom));
 }
 
 *,
@@ -46,11 +39,15 @@
 
 html {
   color-scheme: light;
+  min-height: 100%;
+  height: -webkit-fill-available;
 }
 
 body {
+  box-sizing: border-box;
+  min-height: 100vh;
+  min-height: -webkit-fill-available;
   margin: 0;
-  min-height: var(--fs-vh-100);
   font-family: var(--el-font-family);
   font-size: 15px;
   line-height: 1.55;
@@ -58,9 +55,24 @@ body {
   background: var(--fs-page);
   -webkit-font-smoothing: antialiased;
   /* safe-area：ノッチ・ホームインジケータ（viewport-fit=cover と併用） */
-  padding-left: env(safe-area-inset-left, 0px);
-  padding-right: env(safe-area-inset-right, 0px);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-top: var(--fs-safe-area-top);
+  padding-right: var(--fs-safe-area-right);
+  padding-bottom: var(--fs-safe-area-bottom);
+  padding-left: var(--fs-safe-area-left);
+}
+
+#app {
+  min-height: var(--fs-vh-100);
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --fs-vh-100: calc(100dvh - var(--fs-safe-area-top) - var(--fs-safe-area-bottom));
+  }
+
+  body {
+    min-height: 100dvh;
+  }
 }
 
 ::selection {

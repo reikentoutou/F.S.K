@@ -1,7 +1,9 @@
 # 财务统计系统 / Finance System
 
-> **东京时区**业务日、固定四班日报；管理员集计与导出。
-> **交付方式**：前台机获取本仓库 **源码**，使用 **`pnpm install`** 与终端命令运行，并通过**浏览器**访问前端。
+> **东京时区**业务日、班次账务、老板统计与 CSV 导出。
+> **目标交付方式**：独立 FSK Amplify Gen 2 WebApp（Hosting + Cognito + AppSync/DynamoDB + S3）。
+
+> **当前状态（2026-08-25）**：新架构已在本地实现和测试，但尚未取得 Gate A 部署批准，未创建/部署新的独立 Amplify App，也未迁移真实 SQLite、用户或 uploads。当前分支只保留 legacy API、SQLite/Prisma 数据契约和迁移工具作为迁移源；当前 `apps/web` 已改为 Amplify Web，不能作为旧 UI 回退。完整旧系统回退必须使用迁移前 recovery ref/checkout 与已备份的旧运行环境。
 
 ---
 
@@ -24,10 +26,11 @@
 
 | 维度 | 说明 |
 |------|------|
-| **用途** | 财务日报录入、班次维度汇总、管理员导出（Excel / PDF）等 |
+| **用途** | 厨房班次账务录入；老板历史、更正、统计、设置与 CSV 导出 |
 | **固定班次** | 网管早班 → 白班 → 夜班 → 网管夜班；仅夜班默认承接同一业务日白班结束时间 |
-| **主交付** | `git clone`、内网 zip、或 Release 中的 **Source code** 等源码形态 → 见 [§4](#quickstart) |
-| **浏览器入口（开发）** | `http://localhost:5173`（与 `pnpm run dev` 默认一致） |
+| **目标生产架构** | 独立 FSK Amplify Hosting、Cognito、Amplify Data/AppSync/DynamoDB、Storage/S3、Kitchen Context Function |
+| **当前生产状态** | `NOT_DEPLOYED`；Gate A 前只有本地实现与合成测试证据 |
+| **legacy 恢复入口** | 不在当前分支提供；须从迁移前 recovery ref/checkout 启动旧 UI + API |
 
 ---
 
@@ -37,15 +40,18 @@
 
 | 技术 | 说明 |
 |------|------|
-| 后端 | **NestJS 10**、**Prisma**、**SQLite**、JWT |
-| 前端 | **Vue 3**、**Vite**、**Element Plus**、Pinia、Vue Router |
+| 活动目标后端 | **Amplify Gen 2**、Cognito、AppSync、DynamoDB On-Demand/PITR、S3、最小 Function |
+| Web/PWA | **Vue 3**、Vite、Element Plus、Pinia、Vue Router、Amplify Hosting |
+| legacy migration source | **NestJS 10**、Prisma、SQLite、JWT；切换前保留，切换后只读，Gate C 前不删除 |
 
 ### Monorepo 路径
 
 | 路径 | 说明 |
 |------|------|
-| [`apps/api`](./apps/api) | REST API、`prisma/schema.prisma` |
-| [`apps/web`](./apps/web) | 管理端与网管填报 SPA |
+| [`amplify`](./amplify) | Cognito、Data/AppSync/DynamoDB、Storage、Function 与合成契约 |
+| [`packages/domain`](./packages/domain) | 新 Web、统计、CSV、迁移共用的账务计算事实来源 |
+| [`apps/web`](./apps/web) | OWNER/KITCHEN WebApp 与 standalone PWA |
+| [`apps/api`](./apps/api) | legacy REST/SQLite 运行层及一次性迁移工具；不是目标生产 API |
 | [`docs`](./docs) | 实施计划、备份说明、发版与索引 |
 | [`AGENTS.md`](./AGENTS.md) | 协作者与 AI 助手约定（Prisma、代码风格等） |
 
@@ -66,29 +72,42 @@
 
 <a id="quickstart"></a>
 
-## 4. 前台机源码运行
+## 4. legacy 本地运行与新 Web 构建
 
-在克隆或解压后的**仓库根目录**执行：
+### 新 Amplify WebApp（本地验证）
+
+新 Web 启动前必须由 Amplify CLI 为当前 sandbox/branch 生成 `apps/web/public/amplify_outputs.json`；该文件被 Git ignore，禁止手工伪造或提交。未配置真实 outputs 时，应用会 fail closed，而不是回退到 legacy API。
 
 ```bash
-pnpm install
-cp apps/api/.env.example apps/api/.env
-# 编辑 apps/api/.env：生产须设置 JWT_SECRET 等（见 README「5. 生产环境与安全」）
-pnpm run db:push
-pnpm run dev
+pnpm install --frozen-lockfile
+pnpm run check:all
+pnpm run build:web
 ```
 
-然后使用浏览器打开 **`http://localhost:5173`**。
+生产 Hosting 使用根目录 [`amplify.yml`](./amplify.yml)，部署、真实数据切换和旧系统退役分别遵循 Gate A/B/C：
 
-- Vite 开发服务器会将常见 API 路径代理到本机 API（见 [`apps/web/vite.config.ts`](./apps/web/vite.config.ts)），**无需额外桌面壳**。
-- **常驻运行（无 watch）**：可先 `pnpm run build`，再在同一台机器上分别运行 `pnpm --filter @finance/api start` 与 `pnpm --filter @finance/web preview`。若前端与 API **不同源**或对外网提供静态资源，构建 Web 前请设置 **`VITE_API_BASE`** 指向 API 根 URL。
+- [`docs/aws/dynamodb-deployment-runbook.md`](./docs/aws/dynamodb-deployment-runbook.md)
+- [`docs/aws/dynamodb-cutover-runbook.md`](./docs/aws/dynamodb-cutover-runbook.md)
+- [`docs/aws/dynamodb-retirement-runbook.md`](./docs/aws/dynamodb-retirement-runbook.md)
+
+### legacy NestJS/SQLite（迁移源与恢复边界）
+
+当前分支保留 `apps/api`、Prisma schema、SQLite 读取能力及一次性迁移工具，供盘点、只读 dry-run 和 Gate B 迁移使用。当前 `apps/web` 已只通过 Amplify repositories 访问数据，因此在当前分支执行 `pnpm run dev` 或 `build + start/preview`，都不能还原旧 UI + NestJS 的完整账务系统。
+
+需要完整旧系统回退时，必须同时具备：
+
+1. 经复审的迁移前 commit/tag/recovery ref，并从该 ref 建立独立 checkout；
+2. 与该版本匹配的 `dev.db`、`uploads`、环境变量和 Node/pnpm 运行环境备份；
+3. 按该 recovery ref 自带的运行说明启动旧 Vue REST UI 与 NestJS API。
+
+不要在唯一的真实 SQLite 或 uploads 副本上执行 `db:push`、覆盖恢复或试运行。当前分支的 legacy 代码保留并不等于可启动的旧 UI 恢复点，也不能替代 Gate A/B 批准。
 
 ### 常用脚本
 
 | 命令 | 说明 |
 |------|------|
-| `pnpm run dev` | 并行启动 API + Web（默认） |
-| `pnpm run dev:api` / `pnpm run dev:web` | 单独启动 |
+| `pnpm run dev` | 开发时并行启动保留的 API 与当前 Amplify Web；不是旧系统回退 |
+| `pnpm run dev:api` / `pnpm run dev:web` | 分别启动保留的 API / 当前 Amplify Web 开发服务 |
 | `pnpm run build` | 构建 API + Web（`dist`） |
 | `pnpm run db:push` | 将 Prisma schema 同步到 SQLite |
 | `pnpm run db:generate` | 生成 Prisma Client（`schema.prisma` 变更后必跑） |
@@ -103,25 +122,33 @@ pnpm run db:generate
 
 **编辑器（可选）**：维护 `apps/web` 建议安装 [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar)（Volar）。若在线安装失败，可下载 **`.vsix`** 后使用 **Install from VSIX**。
 
-### Windows：快捷启动（浏览器版）
+### Windows：历史开发快捷脚本
 
-在已 **`pnpm install`** 且配置好 **`.env`** 的前台机上，可用仓库内脚本一键打开 **新控制台窗口**（运行 `pnpm run dev`）并**用默认浏览器**打开前端：
+仓库内脚本会打开控制台运行当前分支的 `pnpm run dev` 并访问本地 Vite；它只用于开发检查，不能启动旧 UI 回退：
 
 | 文件 | 说明 |
 |------|------|
 | [`scripts/windows/start-finance-system-dev.bat`](./scripts/windows/start-finance-system-dev.bat) | 自动 `cd` 到仓库根 → `start cmd /k pnpm run dev` → 约 8 秒后打开 `http://127.0.0.1:5173/` |
 
-**创建桌面快捷方式**：在资源管理器中 **右键** 该 `.bat` → **发送到** → **桌面快捷方式**；或手动新建快捷方式，**目标**填该 bat 的**绝对路径**（无需再包一层 `cmd.exe`）。
-
-**注意**：关闭「FinanceSystem pnpm dev」窗口即停止 API 与 Vite；若端口被占用或启动较慢，可自行编辑 bat 中的 **`timeout /t 8`** 秒数。生产常驻建议仍用 `build` + `start` / `preview` 或进程守护，见上文。
-
-**macOS**：可用 **Automator**「运行 Shell 脚本」执行 `cd` 到仓库根后 `pnpm run dev`，再用 **打开网页** 打开 `http://127.0.0.1:5173/`，并拖到程序坞。
+完整旧系统恢复必须先切换到含旧 Vue REST UI 的迁移前 recovery checkout，再使用该版本的启动脚本和备份环境；不得把当前脚本建立为生产或灾备快捷方式。
 
 ---
 
 <a id="production"></a>
 
 ## 5. 生产环境与安全
+
+### Amplify Data / DynamoDB 目标架构
+
+| 检查项 | 说明 |
+|--------|------|
+| **独立 FSK App** | App/Auth/AppSync/tables/bucket/stacks/outputs 必须与 GameList 零复用、零 ARN 交集 |
+| **角色** | Cognito 只允许 `OWNER` / `KITCHEN`；厨房后端权限只读安全上下文并 create 日报/本人 submission 附件 |
+| **数据保护** | 每张 DynamoDB 表为 On-Demand + PITR；S3 versioning、SSE-S3、public access block |
+| **运行配置** | `amplify_outputs.json` 只能由目标 branch 的 CLI 生成；manifest/outputs 禁止被 SPA rewrite 成 HTML |
+| **审批门** | Gate A 合成部署、Gate B 真实迁移/冻结、Gate C 退役互不替代 |
+
+### legacy NestJS/SQLite（仅过渡期）
 
 | 检查项 | 说明 |
 |--------|------|
@@ -152,6 +179,9 @@ pnpm run db:generate
 | [`RELEASING.md`](./RELEASING.md) | 发版与 Release 说明 |
 | [`CHANGELOG.md`](./CHANGELOG.md) | 版本变更 |
 | [`docs/data-backup-restore.md`](./docs/data-backup-restore.md) | 管理员 ZIP 备份 / 恢复 |
+| [`docs/aws/dynamodb-deployment-runbook.md`](./docs/aws/dynamodb-deployment-runbook.md) | 独立 FSK App、Hosting 与 Gate A 合成验收 |
+| [`docs/aws/dynamodb-cutover-runbook.md`](./docs/aws/dynamodb-cutover-runbook.md) | Gate B 真实数据盘点、冻结、导入、核对和回退 |
+| [`docs/aws/dynamodb-retirement-runbook.md`](./docs/aws/dynamodb-retirement-runbook.md) | Gate C 旧运行层/Foundation 精确退役 |
 | [`docs/实施计划-财务统计系统.md`](./docs/实施计划-财务统计系统.md) | 业务与实施计划 |
 
 ---

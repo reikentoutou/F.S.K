@@ -8,6 +8,13 @@ dist/
 .DS_Store
 apps/api/uploads/
 
+amplify_outputs.json
+apps/web/public/amplify_outputs.json
+.amplify/
+amplify/.env*
+amplify/database/tmp/
+amplify/tests/fixtures/private/
+
 # 本机 `npx skills add` 等生成的技能包（体积大；需要团队统一时可改为提交）
 .agents/
 skills/

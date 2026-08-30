@@ -1,48 +1,71 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { reactive, shallowRef } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { useAuthStore } from '@/stores/auth';
+
+import { AuthStoreError, useAuthStore } from '@/stores/auth';
 
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
-const loading = ref(false);
-const form = reactive({ username: '', password: '' });
+const loading = shallowRef(false);
+const form = reactive({
+  username: '',
+  password: '',
+  newPassword: '',
+  confirmPassword: '',
+});
 
-function loginErrorText(e: unknown): string {
-  const err = e as {
-    code?: string;
-    message?: string;
-    response?: { status?: number; data?: { message?: string | string[] } };
-  };
-  if (err.code === 'ERR_NETWORK' || err.message?.includes('Network Error')) {
-    return '无法连接服务器。请确认 API 已启动（默认 http://127.0.0.1:3000）。';
+function authErrorText(error: unknown): string {
+  if (!(error instanceof AuthStoreError)) return 'ログインに失敗しました。';
+  switch (error.code) {
+    case 'CREDENTIALS_INVALID':
+      return 'ユーザー名またはパスワードが正しくありません。';
+    case 'PASSWORD_UPDATE_FAILED':
+      return '新しいパスワードを更新できません。要件を確認してください。';
+    case 'NETWORK_ERROR':
+      return '通信できません。ネットワーク接続を確認してください。';
+    case 'CONFIGURATION_ERROR':
+      return 'アプリの認証設定に問題があります。管理者へ連絡してください。';
+    case 'ROLE_INVALID':
+      return 'このアカウントには利用可能な権限がありません。';
+    default:
+      return 'このログイン手順には対応していません。管理者へ連絡してください。';
   }
-  const status = err.response?.status;
-  const m = err.response?.data?.message;
-  const detail = Array.isArray(m) ? m.join('；') : m;
-  if (status === 401) {
-    return detail || '用户名或密码错误';
-  }
-  if (status === 500) {
-    return detail
-      ? `服务器错误（500）：${detail}`
-      : '服务器错误（500）。请查看 API 终端日志中的异常堆栈。';
-  }
-  return detail || err.message || '登录失败';
 }
 
-async function submit() {
+async function goToAuthorizedHome(): Promise<void> {
+  const redirect = route.query.redirect;
+  if (typeof redirect === 'string' && redirect.startsWith('/')) {
+    await router.replace(redirect);
+    return;
+  }
+  await router.replace(auth.isOwner ? '/owner' : '/kitchen');
+}
+
+async function submitCredentials(): Promise<void> {
   loading.value = true;
   try {
-    await auth.login(form.username, form.password);
-    const r = route.query.redirect as string | undefined;
-    if (r) router.replace(r);
-    else if (auth.isAdmin) router.replace('/admin');
-    else router.replace('/wm');
-  } catch (e: unknown) {
-    ElMessage.error(loginErrorText(e));
+    const result = await auth.login(form.username, form.password);
+    if (result === 'SIGNED_IN') await goToAuthorizedHome();
+  } catch (error) {
+    ElMessage.error(authErrorText(error));
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function submitNewPassword(): Promise<void> {
+  if (form.newPassword !== form.confirmPassword) {
+    ElMessage.error('新しいパスワードが一致しません。');
+    return;
+  }
+  loading.value = true;
+  try {
+    await auth.confirmNewPassword(form.newPassword);
+    await goToAuthorizedHome();
+  } catch (error) {
+    ElMessage.error(authErrorText(error));
   } finally {
     loading.value = false;
   }
@@ -53,10 +76,21 @@ async function submit() {
   <div class="wrap">
     <div class="panel fs-anim-fade-lift">
       <p class="eyebrow">財務日報</p>
-      <h1 class="title">ログイン</h1>
-      <p class="lede">業務用アカウントでサインインしてください。</p>
+      <h1 class="title">
+        {{ auth.newPasswordRequired ? 'パスワード更新' : 'ログイン' }}
+      </h1>
+      <p class="lede">
+        {{
+          auth.newPasswordRequired
+            ? '初回ログイン用の新しいパスワードを設定してください。'
+            : '業務用アカウントでサインインしてください。'
+        }}
+      </p>
       <el-card class="card" shadow="never">
-        <el-form @submit.prevent="submit">
+        <el-form
+          v-if="!auth.newPasswordRequired"
+          @submit.prevent="submitCredentials"
+        >
           <el-form-item label="ユーザー名">
             <el-input v-model="form.username" autocomplete="username" />
           </el-form-item>
@@ -68,8 +102,39 @@ async function submit() {
               autocomplete="current-password"
             />
           </el-form-item>
-          <el-button type="primary" native-type="submit" :loading="loading" class="submit">
+          <el-button
+            type="primary"
+            native-type="submit"
+            :loading="loading"
+            class="submit"
+          >
             ログイン
+          </el-button>
+        </el-form>
+        <el-form v-else @submit.prevent="submitNewPassword">
+          <el-form-item label="新しいパスワード">
+            <el-input
+              v-model="form.newPassword"
+              type="password"
+              show-password
+              autocomplete="new-password"
+            />
+          </el-form-item>
+          <el-form-item label="新しいパスワード（確認）">
+            <el-input
+              v-model="form.confirmPassword"
+              type="password"
+              show-password
+              autocomplete="new-password"
+            />
+          </el-form-item>
+          <el-button
+            type="primary"
+            native-type="submit"
+            :loading="loading"
+            class="submit"
+          >
+            パスワードを更新
           </el-button>
         </el-form>
       </el-card>

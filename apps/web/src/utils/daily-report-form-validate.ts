@@ -1,11 +1,16 @@
+import { MAX_YEN } from '@fsk/domain';
+
 import { parseHmToMinute } from '@/utils/time-parse';
 
-export const MAX_DAILY_REPORT_AMOUNT_YEN = 2_000_000_000;
+export const MAX_DAILY_REPORT_AMOUNT_YEN = MAX_YEN;
 
 type FormSlice = {
   responsiblePersonId: string;
   startStr: string;
   endStr: string;
+  previousImosBalanceYen: number;
+  currentImosBalanceYen: number;
+  newageYen: number;
   cashInDrawerYen: number;
   staffMealCashYen: number;
   staffMealAlipayYen: number;
@@ -14,18 +19,31 @@ type FormSlice = {
   expenseReceiptStored: boolean;
 };
 
-function validStaffMealAmount(value: number): boolean {
+function validYenAmount(value: number): boolean {
   return (
     Number.isInteger(value) &&
     value >= 0 &&
-    value <= MAX_DAILY_REPORT_AMOUNT_YEN
+    value <= MAX_YEN
   );
+}
+
+function amountValidationError(form: FormSlice): string | null {
+  if (
+    !validYenAmount(form.previousImosBalanceYen) ||
+    !validYenAmount(form.currentImosBalanceYen) ||
+    !validYenAmount(form.newageYen) ||
+    !validYenAmount(form.cashInDrawerYen) ||
+    !validYenAmount(form.expenseYen)
+  ) {
+    return '金額は0〜2,000,000,000円の整数で入力してください';
+  }
+  return null;
 }
 
 function staffMealValidationError(form: FormSlice): string | null {
   if (
-    !validStaffMealAmount(form.staffMealCashYen) ||
-    !validStaffMealAmount(form.staffMealAlipayYen)
+    !validYenAmount(form.staffMealCashYen) ||
+    !validYenAmount(form.staffMealAlipayYen)
   ) {
     return '网管餐費は0〜2,000,000,000円の整数で入力してください';
   }
@@ -38,20 +56,21 @@ export function validateDailyReportGoToConfirm(opts: {
   /** 仅管理员新建 */
   admin?: {
     isNew: boolean;
-    createdByUserId: string;
     reportDate: string;
     shiftId: string;
   };
 }): string | null {
   const { form, admin } = opts;
   if (admin?.isNew) {
-    if (!admin.createdByUserId || !admin.reportDate || !admin.shiftId) {
-      return '日付・シフト・提出元（網管）を確認してください';
+    if (!admin.reportDate || !admin.shiftId) {
+      return '日付・シフトを確認してください';
     }
   }
   if (!form.responsiblePersonId) {
     return '責任者を選択してください';
   }
+  const amountError = amountValidationError(form);
+  if (amountError) return amountError;
   const staffMealError = staffMealValidationError(form);
   if (staffMealError) return staffMealError;
   const sm = parseHmToMinute(form.startStr);
@@ -73,7 +92,6 @@ export function validateDailyReportSubmit(opts: {
   form: FormSlice;
   admin?: {
     isNew: boolean;
-    createdByUserId: string;
     reportDate: string;
     shiftId: string;
   };
@@ -83,10 +101,12 @@ export function validateDailyReportSubmit(opts: {
     return '責任者を選択してください';
   }
   if (admin?.isNew) {
-    if (!admin.createdByUserId || !admin.reportDate || !admin.shiftId) {
-      return '日付・シフト・提出元（網管）を確認してください';
+    if (!admin.reportDate || !admin.shiftId) {
+      return '日付・シフトを確認してください';
     }
   }
+  const amountError = amountValidationError(form);
+  if (amountError) return amountError;
   const staffMealError = staffMealValidationError(form);
   if (staffMealError) return staffMealError;
   if (form.expenseYen > 0 && !form.expenseReason?.trim()) {
