@@ -63,6 +63,41 @@ const isActive = (item: Item): boolean => item.active?.BOOL === true;
 const compareText = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
 
+const tokyoBusinessDate = (now: Date): string => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    day: '2-digit',
+    month: '2-digit',
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+  }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes): string => {
+    const value = parts.find((candidate) => candidate.type === type)?.value;
+    if (!value) throw new Error('KITCHEN_BUSINESS_DATE_NOT_ALLOWED');
+    return value;
+  };
+  return `${part('year')}-${part('month')}-${part('day')}`;
+};
+
+export const resolveKitchenBusinessDate = (
+  value: string | null | undefined,
+  now = new Date(),
+): string => {
+  const currentBusinessDate = tokyoBusinessDate(now);
+  const businessDate = value ?? currentBusinessDate;
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(businessDate)
+    ? new Date(`${businessDate}T00:00:00.000Z`)
+    : null;
+  if (
+    parsed === null ||
+    Number.isNaN(parsed.getTime()) ||
+    parsed.toISOString().slice(0, 10) !== businessDate ||
+    businessDate > currentBusinessDate
+  ) {
+    throw new Error('KITCHEN_BUSINESS_DATE_NOT_ALLOWED');
+  }
+  return businessDate;
+};
+
 const scanAll = async (
   send: KitchenContextInput['send'],
   input: Record<string, unknown>,
@@ -132,6 +167,7 @@ export async function loadKitchenContext({
       const response = (await send({
         operation: 'GetItem',
         input: {
+          ConsistentRead: true,
           Key: { reportKey: { S: `${businessDate}#${shift.id}` } },
           ProjectionExpression: 'reportKey',
           TableName: tableNames.dailyReport,
@@ -181,7 +217,7 @@ interface DynamoDbSdk {
 }
 
 export const handler = async (event: {
-  arguments: { businessDate: string };
+  arguments: { businessDate?: string | null };
 }): Promise<KitchenContextResult> => {
   // Lambda Node.js runtimes provide AWS SDK v3. Keeping the module name dynamic
   // prevents bundling a second SDK copy into this small read-only function.
@@ -195,7 +231,7 @@ export const handler = async (event: {
       shiftDefinition: requiredEnvironment('SHIFT_DEFINITION_TABLE_NAME'),
       responsiblePerson: requiredEnvironment('RESPONSIBLE_PERSON_TABLE_NAME'),
     },
-    businessDate: event.arguments.businessDate,
+    businessDate: resolveKitchenBusinessDate(event.arguments.businessDate),
     send({ operation, input }) {
       const Command =
         operation === 'GetItem'

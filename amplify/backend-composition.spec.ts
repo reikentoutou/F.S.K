@@ -964,7 +964,7 @@ describe('active DynamoDB backend composition', () => {
       ]);
       expect(evidence.kitchenContextSchemaLines).toEqual([
         'type KitchenContext @aws_cognito_user_pools(cognito_groups: ["OWNER", "KITCHEN"])',
-        '  getKitchenContext(businessDate: String!): KitchenContext @function(name: "FnGetKitchenContext") @auth(rules: [{allow: groups, groups: ["OWNER", "KITCHEN"]}])',
+        '  getKitchenContext(businessDate: String): KitchenContext @function(name: "FnGetKitchenContext") @auth(rules: [{allow: groups, groups: ["OWNER", "KITCHEN"]}])',
       ]);
       expect(evidence.businessLambdas).toHaveLength(1);
       expect(evidence.businessLambdas[0]).toMatchObject({

@@ -10,6 +10,7 @@ import {
   loadKitchenHomeContext,
 } from './KitchenHomeView.vue';
 import {
+  createKitchenReportContextLoader,
   createKitchenReport,
   kitchenHomePath,
   kitchenReportMode,
@@ -192,6 +193,43 @@ describe('kitchen create-only views', () => {
         '2026-08-24',
       ),
     ).rejects.toThrow('KITCHEN_REPORT_ALREADY_SUBMITTED');
+  });
+
+  it('ignores an older route load that resolves after a submitted route is blocked', async () => {
+    let resolveOlderContext!: (value: {
+      registerFloatAmount: number;
+      shifts: Array<{ id: string; name: string; sortOrder: number }>;
+      responsiblePersons: Array<{ id: string; name: string }>;
+      submittedShiftIds: string[];
+    }) => void;
+    const olderContext = new Promise<Parameters<typeof resolveOlderContext>[0]>(
+      (resolve) => {
+        resolveOlderContext = resolve;
+      },
+    );
+    const getContext = vi
+      .fn()
+      .mockReturnValueOnce(olderContext)
+      .mockResolvedValueOnce({
+        registerFloatAmount: 5_000,
+        shifts: [{ id: 'night', name: '夜班', sortOrder: 20 }],
+        responsiblePersons: [{ id: 'p1', name: '张三' }],
+        submittedShiftIds: ['night'],
+      });
+    const loader = createKitchenReportContextLoader({ getContext });
+
+    const olderLoad = loader.load('2026-08-23', 'day', '2026-08-24');
+    await expect(
+      loader.load('2026-08-23', 'night', '2026-08-24'),
+    ).resolves.toEqual({ status: 'error' });
+    resolveOlderContext({
+      registerFloatAmount: 5_000,
+      shifts: [{ id: 'day', name: '日班', sortOrder: 10 }],
+      responsiblePersons: [{ id: 'p1', name: '张三' }],
+      submittedShiftIds: [],
+    });
+
+    await expect(olderLoad).resolves.toEqual({ status: 'stale' });
   });
 
   it('does not create a navigation target for an already submitted shift', () => {

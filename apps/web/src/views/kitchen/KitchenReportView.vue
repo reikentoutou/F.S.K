@@ -82,6 +82,52 @@ export function loadKitchenReportContext(
   });
 }
 
+export type KitchenReportContextLoadResult =
+  | { status: 'ready'; context: KitchenContext }
+  | { status: 'error' }
+  | { status: 'stale' };
+
+export function createKitchenReportContextLoader(
+  repository: Pick<
+    typeof import('@/data/master-data').kitchenContextRepository,
+    'getContext'
+  >,
+): {
+  cancel(): void;
+  load(
+    businessDate: string,
+    shiftId: string,
+    currentBusinessDate?: string,
+  ): Promise<KitchenReportContextLoadResult>;
+} {
+  let requestVersion = 0;
+  return {
+    cancel() {
+      requestVersion += 1;
+    },
+    async load(businessDate, shiftId, currentBusinessDate) {
+      const version = ++requestVersion;
+      try {
+        const loaded = await loadKitchenReportContext(
+          repository,
+          businessDate,
+          shiftId,
+          currentBusinessDate,
+        );
+        if (version !== requestVersion) return { status: 'stale' };
+        if (!loaded.shifts.some((item) => item.id === shiftId)) {
+          return { status: 'error' };
+        }
+        return { status: 'ready', context: loaded };
+      } catch {
+        return version === requestVersion
+          ? { status: 'error' }
+          : { status: 'stale' };
+      }
+    },
+  };
+}
+
 export function createKitchenReport(
   command: CreateDailyReportCommand,
   repository: Pick<typeof dailyReportsRepository, 'create'> =
@@ -156,6 +202,9 @@ const receiptFile = shallowRef<File | null>(null);
 const attachmentKeys = shallowRef<string[]>([]);
 const draftId = `draft_${crypto.randomUUID().replaceAll('-', '')}`;
 const attachmentId = `attachment_${crypto.randomUUID().replaceAll('-', '')}`;
+const reportContextLoader = createKitchenReportContextLoader(
+  kitchenContextRepository,
+);
 
 const businessDate = computed(() => String(route.params.date ?? ''));
 const shiftId = computed(() => String(route.params.shiftId ?? ''));
@@ -229,8 +278,12 @@ const submittedTotals = computed(() => {
 
 watch(
   () => [route.name, route.params.date, route.params.shiftId] as const,
-  async () => {
+  async (_routeContract, _previousRouteContract, onCleanup) => {
+    reportContextLoader.cancel();
+    onCleanup(() => reportContextLoader.cancel());
     if (kitchenReportMode(route.name) === null) return;
+    const requestedBusinessDate = String(route.params.date ?? '');
+    const requestedShiftId = String(route.params.shiftId ?? '');
     loading.value = true;
     loadError.value = false;
     context.value = null;
@@ -239,22 +292,20 @@ watch(
     attachmentKeys.value = [];
     receiptFile.value = null;
     reset();
-    try {
-      const loaded = await loadKitchenReportContext(
-        kitchenContextRepository,
-        businessDate.value,
-        shiftId.value,
-      );
-      context.value = loaded;
-      setDefaultResponsiblePerson(loaded.responsiblePersons[0]?.id);
-      if (!loaded.shifts.some((item) => item.id === shiftId.value)) {
-        loadError.value = true;
-      }
-    } catch {
+    const result = await reportContextLoader.load(
+      requestedBusinessDate,
+      requestedShiftId,
+    );
+    if (result.status === 'stale') return;
+    if (result.status === 'error') {
       loadError.value = true;
-    } finally {
-      loading.value = false;
+    } else {
+      context.value = result.context;
+      setDefaultResponsiblePerson(
+        result.context.responsiblePersons[0]?.id,
+      );
     }
+    loading.value = false;
   },
   { immediate: true },
 );

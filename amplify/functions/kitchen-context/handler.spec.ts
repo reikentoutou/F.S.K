@@ -8,6 +8,10 @@ interface KitchenContextResult {
 }
 
 interface KitchenContextModule {
+  resolveKitchenBusinessDate(
+    value: string | null | undefined,
+    now?: Date,
+  ): string;
   loadKitchenContext(input: {
     tableNames: {
       appSetting: string;
@@ -137,6 +141,7 @@ describe('getKitchenContext', () => {
       {
         operation: 'GetItem',
         input: {
+          ConsistentRead: true,
           Key: { reportKey: { S: '2026-08-23#day' } },
           ProjectionExpression: 'reportKey',
           TableName: 'daily-report-table',
@@ -145,11 +150,34 @@ describe('getKitchenContext', () => {
       {
         operation: 'GetItem',
         input: {
+          ConsistentRead: true,
           Key: { reportKey: { S: '2026-08-23#night' } },
           ProjectionExpression: 'reportKey',
           TableName: 'daily-report-table',
         },
       },
     ]);
+  });
+
+  it('defaults an omitted date to Tokyo today and rejects invalid or future dates', () => {
+    expect(kitchenContextLoadError).toBeUndefined();
+    expect(kitchenContextModule).toBeDefined();
+    const now = new Date('2026-08-24T15:30:00.000Z');
+
+    expect(
+      kitchenContextModule!.resolveKitchenBusinessDate(undefined, now),
+    ).toBe('2026-08-25');
+    expect(
+      kitchenContextModule!.resolveKitchenBusinessDate(null, now),
+    ).toBe('2026-08-25');
+    expect(
+      kitchenContextModule!.resolveKitchenBusinessDate('2026-08-24', now),
+    ).toBe('2026-08-24');
+    expect(() =>
+      kitchenContextModule!.resolveKitchenBusinessDate('2026-08-26', now),
+    ).toThrow('KITCHEN_BUSINESS_DATE_NOT_ALLOWED');
+    expect(() =>
+      kitchenContextModule!.resolveKitchenBusinessDate('2026-02-30', now),
+    ).toThrow('KITCHEN_BUSINESS_DATE_NOT_ALLOWED');
   });
 });

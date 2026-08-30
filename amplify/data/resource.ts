@@ -87,7 +87,7 @@ const KitchenContext = a.customType({
 
 const getKitchenContext = a
   .query()
-  .arguments({ businessDate: a.string().required() })
+  .arguments({ businessDate: a.string() })
   .returns(a.ref('KitchenContext'))
   .authorization((allow) => [allow.groups(['OWNER', 'KITCHEN'])])
   .handler(a.handler.function(kitchenContext));

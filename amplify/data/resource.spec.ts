@@ -138,7 +138,7 @@ describe('Amplify Data schema contract', () => {
 
     expect(output).toContain('submittedShiftIds: [ID]!');
     expect(output).toContain(
-      'getKitchenContext(businessDate: String!): KitchenContext',
+      'getKitchenContext(businessDate: String): KitchenContext',
     );
     expect(output).not.toMatch(/type KitchenContext[\s\S]*cashTotalYen/);
   });
