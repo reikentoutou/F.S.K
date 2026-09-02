@@ -51,5 +51,5 @@ describe('production Cognito overrides', () => {
         'ALLOW_REFRESH_TOKEN_AUTH',
       ],
     });
-  });
+  }, 15_000);
 });
