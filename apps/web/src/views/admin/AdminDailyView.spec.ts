@@ -164,6 +164,7 @@ async function mountDailyView(): Promise<{ app: App; root: HTMLElement }> {
     'ElFormItem',
     'ElSelect',
     'ElOption',
+    'ElIcon',
   ]) {
     app.component(name, Passthrough);
   }
@@ -223,7 +224,7 @@ describe('OWNER daily repository orchestration', () => {
     const root = await renderDailyView();
 
     expect(repositoryMocks.listByBusinessDate).not.toHaveBeenCalled();
-    expect(root.textContent).not.toContain('実際売上計');
+    expect(root.textContent).toContain('実際売上合計0 円');
     expect(root.textContent).not.toContain('21,900 円');
   });
 
@@ -306,9 +307,9 @@ describe('OWNER daily repository orchestration', () => {
         staffMealAlipayYen: 50,
       },
     ]);
-    await waitFor(() => root.textContent?.includes('1 業務日 · 90 件') === true);
+    await waitFor(() => root.textContent?.includes('1 営業日 · 90 件') === true);
 
-    expect(root.textContent).toContain('1 業務日 · 90 件');
+    expect(root.textContent).toContain('1 営業日 · 90 件');
     expect(loadButton(root).getAttribute('aria-busy')).toBe('false');
     expect(elementPlusMocks.error).not.toHaveBeenCalled();
   });
@@ -405,16 +406,16 @@ describe('OWNER daily repository orchestration', () => {
     const root = await renderDailyView();
     const visible = root.textContent ?? '';
 
-    expect(visible).toContain('1 業務日 · 2 件');
-    expect(visible).toContain('実際売上計 21,700 円');
-    expect(visible).toContain('网管餐費計 425 円');
-    expect(visible).toContain('网管餐費（現金）');
+    expect(visible).toContain('1 営業日 · 2 件');
+    expect(visible).toContain('実際売上合計 21,700 円');
+    expect(visible).toContain('スタッフ食事代合計 425 円');
+    expect(visible).toContain('スタッフ食事代（現金）');
     expect(visible).toContain('100 円');
     expect(visible).toContain('200 円');
-    expect(visible).toContain('网管餐費（支付宝）');
+    expect(visible).toContain('スタッフ食事代（アリペイ）');
     expect(visible).toContain('50 円');
     expect(visible).toContain('75 円');
-    expect(visible).toContain('网管餐費合計');
+    expect(visible).toContain('スタッフ食事代合計');
     expect(visible).toContain('150 円');
     expect(visible).toContain('275 円');
     expect(

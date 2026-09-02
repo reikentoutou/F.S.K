@@ -178,10 +178,10 @@ describe('OWNER report repository actions', () => {
     const root = await renderReportForm();
     const visible = root.textContent ?? '';
 
-    expect(visible).toContain('未找到');
+    expect(visible).toContain('見つかりません');
     expect(visible).not.toContain('底銭');
     expect(visible).not.toContain('入力内容を確認');
-    expect(visible).not.toContain('老板补录を保存');
+    expect(visible).not.toContain('日報を追加');
     expect(repositoryMocks.create).not.toHaveBeenCalled();
     expect(repositoryMocks.updateByReportKey).not.toHaveBeenCalled();
   });
@@ -223,11 +223,11 @@ describe('OWNER report repository actions', () => {
   });
 
   it.each([
-    ['DATA_UNAUTHORIZED', '权限不足'],
-    ['DATA_NOT_FOUND', '未找到'],
-    ['DATA_CONFLICT', '冲突'],
-    ['DATA_PAGINATION_FAILED', '分页'],
-    ['DATA_NETWORK_ERROR', '网络'],
+    ['DATA_UNAUTHORIZED', '権限がありません'],
+    ['DATA_NOT_FOUND', '見つかりません'],
+    ['DATA_CONFLICT', '競合'],
+    ['DATA_PAGINATION_FAILED', '読み込み'],
+    ['DATA_NETWORK_ERROR', 'ネットワークエラー'],
   ] as const)('shows a stable %s page message', (code, text) => {
     expect(
       actions.ownerReportDataErrorMessage(

@@ -32,6 +32,7 @@ export async function loadOwnerDailyReports<T>(options: {
 
 <script setup lang="ts">
 import { computeDailyReportTotals, staffMealTotalYen } from '@fsk/domain';
+import { ArrowDown, ArrowRight, EditPen } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 import { computed, onBeforeUnmount, shallowRef } from 'vue';
 import { useRouter } from 'vue-router';
@@ -50,17 +51,17 @@ function ownerDataErrorMessage(error: unknown, fallback: string): string {
   if (!(error instanceof DataRepositoryError)) return fallback;
   switch (error.code) {
     case 'DATA_UNAUTHORIZED':
-      return '权限不足，请重新以老板账号登录';
+      return '権限がありません。ユーザーアカウントで再ログインしてください';
     case 'DATA_NOT_FOUND':
-      return '未找到指定数据，可能已被修改';
+      return '指定したデータが見つかりません。更新または削除された可能性があります';
     case 'REPORT_ALREADY_EXISTS':
     case 'DATA_CONFLICT':
-      return '数据发生冲突，请刷新后重试';
+      return 'データが競合しました。画面を更新してもう一度お試しください';
     case 'DATA_PAGINATION_FAILED':
-      return '分页读取失败，请重试';
+      return 'データの読み込みに失敗しました。もう一度お試しください';
     case 'DATA_NETWORK_ERROR':
     case 'SUBMISSION_RESULT_UNKNOWN':
-      return '网络异常，请确认连接后重试';
+      return 'ネットワークエラーが発生しました。接続を確認してもう一度お試しください';
     default:
       return fallback;
   }
@@ -127,7 +128,17 @@ function submittedBy(report: ListedReport): string {
     owner?: string | null;
     legacySubmittedByUsername?: string | null;
   };
-  return audit.legacySubmittedByUsername || audit.owner || '老板补录';
+  return audit.legacySubmittedByUsername || audit.owner || 'ユーザーによる追加';
+}
+
+function toggleDate(date: string): void {
+  expanded.value = expanded.value.includes(date)
+    ? expanded.value.filter((item) => item !== date)
+    : [...expanded.value, date];
+}
+
+function isExpanded(date: string): boolean {
+  return expanded.value.includes(date);
 }
 
 function formatYen(value: number): string {
@@ -151,6 +162,7 @@ async function load(): Promise<void> {
     if (!isCurrent()) return;
     registerFloatAmount.value = loaded.registerFloatAmount;
     rows.value = loaded.rows;
+    expanded.value = [];
   } catch (error: unknown) {
     if (!isCurrent()) return;
     rows.value = [];
@@ -221,45 +233,74 @@ void load();
         <div class="panel-intro">
           <h2 id="admin-daily-heading" class="panel-title">全日報</h2>
           <p class="panel-meta">
-            <span class="meta-strong">{{ totalDays }}</span> 業務日 ·
+            <span class="meta-strong">{{ totalDays }}</span> 営業日 ·
             <span class="meta-strong">{{ totalReports }}</span> 件
             <template v-if="totalReports > 0">
-              · 実際売上計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
-              · 网管餐費計 <span class="meta-strong">{{ formatYen(totalStaffMealAll) }}</span>
+              · 実際売上合計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
+              · スタッフ食事代合計 <span class="meta-strong">{{ formatYen(totalStaffMealAll) }}</span>
             </template>
           </p>
           <p class="panel-hint">初期表示は最近90日です。最大366日まで読み込めます。</p>
         </div>
         <el-button type="primary" class="head-action" @click="openNew">
-          老板補録
+          <el-icon><EditPen /></el-icon>
+          日報を追加
         </el-button>
       </header>
 
+      <div class="summary-grid" aria-label="全日報サマリー">
+        <h2 class="summary-title">全日報サマリー</h2>
+        <div class="summary-item">
+          <span>営業日</span>
+          <strong>{{ totalDays }}</strong>
+        </div>
+        <div class="summary-item">
+          <span>日報数</span>
+          <strong>{{ totalReports }}</strong>
+        </div>
+        <div class="summary-item summary-item-wide">
+          <span>実際売上合計</span>
+          <strong>{{ formatYen(totalSalesAll) }}</strong>
+        </div>
+        <div class="summary-item summary-item-wide">
+          <span>スタッフ食事代合計</span>
+          <strong>{{ formatYen(totalStaffMealAll) }}</strong>
+        </div>
+      </div>
+
       <div class="filters">
-        <el-date-picker
-          v-model="fromDate"
-          value-format="YYYY-MM-DD"
-          type="date"
-          aria-label="開始業務日"
-        />
-        <span>—</span>
-        <el-date-picker
-          v-model="toDate"
-          value-format="YYYY-MM-DD"
-          type="date"
-          aria-label="終了業務日"
-        />
+        <span class="filter-label">期間</span>
+        <div class="filter-controls">
+          <el-date-picker
+            v-model="fromDate"
+            value-format="YYYY-MM-DD"
+            type="date"
+            aria-label="開始営業日"
+          />
+          <span class="range-separator">—</span>
+          <el-date-picker
+            v-model="toDate"
+            value-format="YYYY-MM-DD"
+            type="date"
+            aria-label="終了営業日"
+          />
+        </div>
         <el-button :loading="loading" @click="load">読み込む</el-button>
       </div>
 
       <div class="panel-body">
+        <div class="list-heading">
+          <h3>日報一覧</h3>
+          <span>新しい順 <el-icon><ArrowDown /></el-icon></span>
+        </div>
         <el-empty v-if="!loading && totalReports === 0" :image-size="80">
           <template #description>
             <p>この期間にはまだ日報がありません</p>
           </template>
         </el-empty>
-        <el-collapse v-else v-model="expanded" class="list-collapse">
-          <el-collapse-item v-for="[date, list] in byDate" :key="date" :name="date">
+        <template v-else>
+          <el-collapse v-model="expanded" class="list-collapse desktop-report-list">
+            <el-collapse-item v-for="[date, list] in byDate" :key="date" :name="date">
             <template #title>
               <div class="day-title">
                 <span class="day-date">{{ date }}</span>
@@ -278,13 +319,13 @@ void load();
                 <el-table-column label="実際売上" min-width="120">
                   <template #default="{ row }">{{ formatYen(reportTotalSales(row)) }}</template>
                 </el-table-column>
-                <el-table-column label="网管餐費（現金）" min-width="138">
+                <el-table-column label="スタッフ食事代（現金）" min-width="168">
                   <template #default="{ row }">{{ formatYen(row.staffMealCashYen) }}</template>
                 </el-table-column>
-                <el-table-column label="网管餐費（支付宝）" min-width="148">
+                <el-table-column label="スタッフ食事代（アリペイ）" min-width="188">
                   <template #default="{ row }">{{ formatYen(row.staffMealAlipayYen) }}</template>
                 </el-table-column>
-                <el-table-column label="网管餐費合計" min-width="128">
+                <el-table-column label="スタッフ食事代合計" min-width="158">
                   <template #default="{ row }">{{ formatYen(rowStaffMealTotalYen(row)) }}</template>
                 </el-table-column>
                 <el-table-column label="提出者" min-width="150">
@@ -297,13 +338,62 @@ void load();
                 </el-table-column>
               </el-table>
             </div>
-          </el-collapse-item>
-        </el-collapse>
+            </el-collapse-item>
+          </el-collapse>
+          <div class="mobile-report-list">
+            <section v-for="[date, list] in byDate" :key="date" class="mobile-day-group">
+            <button
+              type="button"
+              class="mobile-day-button"
+              :aria-expanded="isExpanded(date)"
+              :aria-controls="`mobile-day-${date}`"
+              @click="toggleDate(date)"
+            >
+              <span class="mobile-day-main">
+                <strong>{{ date }}</strong>
+                <span>{{ list.length }} 件の日報</span>
+              </span>
+              <span class="mobile-day-total">{{ formatYen(daySalesYen(list)) }}</span>
+              <el-icon :class="{ expanded: isExpanded(date) }"><ArrowRight /></el-icon>
+            </button>
+            <div
+              v-show="isExpanded(date)"
+              :id="`mobile-day-${date}`"
+              class="mobile-day-details"
+            >
+              <article v-for="report in list" :key="report.reportKey" class="mobile-report-card">
+                <div class="mobile-report-head">
+                  <strong>{{ report.shiftNameSnapshot }}</strong>
+                  <span>{{ submittedBy(report) }}</span>
+                </div>
+                <dl class="mobile-report-metrics">
+                  <div>
+                    <dt>実際売上</dt>
+                    <dd>{{ formatYen(reportTotalSales(report)) }}</dd>
+                  </div>
+                  <div>
+                    <dt>スタッフ食事代</dt>
+                    <dd>{{ formatYen(rowStaffMealTotalYen(report)) }}</dd>
+                  </div>
+                </dl>
+                <el-button
+                  type="primary"
+                  plain
+                  class="mobile-edit-button"
+                  @click.stop="edit(report.reportKey)"
+                >
+                  編集
+                </el-button>
+              </article>
+            </div>
+            </section>
+          </div>
+        </template>
       </div>
     </section>
 
-    <el-dialog v-model="dialogOpen" title="老板補録（新規）" width="480px" destroy-on-close>
-      <p class="dialog-note">現在のCognito老板账号を作成主体として保存します。</p>
+    <el-dialog v-model="dialogOpen" title="日報を追加" width="480px" destroy-on-close>
+      <p class="dialog-note">現在ログイン中のユーザーを作成者として保存します。</p>
       <el-form label-position="top" require-asterisk-position="right">
         <el-form-item label="業務日" required>
           <el-date-picker
@@ -335,7 +425,10 @@ void load();
 .panel-meta, .panel-hint, .dialog-note { margin: 0 0 6px; color: var(--fs-muted); font-size: 0.86rem; }
 .meta-strong { font-weight: 700; color: var(--fs-ink); font-variant-numeric: tabular-nums; }
 .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 6px; }
+.filter-label { display: none; }
+.filter-controls { display: flex; align-items: center; gap: 8px; }
 .panel-body { padding-top: 10px; }
+.summary-grid, .mobile-report-list, .list-heading { display: none; }
 .list-collapse { border: none; }
 .day-title { display: flex; align-items: center; gap: 12px; width: 100%; padding-right: 8px; }
 .day-date { font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -343,4 +436,61 @@ void load();
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .day-table { min-width: 980px; }
 .dialog-field { width: 100%; }
+
+@media (max-width: 720px) {
+  .panel { display: flex; flex-direction: column; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  .panel-head { display: contents; }
+  .panel-intro { display: none; }
+  .head-action { order: 2; width: 100%; min-height: 46px; margin: 12px 0; font-weight: 700; }
+  .head-action .el-icon { font-size: 18px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 12px; overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
+  .summary-grid { order: 1; }
+  .summary-title { grid-column: 1 / -1; margin: 0; padding: 16px 16px 10px; font-size: 1.05rem; }
+  .summary-item { display: flex; min-width: 0; min-height: 82px; flex-direction: column-reverse; justify-content: center; gap: 5px; padding: 12px 14px; border-right: 1px solid var(--fs-border); border-bottom: 1px solid var(--fs-border); }
+  .summary-item:nth-child(3), .summary-item:nth-child(5) { border-right: 0; }
+  .summary-item:nth-last-child(-n + 2) { border-bottom: 0; }
+  .summary-item span { color: var(--fs-muted); font-size: 0.74rem; line-height: 1.25; }
+  .summary-item strong { overflow: hidden; color: var(--fs-accent); font-size: 1.22rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+  .filters { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px 14px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
+  .filters { order: 3; }
+  .filter-label { display: block; grid-column: 1 / -1; color: var(--fs-muted); font-size: 0.75rem; font-weight: 600; }
+  .filter-controls { min-width: 0; }
+  .filter-controls :deep(.el-date-editor) { width: 100%; min-width: 0; }
+  .filter-controls :deep(.el-input__wrapper) { padding-right: 6px; padding-left: 8px; }
+  .filter-controls :deep(.el-input__prefix) { display: none; }
+  .range-separator { flex: 0 0 auto; color: var(--fs-muted); }
+  .filters > .el-button { min-height: 40px; }
+  .panel-body { order: 4; padding-top: 12px; }
+  .list-heading { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 9px; }
+  .list-heading h3 { margin: 0; font-size: 1rem; }
+  .list-heading span { display: inline-flex; align-items: center; gap: 3px; color: var(--fs-muted); font-size: 0.76rem; }
+  .desktop-report-list { display: none; }
+  .mobile-report-list { display: block; overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
+  .mobile-day-group + .mobile-day-group { border-top: 1px solid var(--fs-border); }
+  .mobile-day-button { display: grid; width: 100%; min-height: 66px; grid-template-columns: minmax(0, 1fr) auto 20px; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; color: var(--fs-ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
+  .mobile-day-main { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  .mobile-day-main strong { font-size: 0.92rem; font-variant-numeric: tabular-nums; }
+  .mobile-day-main span { color: var(--fs-muted); font-size: 0.72rem; }
+  .mobile-day-total { font-size: 0.84rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mobile-day-button .el-icon { color: var(--fs-muted); transition: transform 0.2s ease; }
+  .mobile-day-button .el-icon.expanded { transform: rotate(90deg); }
+  .mobile-day-details { padding: 0 10px 10px; background: var(--fs-surface); }
+  .mobile-report-card { padding: 13px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-sm); background: var(--fs-surface-elevated); }
+  .mobile-report-card + .mobile-report-card { margin-top: 8px; }
+  .mobile-report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .mobile-report-head span { overflow: hidden; color: var(--fs-muted); font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-report-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+  .mobile-report-metrics div { min-width: 0; }
+  .mobile-report-metrics dt { color: var(--fs-muted); font-size: 0.7rem; }
+  .mobile-report-metrics dd { margin: 3px 0 0; overflow: hidden; font-size: 0.88rem; font-weight: 700; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-edit-button { width: 100%; min-height: 42px; }
+  :deep(.el-dialog) { width: calc(100% - 28px) !important; max-width: 480px; margin-top: max(8vh, calc(var(--fs-safe-area-top) + 16px)); }
+  :deep(.el-dialog__footer) { display: flex; }
+  :deep(.el-dialog__footer .el-button) { flex: 1; min-height: 42px; }
+}
+
+@media (max-width: 390px) {
+  .filters { grid-template-columns: 1fr; }
+  .filters > .el-button { width: 100%; }
+}
 </style>

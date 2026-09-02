@@ -45,7 +45,7 @@ function staffMealValidationError(form: FormSlice): string | null {
     !validYenAmount(form.staffMealCashYen) ||
     !validYenAmount(form.staffMealAlipayYen)
   ) {
-    return '网管餐費は0〜2,000,000,000円の整数で入力してください';
+    return 'スタッフ食事代は0〜2,000,000,000円の整数で入力してください';
   }
   return null;
 }

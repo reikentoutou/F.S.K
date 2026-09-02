@@ -66,10 +66,10 @@ describe('daily report staff meal validation', () => {
     (value) => {
       const invalid = form({ staffMealCashYen: value });
       expect(validateDailyReportGoToConfirm({ form: invalid })).toBe(
-        '网管餐費は0〜2,000,000,000円の整数で入力してください',
+        'スタッフ食事代は0〜2,000,000,000円の整数で入力してください',
       );
       expect(validateDailyReportSubmit({ form: invalid })).toBe(
-        '网管餐費は0〜2,000,000,000円の整数で入力してください',
+        'スタッフ食事代は0〜2,000,000,000円の整数で入力してください',
       );
     },
   );
@@ -79,7 +79,7 @@ describe('daily report staff meal validation', () => {
       validateDailyReportSubmit({
         form: form({ staffMealAlipayYen: 2_000_000_001 }),
       }),
-    ).toBe('网管餐費は0〜2,000,000,000円の整数で入力してください');
+    ).toBe('スタッフ食事代は0〜2,000,000,000円の整数で入力してください');
   });
 
   it.each([

@@ -25,7 +25,7 @@ function yen(n: number): string {
 </script>
 
 <template>
-  <DailyReportSection title="結算入力">
+  <DailyReportSection title="精算入力">
     <el-form-item label="Imos" class="item-plain">
       <div class="money-row">
         <div class="money-cell">
@@ -90,7 +90,7 @@ function yen(n: number): string {
       </div>
     </el-form-item>
 
-    <el-form-item label="网管餐费" class="item-plain">
+    <el-form-item label="スタッフ食事代" class="item-plain">
       <div class="staff-meal-wrap">
         <div class="staff-meal-grid">
           <div class="money-cell">
@@ -105,7 +105,7 @@ function yen(n: number): string {
             />
           </div>
           <div class="money-cell">
-            <span class="sub-label">支付宝</span>
+            <span class="sub-label">アリペイ</span>
             <el-input-number
               v-model="form.staffMealAlipayYen"
               :min="0"
@@ -116,12 +116,12 @@ function yen(n: number): string {
             />
           </div>
           <div class="result-cell">
-            <span class="sub-label">网管餐费合計</span>
+            <span class="sub-label">スタッフ食事代合計</span>
             <strong>{{ yen(preview.staffMealTotalYen) }}</strong>
           </div>
         </div>
         <p class="field-guide staff-meal-guide">
-          現金は現金入金金額に含まれますが、実際売上から除外します。支付宝は単独保存し、実際売上には含めません。
+          現金分は現金入金金額に含まれますが、実際売上から除外されます。アリペイ分は個別に保存され、実際売上には含まれません。
         </p>
       </div>
     </el-form-item>
@@ -132,7 +132,7 @@ function yen(n: number): string {
           <span class="sub-label">実際売上</span>
           <strong>{{ yen(preview.totalSalesYen) }}</strong>
           <p class="field-guide result-guide">
-            Newage売上 + 現金入金金額 − 网管餐費（現金）です。
+            Newage売上 + 現金入金金額 − スタッフ食事代（現金）です。
           </p>
         </div>
         <div class="result-cell">
@@ -307,6 +307,10 @@ function yen(n: number): string {
 }
 
 @media (max-width: 560px) {
+  .item-plain :deep(.el-input-number) {
+    max-width: none;
+  }
+
   .staff-meal-grid {
     grid-template-columns: 1fr;
   }

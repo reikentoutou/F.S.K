@@ -46,15 +46,15 @@ export function ownerAnalyticsErrorMessage(error: unknown): string {
   }
   switch (error.code) {
     case 'DATA_UNAUTHORIZED':
-      return '权限不足，请重新以老板账号登录';
+      return '権限がありません。ユーザーアカウントで再ログインしてください';
     case 'DATA_PAGINATION_FAILED':
-      return '分页读取失败，请重试';
+      return 'データの読み込みに失敗しました。もう一度お試しください';
     case 'DATA_NETWORK_ERROR':
-      return '网络异常，请确认连接后重试';
+      return 'ネットワークエラーが発生しました。接続を確認してもう一度お試しください';
     case 'DATA_NOT_FOUND':
       return 'レジ底銭設定が見つかりません。設定画面で登録してください';
     case 'DATA_CONFLICT':
-      return '数据发生冲突，请刷新后重试';
+      return 'データが競合しました。画面を更新してもう一度お試しください';
     default:
       return '集計データの読み込みに失敗しました';
   }
@@ -261,7 +261,7 @@ watch([period, anchorDate], () => void load(), { immediate: true });
             :disabled="!analytics || !loadedSelection || loading"
             @click="downloadCsv"
           >
-            CSV を出力
+            CSVを出力
           </el-button>
         </el-form-item>
       </el-form>
@@ -283,13 +283,13 @@ watch([period, anchorDate], () => void load(), { immediate: true });
           <el-descriptions-item label="支出">
             {{ formatYen(analytics.totals.expenseYen) }}
           </el-descriptions-item>
-          <el-descriptions-item label="网管餐費（現金）">
+          <el-descriptions-item label="スタッフ食事代（現金）">
             {{ formatYen(analytics.totals.staffMealCashYen) }}
           </el-descriptions-item>
-          <el-descriptions-item label="网管餐費（支付宝）">
+          <el-descriptions-item label="スタッフ食事代（アリペイ）">
             {{ formatYen(analytics.totals.staffMealAlipayYen) }}
           </el-descriptions-item>
-          <el-descriptions-item label="网管餐費合計">
+          <el-descriptions-item label="スタッフ食事代合計">
             {{ formatYen(analytics.totals.staffMealTotalYen) }}
           </el-descriptions-item>
           <el-descriptions-item label="実際売上">
@@ -331,13 +331,13 @@ watch([period, anchorDate], () => void load(), { immediate: true });
               <el-descriptions-item label="支出理由">
                 {{ row.expenseReason || '—' }}
               </el-descriptions-item>
-              <el-descriptions-item label="网管餐費（現金）">
+              <el-descriptions-item label="スタッフ食事代（現金）">
                 {{ formatYen(row.staffMealCashYen) }}
               </el-descriptions-item>
-              <el-descriptions-item label="网管餐費（支付宝）">
+              <el-descriptions-item label="スタッフ食事代（アリペイ）">
                 {{ formatYen(row.staffMealAlipayYen) }}
               </el-descriptions-item>
-              <el-descriptions-item label="网管餐費合計">
+              <el-descriptions-item label="スタッフ食事代合計">
                 {{ formatYen(row.staffMealTotalYen) }}
               </el-descriptions-item>
               <el-descriptions-item label="実際売上">
@@ -373,13 +373,13 @@ watch([period, anchorDate], () => void load(), { immediate: true });
             <el-descriptions-item label="支出">
               {{ formatYen(shift.expenseYen) }}
             </el-descriptions-item>
-            <el-descriptions-item label="网管餐費（現金）">
+            <el-descriptions-item label="スタッフ食事代（現金）">
               {{ formatYen(shift.staffMealCashYen) }}
             </el-descriptions-item>
-            <el-descriptions-item label="网管餐費（支付宝）">
+            <el-descriptions-item label="スタッフ食事代（アリペイ）">
               {{ formatYen(shift.staffMealAlipayYen) }}
             </el-descriptions-item>
-            <el-descriptions-item label="网管餐費合計">
+            <el-descriptions-item label="スタッフ食事代合計">
               {{ formatYen(shift.staffMealTotalYen) }}
             </el-descriptions-item>
             <el-descriptions-item label="偏差">
@@ -430,5 +430,33 @@ watch([period, anchorDate], () => void load(), { immediate: true });
   width: 100%;
   height: 360px;
   margin-top: 24px;
+}
+
+@media (max-width: 720px) {
+  .page, .panel, .panel-body { min-width: 0; }
+  .panel-head { display: block; }
+  .panel-title { font-size: 1.2rem; }
+  .filters { display: block; margin-top: 14px; }
+  .filters :deep(.el-form-item) { display: block; width: 100%; margin: 0 0 12px; }
+  .filters :deep(.el-form-item__label) { display: block; padding: 0 0 5px; }
+  .filters :deep(.el-form-item__content),
+  .filters :deep(.el-select),
+  .filters :deep(.el-date-editor) { width: 100% !important; }
+  .filters :deep(.el-form-item:last-child .el-form-item__content) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .filters :deep(.el-form-item:last-child .el-button) { min-height: 44px; margin: 0; }
+  .grand-headline { font-size: 1.05rem; }
+  .range-sub { line-height: 1.5; }
+  .totals, .day-shift-block, .shift-summary { width: 100%; max-width: none; }
+  .totals :deep(.el-descriptions__label),
+  .day-shift-block :deep(.el-descriptions__label),
+  .shift-summary :deep(.el-descriptions__label) { width: 48%; min-width: 0; word-break: break-word; }
+  .totals :deep(.el-descriptions__content),
+  .day-shift-block :deep(.el-descriptions__content),
+  .shift-summary :deep(.el-descriptions__content) { min-width: 0; word-break: break-word; }
+  .chart { height: 260px; margin-top: 18px; }
+}
+
+@media (max-width: 390px) {
+  .filters :deep(.el-form-item:last-child .el-form-item__content) { grid-template-columns: 1fr; }
 }
 </style>

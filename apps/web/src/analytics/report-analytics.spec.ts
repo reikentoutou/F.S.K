@@ -459,11 +459,11 @@ describe('OWNER analytics page', () => {
     expect(visible).toContain('対象 1 件');
     expect(visible).toContain('実際売上');
     expect(visible).toContain('5,500 円');
-    expect(visible).toContain('网管餐費（現金）');
+    expect(visible).toContain('スタッフ食事代（現金）');
     expect(visible).toContain('500 円');
-    expect(visible).toContain('网管餐費（支付宝）');
+    expect(visible).toContain('スタッフ食事代（アリペイ）');
     expect(visible).toContain('100 円');
-    expect(visible).toContain('网管餐費合計');
+    expect(visible).toContain('スタッフ食事代合計');
     expect(visible).toContain('600 円');
   });
 
@@ -673,15 +673,15 @@ describe('OWNER analytics page', () => {
     ],
     [
       new DataRepositoryError('DATA_UNAUTHORIZED'),
-      '权限不足，请重新以老板账号登录',
+      '権限がありません。ユーザーアカウントで再ログインしてください',
     ],
     [
       new DataRepositoryError('DATA_PAGINATION_FAILED'),
-      '分页读取失败，请重试',
+      'データの読み込みに失敗しました。もう一度お試しください',
     ],
     [
       new DataRepositoryError('DATA_NETWORK_ERROR'),
-      '网络异常，请确认连接后重试',
+      'ネットワークエラーが発生しました。接続を確認してもう一度お試しください',
     ],
   ])('maps metadata/read failures to a stable OWNER message', (error, message) => {
     expect(viewLoader.ownerAnalyticsErrorMessage(error)).toBe(message);
@@ -699,7 +699,7 @@ describe('OWNER analytics page', () => {
 
     root.querySelector<HTMLButtonElement>('[data-testid="period-change"]')?.click();
     const csvButton = [...root.querySelectorAll('button')].find((button) =>
-      button.textContent?.includes('CSV を出力'),
+      button.textContent?.includes('CSVを出力'),
     );
     csvButton?.click();
 
@@ -725,7 +725,7 @@ describe('OWNER analytics page', () => {
     await nextTick();
 
     const csvButton = [...root.querySelectorAll('button')].find((button) =>
-      button.textContent?.includes('CSV を出力'),
+      button.textContent?.includes('CSVを出力'),
     );
     expect(csvButton?.disabled).toBe(true);
 

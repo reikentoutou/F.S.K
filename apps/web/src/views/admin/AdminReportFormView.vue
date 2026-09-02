@@ -19,17 +19,17 @@ export function ownerReportDataErrorMessage(
   if (!(error instanceof RepositoryError)) return fallback;
   switch (error.code) {
     case 'DATA_UNAUTHORIZED':
-      return '权限不足，请重新以老板账号登录';
+      return '権限がありません。ユーザーアカウントで再ログインしてください';
     case 'DATA_NOT_FOUND':
-      return '未找到指定账务，可能已被修改';
+      return '指定した日報が見つかりません。更新または削除された可能性があります';
     case 'REPORT_ALREADY_EXISTS':
     case 'DATA_CONFLICT':
-      return '该营业日和班次已有账务，或数据发生冲突';
+      return 'この営業日とシフトの日報は登録済みか、データが競合しています';
     case 'DATA_PAGINATION_FAILED':
-      return '分页读取失败，请返回日报后重试';
+      return 'データの読み込みに失敗しました。日報一覧に戻ってもう一度お試しください';
     case 'DATA_NETWORK_ERROR':
     case 'SUBMISSION_RESULT_UNKNOWN':
-      return '网络异常，结果可能不确定，请返回日报确认后再重试';
+      return 'ネットワークエラーが発生しました。日報一覧で保存結果を確認してください';
     default:
       return fallback;
   }
@@ -360,7 +360,7 @@ const saveController =
     async succeed(outcome) {
       if (!outcome.saved) return;
       ElMessage.success(
-        outcome.mode === 'edit' ? '修正しました' : '老板补录を保存しました',
+        outcome.mode === 'edit' ? '修正しました' : '日報を追加しました',
       );
       await router.replace(ownerDailyPath);
     },
@@ -516,9 +516,9 @@ async function submit(): Promise<void> {
         {{ step === 'confirm' ? '入力に戻る' : '戻る' }}
       </el-button>
       <div>
-        <h2>日報（老板）— {{ businessDate }}</h2>
+        <h2>日報（ユーザー）— {{ businessDate }}</h2>
         <p v-if="isNew" class="audit-note">
-          老板补录：{{ auth.user?.username ?? 'OWNER' }} が作成します
+          ユーザーによる追加：{{ auth.user?.username ?? 'OWNER' }} が作成します
         </p>
       </div>
     </header>
@@ -557,7 +557,7 @@ async function submit(): Promise<void> {
           :disabled="!pageReady"
           @click="submit"
         >
-          {{ isNew ? '老板补录を保存' : '修正を保存' }}
+          {{ isNew ? '日報を追加' : '修正を保存' }}
         </el-button>
       </div>
     </template>
@@ -581,11 +581,21 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
-.page { max-width: 900px; }
+.page { --el-color-primary: var(--fs-accent); --el-color-primary-rgb: 22, 95, 88; width: calc(100% - 36px); max-width: 900px; min-height: var(--fs-vh-100); margin: 0 auto; padding: 20px 0 32px; }
 .bar { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
 .bar h2 { margin: 0; }
 .audit-note { margin: 6px 0 0; color: var(--fs-muted); font-size: 0.82rem; }
 .load-error { padding: 16px; color: var(--el-color-danger); border: 1px solid var(--el-color-danger-light-5); border-radius: var(--fs-radius-sm); }
 .confirm-actions { margin-top: 20px; padding-top: 8px; }
 .submit-btn { width: 100%; max-width: 360px; font-weight: 700; }
+
+@media (max-width: 720px) {
+  .page { width: 100%; padding: 14px 14px calc(28px + var(--fs-safe-area-bottom)); }
+  .bar { gap: 10px; margin-bottom: 14px; }
+  .bar > .el-button { min-width: 52px; min-height: 40px; padding: 0; }
+  .bar > div { min-width: 0; }
+  .bar h2 { font-size: 1.08rem; line-height: 1.4; word-break: break-word; }
+  .audit-note { line-height: 1.45; }
+  .submit-btn { max-width: none; min-height: 48px; }
+}
 </style>

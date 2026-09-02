@@ -38,7 +38,7 @@ function yen(n: number): string {
       <p class="lede">
         {{
           props.variant === 'kitchen'
-            ? '入力内容を確認してください。提出後の修正は老板へ依頼してください。'
+            ? '入力内容を確認してください。提出後の修正はユーザーへ依頼してください。'
             : '問題なければ下部の「提出する」で確定してください。'
         }}
       </p>
@@ -59,7 +59,7 @@ function yen(n: number): string {
       </div>
     </DailyReportSection>
 
-    <DailyReportSection title="結算">
+    <DailyReportSection title="精算">
       <div class="kv-row">
         <span class="kv-label">前期Imos残高</span>
         <span class="kv-value">{{ yen(previousImosBalanceYen) }}</span>
@@ -93,15 +93,15 @@ function yen(n: number): string {
         <span class="kv-value">{{ expenseReason }}</span>
       </div>
       <div class="kv-row">
-        <span class="kv-label">网管餐費（現金）</span>
+        <span class="kv-label">スタッフ食事代（現金）</span>
         <span class="kv-value">{{ yen(staffMealCashYen) }}</span>
       </div>
       <div class="kv-row">
-        <span class="kv-label">网管餐費（支付宝）</span>
+        <span class="kv-label">スタッフ食事代（アリペイ）</span>
         <span class="kv-value">{{ yen(staffMealAlipayYen) }}</span>
       </div>
       <div class="kv-row row-total">
-        <span class="kv-label">网管餐費合計</span>
+        <span class="kv-label">スタッフ食事代合計</span>
         <span class="kv-value kv-strong">{{ yen(preview.staffMealTotalYen) }}</span>
       </div>
     </DailyReportSection>

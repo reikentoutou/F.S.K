@@ -70,17 +70,17 @@ function ownerDataErrorMessage(error: unknown, fallback: string): string {
   if (!(error instanceof DataRepositoryError)) return fallback;
   switch (error.code) {
     case 'DATA_UNAUTHORIZED':
-      return '权限不足，请重新以老板账号登录';
+      return '権限がありません。ユーザーアカウントで再ログインしてください';
     case 'DATA_NOT_FOUND':
-      return '未找到指定设置，可能已被修改';
+      return '指定した設定が見つかりません。更新または削除された可能性があります';
     case 'REPORT_ALREADY_EXISTS':
     case 'DATA_CONFLICT':
-      return '设置发生冲突，请刷新后重试';
+      return '設定が競合しました。画面を更新してもう一度お試しください';
     case 'DATA_PAGINATION_FAILED':
-      return '分页读取失败，请重试';
+      return 'データの読み込みに失敗しました。もう一度お試しください';
     case 'DATA_NETWORK_ERROR':
     case 'SUBMISSION_RESULT_UNKNOWN':
-      return '网络异常，请确认连接后重试';
+      return 'ネットワークエラーが発生しました。接続を確認してもう一度お試しください';
     default:
       return fallback;
   }
@@ -226,7 +226,7 @@ onMounted(load);
 <template>
   <div v-loading="loading" class="settings-page">
     <section class="settings-section" aria-labelledby="setting-float">
-      <h3 id="setting-float">レジ底銭（AppSetting/default）</h3>
+      <h3 id="setting-float">レジ底銭</h3>
       <div class="add-row">
         <el-input-number v-model="registerFloat" :min="0" :step="1000" />
         <el-button type="primary" :loading="savingFloat" @click="saveFloat">保存</el-button>
@@ -254,6 +254,21 @@ onMounted(load);
           </template>
         </el-table-column>
       </el-table>
+      <div class="mobile-master-list">
+        <article v-for="shift in shifts" :key="shift.id" class="mobile-master-row">
+          <div class="mobile-master-copy">
+            <strong>{{ shift.name }}</strong>
+            <span>表示順 {{ shift.sortOrder }} · {{ shift.active ? '有効' : '無効' }}</span>
+          </div>
+          <el-button
+            :type="shift.active ? 'danger' : 'primary'"
+            plain
+            @click="setShiftActive(shift, !shift.active)"
+          >
+            {{ shift.active ? '無効化' : '再有効化' }}
+          </el-button>
+        </article>
+      </div>
       <div class="add-row">
         <el-input v-model="newShift.name" placeholder="新規シフト名" class="name-input" />
         <el-input-number v-model="newShift.sortOrder" :min="0" aria-label="表示順" />
@@ -281,6 +296,21 @@ onMounted(load);
           </template>
         </el-table-column>
       </el-table>
+      <div class="mobile-master-list">
+        <article v-for="person in persons" :key="person.id" class="mobile-master-row">
+          <div class="mobile-master-copy">
+            <strong>{{ person.name }}</strong>
+            <span>{{ person.active ? '有効' : '無効' }}</span>
+          </div>
+          <el-button
+            :type="person.active ? 'danger' : 'primary'"
+            plain
+            @click="setPersonActive(person, !person.active)"
+          >
+            {{ person.active ? '無効化' : '再有効化' }}
+          </el-button>
+        </article>
+      </div>
       <div class="add-row">
         <el-input v-model="newPerson" placeholder="新規名前" class="name-input" />
         <el-button type="primary" @click="addPerson">追加</el-button>
@@ -297,4 +327,21 @@ onMounted(load);
 .settings-table { max-width: 680px; margin-bottom: 12px; }
 .add-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .name-input { width: 240px; }
+.mobile-master-list { display: none; }
+
+@media (max-width: 720px) {
+  .settings-page { gap: 12px; }
+  .settings-section { padding: 16px 14px; }
+  .settings-section h3 { font-size: 1rem; }
+  .settings-table { display: none; }
+  .mobile-master-list { display: grid; gap: 8px; margin-bottom: 12px; }
+  .mobile-master-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 11px 12px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-sm); background: var(--fs-surface); }
+  .mobile-master-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  .mobile-master-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-master-copy span { color: var(--fs-muted); font-size: 0.75rem; }
+  .mobile-master-row .el-button { min-height: 40px; flex-shrink: 0; }
+  .add-row { display: grid; grid-template-columns: 1fr; }
+  .add-row > *, .name-input, .add-row :deep(.el-input-number) { width: 100%; max-width: none; }
+  .add-row > .el-button { min-height: 44px; }
+}
 </style>
