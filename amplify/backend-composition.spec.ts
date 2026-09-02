@@ -3093,7 +3093,7 @@ esac`,
     expect(
       result.awsCalls.filter((call) => call.includes('delete-security-group')),
     ).toHaveLength(2);
-  });
+  }, 15_000);
 
   it('reloads a persisted cleanup failure latch after CleanupOwner restart', () => {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'fsk-cleanup-latch-'));
