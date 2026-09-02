@@ -39,8 +39,7 @@
     "phases": {
       "build": {
         "commands": [
-          "pnpm run check:all",
-          "pnpm run build:web"
+          "pnpm run check:all"
         ]
       }
     },

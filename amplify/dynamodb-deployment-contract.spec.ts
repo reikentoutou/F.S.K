@@ -548,8 +548,11 @@ describe('DynamoDB Hosting deployment contract', () => {
     expect(execution.status, `${execution.stdout}\n${execution.stderr}`).toBe(0);
   }, 30_000);
 
-  it('installs immutably, validates an exact target, deploys Gen 2 outputs, checks, then builds the Web artifact', () => {
+  it('installs immutably, validates an exact target, deploys Gen 2 outputs, and builds the Web artifact once', () => {
     const config = parseJsonYaml<BuildSpec>('amplify.yml');
+    const packageJson = JSON.parse(read('package.json')) as {
+      scripts?: Record<string, string>;
+    };
     const backend = config.backend.phases.build.commands;
     const frontend = config.frontend.phases.build.commands;
     const installIndex = backend.indexOf('pnpm install --frozen-lockfile');
@@ -595,7 +598,9 @@ describe('DynamoDB Hosting deployment contract', () => {
     expect(backend.slice(outputCheckIndex)).toContain(
       'test -z "$(git ls-files -- apps/web/public/amplify_outputs.json)"',
     );
-    expect(frontend).toEqual(['pnpm run check:all', 'pnpm run build:web']);
+    expect(packageJson.scripts?.['check:all']).toContain('pnpm run build');
+    expect(packageJson.scripts?.build).toContain('pnpm run build:web');
+    expect(frontend).toEqual(['pnpm run check:all']);
     expect(config.frontend.artifacts).toEqual({
       baseDirectory: 'apps/web/dist',
       files: ['**/*'],

@@ -49,7 +49,7 @@ App 名称必须明确含 FSK 标识且不得等于或包含已登记的 GameLis
 2. 固定 pnpm 9.15.0，执行 `pnpm install --frozen-lockfile`；
 3. `ampx pipeline-deploy` 部署该 branch backend，并将 CLI 生成的 `amplify_outputs.json` 写到 `apps/web/public`；
 4. 确认 outputs 非空、被 Git ignore 且未被跟踪；
-5. 执行 `pnpm run check:all` 和 `pnpm run build:web`；
+5. 执行 `pnpm run check:all`；该命令已通过根 `build` 脚本生成 Web 产物，不再重复执行 `build:web`，避免同一 Amplify 构建容器连续打包造成内存耗尽；
 6. 只发布 `apps/web/dist`。
 
 禁止手写、复制或提交 `amplify_outputs.json`。构建失败时 Amplify job 必须失败，不允许用旧 outputs 继续发布。
