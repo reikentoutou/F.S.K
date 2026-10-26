@@ -15,7 +15,7 @@
     "typecheck:migration": "pnpm --filter @finance/api run typecheck:migration",
     "typecheck:amplify": "tsc -p amplify/tsconfig.json --noEmit",
     "check": "pnpm run typecheck && pnpm run test:web",
-    "check:all": "pnpm run typecheck && pnpm run typecheck:amplify && pnpm run test:api && pnpm run test:web && pnpm run test:domain && pnpm run test:migration && pnpm run test:amplify && pnpm run build",
+    "check:all": "pnpm run typecheck && pnpm run typecheck:amplify && pnpm run build && pnpm run test:api && pnpm run test:web && pnpm run test:domain && pnpm run test:migration && pnpm run test:amplify",
     "test:amplify": "vitest run --config amplify/vitest.config.ts",
     "test:api": "pnpm --filter @finance/api test",
     "test:web": "pnpm --filter @finance/web run test",
