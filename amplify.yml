@@ -43,7 +43,7 @@
     "phases": {
       "build": {
         "commands": [
-          "pnpm run check:all"
+          "node scripts/check-with-memory-diagnostics.cjs"
         ]
       }
     },
