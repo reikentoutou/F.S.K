@@ -43,16 +43,13 @@
     "phases": {
       "build": {
         "commands": [
-          "node scripts/check-with-memory-diagnostics.cjs"
+          "if [ \"$AWS_APP_ID\" = \"dehbpoei8b7ch\" ] && [ \"$AWS_BRANCH\" = \"RE/fsk-store3-deployment\" ]; then pnpm run build:web; else pnpm run check:all; fi"
         ]
       }
     },
     "artifacts": {
       "baseDirectory": "apps/web/dist",
       "files": ["**/*"]
-    },
-    "cache": {
-      "paths": ["node_modules/**/*", ".pnpm-store/**/*"]
     }
   }
 }

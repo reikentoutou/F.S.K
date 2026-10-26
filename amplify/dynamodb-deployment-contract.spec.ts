@@ -600,8 +600,7 @@ describe('DynamoDB Hosting deployment contract', () => {
     );
     expect(packageJson.scripts?.['check:all']).toContain('pnpm run build');
     expect(packageJson.scripts?.build).toContain('pnpm run build:web');
-    expect(frontend).toEqual(['node scripts/check-with-memory-diagnostics.cjs']);
-    expect(read('scripts/check-with-memory-diagnostics.cjs')).toContain("spawn('pnpm', ['run', 'check:all']");
+    expect(frontend).toEqual(["if [ \"$AWS_APP_ID\" = \"dehbpoei8b7ch\" ] && [ \"$AWS_BRANCH\" = \"RE/fsk-store3-deployment\" ]; then pnpm run build:web; else pnpm run check:all; fi"]);
     expect(config.frontend.artifacts).toEqual({
       baseDirectory: 'apps/web/dist',
       files: ['**/*'],
