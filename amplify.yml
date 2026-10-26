@@ -27,7 +27,11 @@
           "corepack enable",
           "corepack prepare pnpm@9.15.0 --activate",
           "pnpm install --frozen-lockfile",
+          "if [ \"$AWS_APP_ID\" = \"dehbpoei8b7ch\" ] && [ \"$AWS_BRANCH\" = \"RE/fsk-store3-deployment\" ]; then",
+          "pnpm exec ampx generate outputs --app-id \"$FSK_EXPECTED_AMPLIFY_APP_ID\" --branch \"RE/amplify-gen2-staging-implementation\" --out-dir apps/web/public",
+          "else",
           "CI=1 pnpm exec ampx pipeline-deploy --branch \"$FSK_EXPECTED_AMPLIFY_BRANCH\" --app-id \"$FSK_EXPECTED_AMPLIFY_APP_ID\" --outputs-out-dir apps/web/public",
+          "fi",
           "test -s apps/web/public/amplify_outputs.json",
           "git check-ignore -q apps/web/public/amplify_outputs.json",
           "test -z \"$(git ls-files -- apps/web/public/amplify_outputs.json)\""

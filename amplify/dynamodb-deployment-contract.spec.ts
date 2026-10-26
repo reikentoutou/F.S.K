@@ -310,7 +310,7 @@ if [ "\${FAKE_EXPIRE_WHEN_JOB_STARTED:-0}" = 1 ] && [ -e "$FAKE_JOB_STARTED_STAT
   executable(join(bin, 'pnpm'), `#!/usr/bin/env bash
 set -euo pipefail
 printf 'pnpm %s\\n' "$*" >> "$FAKE_COMMAND_LOG"
-if [[ " $* " == *" pipeline-deploy "* ]]; then mkdir -p apps/web/public; printf '{}\\n' > apps/web/public/amplify_outputs.json; fi
+if [[ " $* " == *" pipeline-deploy "* || " $* " == *" generate outputs "* ]]; then mkdir -p apps/web/public; printf '{}\\n' > apps/web/public/amplify_outputs.json; fi
 `);
   return { bin, log };
 }
@@ -638,6 +638,30 @@ describe('DynamoDB Hosting deployment contract', () => {
     expect(calls.findIndex((value) => value === 'pnpm install --frozen-lockfile')).toBeLessThan(
       calls.findIndex((value) => value.includes('pipeline-deploy')),
     );
+  });
+
+  it('reuses only the new store3 app backend when publishing its dedicated frontend branch', () => {
+    const backend = parseJsonYaml<BuildSpec>('amplify.yml').backend.phases.build.commands;
+    const root = temporaryRoot('fsk-store3-hosting-');
+    const { bin, log } = createFakeCommandBin(root);
+    const cwd = join(root, 'checkout');
+    mkdirSync(join(cwd, 'apps/web/public'), { recursive: true });
+    const environment = gateEnvironment(root, bin);
+    const result = spawnSync('bash', ['-c', `set -euo pipefail\n${backend.join('\n')}\n`], {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...environment,
+        AWS_APP_ID: 'dehbpoei8b7ch',
+        FSK_EXPECTED_AMPLIFY_APP_ID: 'dehbpoei8b7ch',
+        AWS_BRANCH: 'RE/fsk-store3-deployment',
+        FSK_EXPECTED_AMPLIFY_BRANCH: 'RE/fsk-store3-deployment',
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const calls = readFileSync(log, 'utf8');
+    expect(calls).toContain('pnpm exec ampx generate outputs --app-id dehbpoei8b7ch --branch RE/amplify-gen2-staging-implementation --out-dir apps/web/public');
+    expect(calls).not.toContain('pipeline-deploy');
   });
 
   it('serves generated/static files directly while rewriting only extensionless SPA routes', () => {
