@@ -33,7 +33,7 @@ export async function loadOwnerDailyReports<T>(options: {
 <script setup lang="ts">
 import { computeDailyReportTotals, staffMealTotalYen } from '@fsk/domain';
 import { ArrowDown, ArrowRight, EditPen } from '@element-plus/icons-vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onBeforeUnmount, shallowRef } from 'vue';
 import { useRouter } from 'vue-router';
 
@@ -72,6 +72,7 @@ const defaultDates = recentTokyoBusinessDateRange(90);
 const fromDate = shallowRef(defaultDates[0]!);
 const toDate = shallowRef(defaultDates.at(-1)!);
 const loading = shallowRef(false);
+const deletingReportKey = shallowRef<string | null>(null);
 const rows = shallowRef<ListedReport[]>([]);
 const expanded = shallowRef<string[]>([]);
 const registerFloatAmount = shallowRef(0);
@@ -146,6 +147,7 @@ function formatYen(value: number): string {
 }
 
 async function load(): Promise<void> {
+  if (deletingReportKey.value !== null) return;
   const generation = ++loadGeneration;
   const isCurrent = (): boolean =>
     !isUnmounted && generation === loadGeneration;
@@ -220,7 +222,42 @@ async function confirmNew(): Promise<void> {
 }
 
 async function edit(reportKey: string): Promise<void> {
+  if (deletingReportKey.value !== null) return;
   await router.push({ name: 'owner-report-edit', params: { reportKey } });
+}
+
+async function removeReport(report: ListedReport): Promise<void> {
+  if (loading.value || deletingReportKey.value !== null || isUnmounted) return;
+  deletingReportKey.value = report.reportKey;
+  try {
+    await ElMessageBox.confirm(
+      `${report.businessDate}・${report.shiftNameSnapshot}の日報を削除します。売上集計から除外され、元に戻せません。添付ファイルは保管されます。`,
+      '日報の削除',
+      {
+        type: 'warning',
+        confirmButtonText: '削除する',
+        cancelButtonText: 'キャンセル',
+        confirmButtonClass: 'el-button--danger',
+      },
+    );
+    if (isUnmounted) return;
+    await dailyReportsRepository.deleteByReportKey(report.reportKey);
+    if (isUnmounted) return;
+    rows.value = rows.value.filter((row) => row.reportKey !== report.reportKey);
+    expanded.value = expanded.value.filter((date) =>
+      rows.value.some((row) => row.businessDate === date),
+    );
+    ElMessage.success('日報を削除しました');
+  } catch (error: unknown) {
+    if (isUnmounted || error === 'cancel' || error === 'close') return;
+    ElMessage.error(
+      error instanceof DataRepositoryError && error.code === 'DATA_NETWORK_ERROR'
+        ? '削除結果を確認できません。日報一覧を読み込み直して確認してください'
+        : ownerDataErrorMessage(error, '日報の削除に失敗しました。一覧を読み込み直して確認してください'),
+    );
+  } finally {
+    deletingReportKey.value = null;
+  }
 }
 
 void load();
@@ -242,7 +279,7 @@ void load();
           </p>
           <p class="panel-hint">初期表示は最近90日です。最大366日まで読み込めます。</p>
         </div>
-        <el-button type="primary" class="head-action" @click="openNew">
+        <el-button type="primary" class="head-action" :disabled="deletingReportKey !== null" @click="openNew">
           <el-icon><EditPen /></el-icon>
           日報を追加
         </el-button>
@@ -285,7 +322,7 @@ void load();
             aria-label="終了営業日"
           />
         </div>
-        <el-button :loading="loading" @click="load">読み込む</el-button>
+        <el-button :loading="loading" :disabled="deletingReportKey !== null" @click="load">読み込む</el-button>
       </div>
 
       <div class="panel-body">
@@ -331,9 +368,16 @@ void load();
                 <el-table-column label="提出者" min-width="150">
                   <template #default="{ row }">{{ submittedBy(row) }}</template>
                 </el-table-column>
-                <el-table-column label="" width="100" align="right" fixed="right">
+                <el-table-column label="操作" width="150" align="right" fixed="right">
                   <template #default="{ row }">
-                    <el-button type="primary" link @click.stop="edit(row.reportKey)">編集</el-button>
+                    <el-button type="primary" link :disabled="deletingReportKey !== null" @click.stop="edit(row.reportKey)">編集</el-button>
+                    <el-button
+                      type="danger"
+                      link
+                      :loading="deletingReportKey === row.reportKey"
+                      :disabled="loading || deletingReportKey !== null"
+                      @click.stop="removeReport(row)"
+                    >削除</el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -376,14 +420,24 @@ void load();
                     <dd>{{ formatYen(rowStaffMealTotalYen(report)) }}</dd>
                   </div>
                 </dl>
+                <div class="mobile-report-actions">
                 <el-button
                   type="primary"
                   plain
                   class="mobile-edit-button"
+                  :disabled="deletingReportKey !== null"
                   @click.stop="edit(report.reportKey)"
                 >
                   編集
                 </el-button>
+                <el-button
+                  type="danger"
+                  plain
+                  :loading="deletingReportKey === report.reportKey"
+                  :disabled="loading || deletingReportKey !== null"
+                  @click.stop="removeReport(report)"
+                >削除</el-button>
+                </div>
               </article>
             </div>
             </section>
@@ -483,7 +537,8 @@ void load();
   .mobile-report-metrics div { min-width: 0; }
   .mobile-report-metrics dt { color: var(--fs-muted); font-size: 0.7rem; }
   .mobile-report-metrics dd { margin: 3px 0 0; overflow: hidden; font-size: 0.88rem; font-weight: 700; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-  .mobile-edit-button { width: 100%; min-height: 42px; }
+  .mobile-report-actions { display: flex; gap: 8px; }
+  .mobile-report-actions .el-button { flex: 1; min-width: 0; min-height: 42px; margin-left: 0; }
   :deep(.el-dialog) { width: calc(100% - 28px) !important; max-width: 480px; margin-top: max(8vh, calc(var(--fs-safe-area-top) + 16px)); }
   :deep(.el-dialog__footer) { display: flex; }
   :deep(.el-dialog__footer .el-button) { flex: 1; min-height: 42px; }

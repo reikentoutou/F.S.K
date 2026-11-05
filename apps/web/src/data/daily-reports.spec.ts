@@ -17,6 +17,7 @@ interface DailyReportsModule {
   ): {
     create(command: CreateDailyReportCommand): Promise<Record<string, unknown>>;
     listByBusinessDate(businessDate: string): Promise<Array<Record<string, unknown>>>;
+    deleteByReportKey(reportKey: string): Promise<Record<string, unknown>>;
     getByReportKey(reportKey: string): Promise<Record<string, unknown>>;
     updateByReportKey(
       reportKey: string,
@@ -76,6 +77,36 @@ function caughtError(value: unknown): RepositoryError {
 }
 
 describe('daily reports repository', () => {
+  it('deletes only the selected report by its composite key', async () => {
+    const remove = vi.fn().mockResolvedValue({ data: createdReport, errors: [] });
+    const repository = loadedModule().createDailyReportsRepository({
+      models: { DailyReport: { delete: remove } },
+    });
+
+    await expect(repository.deleteByReportKey(createdReport.reportKey)).resolves.toEqual(createdReport);
+    expect(remove).toHaveBeenCalledExactlyOnceWith({ reportKey: createdReport.reportKey });
+  });
+
+  it.each([
+    [{ data: createdReport, errors: [{ errorType: 'UnauthorizedException' }] }, 'DATA_UNAUTHORIZED'],
+    [{ data: createdReport, errors: [{ errorType: 'ResolverError' }] }, 'DATA_OPERATION_FAILED'],
+    [{ data: null, errors: [] }, 'DATA_NOT_FOUND'],
+  ])('rejects unsuccessful delete results', async (result, code) => {
+    const repository = loadedModule().createDailyReportsRepository({
+      models: { DailyReport: { delete: vi.fn().mockResolvedValue(result) } },
+    });
+    await expect(repository.deleteByReportKey(createdReport.reportKey)).rejects.toMatchObject({ code });
+  });
+
+  it('classifies a delete network failure without retrying', async () => {
+    const remove = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    const repository = loadedModule().createDailyReportsRepository({
+      models: { DailyReport: { delete: remove } },
+    });
+    await expect(repository.deleteByReportKey(createdReport.reportKey)).rejects.toMatchObject({ code: 'DATA_NETWORK_ERROR' });
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
   it('constructs the deterministic key and timestamp without sending authority or derived totals', async () => {
     const create = vi.fn().mockResolvedValue({ data: createdReport, errors: [] });
     const repository = loadedModule().createDailyReportsRepository(
