@@ -21,21 +21,26 @@ import * as dailyView from './AdminDailyView.vue';
 
 const repositoryMocks = vi.hoisted(() => ({
   listByBusinessDate: vi.fn(),
+  deleteByReportKey: vi.fn(),
   getSetting: vi.fn(),
   listShifts: vi.fn(),
 }));
 
 const elementPlusMocks = vi.hoisted(() => ({
   error: vi.fn(),
+  success: vi.fn(),
+  confirm: vi.fn(),
 }));
 
 vi.mock('element-plus', () => ({
-  ElMessage: { error: elementPlusMocks.error },
+  ElMessage: { error: elementPlusMocks.error, success: elementPlusMocks.success },
+  ElMessageBox: { confirm: elementPlusMocks.confirm },
 }));
 
 vi.mock('@/data/daily-reports', () => ({
   dailyReportsRepository: {
     listByBusinessDate: repositoryMocks.listByBusinessDate,
+    deleteByReportKey: repositoryMocks.deleteByReportKey,
   },
 }));
 
@@ -423,5 +428,85 @@ describe('OWNER daily repository orchestration', () => {
         '[role="region"][aria-label="横スクロール可能な日報明細"]',
       ),
     ).not.toBeNull();
+  });
+});
+
+
+describe('OWNER single report deletion', () => {
+  beforeEach(() => {
+    const businessDate = todayTokyo();
+    repositoryMocks.listByBusinessDate.mockImplementation(async (date: string) =>
+      date === businessDate ? ['day', 'night'].map((shiftId) => ({
+        reportKey: `${date}#${shiftId}`, businessDate: date, shiftId,
+        shiftNameSnapshot: shiftId === 'day' ? '日班' : '夜班',
+        previousImosBalanceYen: 10_000, currentImosBalanceYen: 14_000,
+        newageYen: 2_000, cashTotalYen: 15_000, expenseYen: 0,
+        staffMealCashYen: 100, staffMealAlipayYen: 50,
+      })) : [],
+    );
+    elementPlusMocks.confirm.mockResolvedValue('confirm');
+    repositoryMocks.deleteByReportKey.mockResolvedValue({ reportKey: `${businessDate}#day` });
+  });
+
+  function deleteButton(root: HTMLElement, selector = '.desktop-report-list'): HTMLButtonElement {
+    const button = [...root.querySelectorAll<HTMLButtonElement>(`${selector} button`)]
+      .find((element) => element.textContent?.trim() === '削除');
+    expect(button).toBeDefined();
+    return button!;
+  }
+
+  it.each(['.desktop-report-list', '.mobile-report-list'])('confirms and removes only the selected report in %s and recalculates totals', async (selector) => {
+    const root = await renderDailyView();
+    root.querySelector<HTMLButtonElement>('.mobile-day-button')?.click();
+    await nextTick();
+    deleteButton(root, selector).click();
+    await settleAsyncWork();
+
+    expect(elementPlusMocks.confirm).toHaveBeenCalledWith(
+      expect.stringContaining(`${todayTokyo()}・日班`), expect.any(String), expect.any(Object),
+    );
+    expect(repositoryMocks.deleteByReportKey).toHaveBeenCalledExactlyOnceWith(`${todayTokyo()}#day`);
+    expect(root.textContent).toContain('1 営業日 · 1 件');
+    expect(root.textContent).toContain('実際売上合計 11,900 円');
+    expect(root.textContent).toContain('スタッフ食事代合計 150 円');
+    expect(root.textContent).toContain('夜班');
+    expect(root.textContent).not.toContain('日班');
+  });
+
+  it('cancels without deleting or showing an error', async () => {
+    elementPlusMocks.confirm.mockRejectedValue('cancel');
+    const root = await renderDailyView();
+    deleteButton(root).click();
+    await settleAsyncWork();
+    expect(repositoryMocks.deleteByReportKey).not.toHaveBeenCalled();
+    expect(elementPlusMocks.error).not.toHaveBeenCalled();
+    expect(root.textContent).toContain('1 営業日 · 2 件');
+  });
+
+  it('keeps the row and totals when deletion fails', async () => {
+    repositoryMocks.deleteByReportKey.mockRejectedValue(new DataRepositoryError('DATA_UNAUTHORIZED'));
+    const root = await renderDailyView();
+    deleteButton(root).click();
+    await settleAsyncWork();
+    expect(root.textContent).toContain('1 営業日 · 2 件');
+    expect(elementPlusMocks.success).not.toHaveBeenCalled();
+    expect(elementPlusMocks.error).toHaveBeenCalledWith(expect.stringContaining('権限'));
+  });
+
+  it('blocks repeated clicks and list reloads while deletion is pending', async () => {
+    const pending = deferred<{ reportKey: string }>();
+    repositoryMocks.deleteByReportKey.mockReturnValue(pending.promise);
+    const root = await renderDailyView();
+    const button = deleteButton(root);
+    button.click();
+    button.click();
+    await settleAsyncWork();
+    loadButton(root).click();
+    await settleAsyncWork();
+    expect(elementPlusMocks.confirm).toHaveBeenCalledTimes(1);
+    expect(repositoryMocks.deleteByReportKey).toHaveBeenCalledTimes(1);
+    expect(repositoryMocks.listByBusinessDate).toHaveBeenCalledTimes(90);
+    pending.resolve({ reportKey: `${todayTokyo()}#day` });
+    await settleAsyncWork();
   });
 });

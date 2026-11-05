@@ -112,6 +112,12 @@ export function createDailyReportsRepository(
         'NOT_FOUND',
       );
     },
+    async deleteByReportKey(reportKey: string) {
+      return ownerResult(
+        () => resolveClient().models.DailyReport.delete({ reportKey }),
+        'NOT_FOUND',
+      );
+    },
     async updateByReportKey(
       reportKey: string,
       command: UpdateDailyReportCommand,
