@@ -79,13 +79,6 @@ async function submitNewPassword(): Promise<void> {
       <h1 class="title">
         {{ auth.newPasswordRequired ? 'パスワード更新' : 'ログイン' }}
       </h1>
-      <p class="lede">
-        {{
-          auth.newPasswordRequired
-            ? '初回ログイン用の新しいパスワードを設定してください。'
-            : '業務用アカウントでサインインしてください。'
-        }}
-      </p>
       <el-card class="card" shadow="never">
         <el-form
           v-if="!auth.newPasswordRequired"
@@ -169,20 +162,12 @@ async function submitNewPassword(): Promise<void> {
 }
 
 .title {
-  margin: 0 0 8px;
+  margin: 0 0 18px;
   font-size: 1.65rem;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--fs-ink);
   line-height: 1.25;
-}
-
-.lede {
-  margin: 0 0 18px;
-  font-size: 0.9rem;
-  color: var(--fs-muted);
-  line-height: 1.5;
-  max-width: 36ch;
 }
 
 .card {

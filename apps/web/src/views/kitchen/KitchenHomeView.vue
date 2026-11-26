@@ -203,7 +203,6 @@ async function logout(): Promise<void> {
           入力情報を読み込めませんでした。通信を確認して再読み込みしてください。
         </p>
         <template v-else-if="context">
-          <p class="guide">入力するシフトを選択してください。</p>
           <div class="shift-list">
             <button
               v-for="shift in context.shifts"
@@ -281,7 +280,6 @@ async function logout(): Promise<void> {
 }
 
 .user,
-.guide,
 .empty {
   color: var(--fs-muted);
 }
@@ -306,11 +304,8 @@ async function logout(): Promise<void> {
   box-shadow: var(--fs-shadow-soft);
 }
 
-.guide {
-  margin: 20px 0 12px;
-}
-
 .shift-list {
+  margin-top: 20px;
   display: grid;
   gap: 12px;
 }

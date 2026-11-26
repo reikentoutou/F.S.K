@@ -238,7 +238,6 @@ watch([period, anchorDate], () => void load(), { immediate: true });
       <header class="panel-head">
         <div>
           <h2 id="analytics-heading" class="panel-title">集計・エクスポート</h2>
-          <p class="panel-hint">東京の業務日単位で、最大366日まで集計します。</p>
         </div>
       </header>
 
@@ -410,7 +409,6 @@ watch([period, anchorDate], () => void load(), { immediate: true });
   margin: 0;
 }
 
-.panel-hint,
 .range-sub {
   color: var(--fs-muted, var(--el-text-color-secondary));
   font-size: 0.82rem;

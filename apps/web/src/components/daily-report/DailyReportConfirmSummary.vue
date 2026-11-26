@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import DailyReportSection from './DailyReportSection.vue';
 
-const props = defineProps<{
-  variant?: 'admin' | 'kitchen';
+defineProps<{
   preview: {
     imosSalesYen: number;
     totalSalesYen: number;
@@ -33,15 +32,7 @@ function yen(n: number): string {
 <template>
   <div class="confirm-summary fs-anim-fade-lift">
     <header class="intro">
-      <p class="eyebrow">提出前の確認</p>
       <h2 class="title">入力内容の確認</h2>
-      <p class="lede">
-        {{
-          props.variant === 'kitchen'
-            ? '入力内容を確認してください。提出後の修正はユーザーへ依頼してください。'
-            : '問題なければ下部の「提出する」で確定してください。'
-        }}
-      </p>
     </header>
 
     <DailyReportSection title="基本">
@@ -135,28 +126,12 @@ function yen(n: number): string {
   padding: 4px 0 8px;
 }
 
-.eyebrow {
-  margin: 0 0 6px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: var(--fs-muted, var(--el-text-color-secondary));
-}
-
 .title {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 1.35rem;
   font-weight: 700;
   color: var(--fs-ink, var(--el-text-color-primary));
   line-height: 1.25;
-}
-
-.lede {
-  margin: 0;
-  font-size: 0.88rem;
-  line-height: 1.5;
-  color: var(--fs-muted, var(--el-text-color-secondary));
 }
 
 .kv-row {

@@ -283,7 +283,6 @@ void load();
               · スタッフ食事代合計 <span class="meta-strong">{{ formatYen(totalStaffMealAll) }}</span>
             </template>
           </p>
-          <p class="panel-hint">初期表示は最近90日です。最大366日まで読み込めます。</p>
         </div>
         <el-button type="primary" class="head-action" :disabled="deletingReportKey !== null" @click="openNew">
           <el-icon><EditPen /></el-icon>
@@ -454,7 +453,6 @@ void load();
     </section>
 
     <el-dialog v-model="dialogOpen" title="日報を追加" width="480px" destroy-on-close>
-      <p class="dialog-note">現在ログイン中のユーザーを作成者として保存します。</p>
       <el-form label-position="top" require-asterisk-position="right">
         <el-form-item label="業務日" required>
           <el-date-picker
@@ -483,7 +481,7 @@ void load();
 .panel { padding: 18px 20px 16px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); box-shadow: var(--fs-shadow-soft); }
 .panel-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px 20px; padding-bottom: 14px; border-bottom: 1px solid var(--fs-border); }
 .panel-title { margin: 0 0 6px; font-size: 1.1rem; color: var(--fs-ink); }
-.panel-meta, .panel-hint, .dialog-note { margin: 0 0 6px; color: var(--fs-muted); font-size: 0.86rem; }
+.panel-meta { margin: 0 0 6px; color: var(--fs-muted); font-size: 0.86rem; }
 .meta-strong { font-weight: 700; color: var(--fs-ink); font-variant-numeric: tabular-nums; }
 .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 6px; }
 .filter-label { display: none; }

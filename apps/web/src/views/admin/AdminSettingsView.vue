@@ -239,7 +239,6 @@ onMounted(load);
 
     <section class="settings-section" aria-labelledby="setting-shifts">
       <h3 id="setting-shifts">シフト</h3>
-      <p class="section-hint">無効化しても、過去の日報に保存されたシフト名は削除されません。</p>
       <el-table :data="shifts" size="small" class="settings-table">
         <el-table-column prop="name" label="名称" min-width="160" />
         <el-table-column prop="sortOrder" label="表示順" width="90" />
@@ -282,7 +281,6 @@ onMounted(load);
 
     <section class="settings-section" aria-labelledby="setting-persons">
       <h3 id="setting-persons">責任者</h3>
-      <p class="section-hint">無効化しても、過去の日報に保存された責任者名は削除されません。</p>
       <el-table :data="persons" size="small" class="settings-table">
         <el-table-column prop="name" label="名前" min-width="160" />
         <el-table-column label="状態" width="90">
@@ -327,7 +325,6 @@ onMounted(load);
 .settings-page { display: grid; gap: 24px; }
 .settings-section { padding: 18px 20px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
 .settings-section h3 { margin: 0 0 12px; }
-.section-hint { margin: 0 0 10px; font-size: 13px; color: var(--el-text-color-secondary); line-height: 1.45; }
 .settings-table { max-width: 680px; margin-bottom: 12px; }
 .add-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .name-input { width: 240px; }

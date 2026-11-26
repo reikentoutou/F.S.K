@@ -21,7 +21,6 @@ function goHome() {
 <template>
   <div class="wrap">
     <h1 class="title">ページが見つかりません</h1>
-    <p class="lead">URL をご確認ください。</p>
     <el-button type="primary" @click="goHome">トップへ</el-button>
   </div>
 </template>
@@ -37,10 +36,5 @@ function goHome() {
   font-weight: 700;
   margin: 0 0 12px;
   color: var(--fs-ink, var(--el-text-color-primary));
-}
-.lead {
-  line-height: 1.55;
-  color: var(--fs-muted, var(--el-text-color-secondary));
-  margin: 0 0 20px;
 }
 </style>

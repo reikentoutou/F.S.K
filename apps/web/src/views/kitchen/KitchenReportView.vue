@@ -440,9 +440,6 @@ async function handleHeaderBackClick(): Promise<void> {
           <dd>{{ submittedTotals?.totalSalesYen.toLocaleString('ja-JP') }} 円</dd>
         </div>
         <div>
-          <dt>reportKey</dt><dd class="mono">{{ submittedReport.reportKey }}</dd>
-        </div>
-        <div>
           <dt>提出時刻</dt><dd class="mono">{{ submittedReport.submittedAt }}</dd>
         </div>
       </dl>
@@ -458,7 +455,6 @@ async function handleHeaderBackClick(): Promise<void> {
         aria-label="提出内容の確認"
       >
         <DailyReportConfirmSummary
-          variant="kitchen"
           :preview="preview"
           :shift-name="shift.name"
           :person-name="personName"
@@ -504,8 +500,6 @@ async function handleHeaderBackClick(): Promise<void> {
           :persons="persons"
           :register-float-amount="registerFloatAmount"
           :preview="preview"
-          variant="kitchen"
-          show-kitchen-time-hint
           @confirm="goToConfirm"
         />
         <div class="attachment-field">

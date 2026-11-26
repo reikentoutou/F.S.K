@@ -191,7 +191,6 @@ import {
   validateDailyReportGoToConfirm,
   validateDailyReportSubmit,
 } from '@/utils/daily-report-form-validate';
-import { useAuthStore } from '@/stores/auth';
 
 type LoadedReport = Awaited<
   ReturnType<typeof dailyReportsRepository.getByReportKey>
@@ -233,7 +232,6 @@ assertStoreId(reportStore);
 const ownerMasterDataRepository = createOwnerMasterDataRepository(undefined, reportStore);
 const dailyReportsRepository = createDailyReportsRepository(undefined, { storeId: reportStore });
 const router = useRouter();
-const auth = useAuthStore();
 const loading = shallowRef(true);
 const saving = shallowRef(false);
 const pageReady = shallowRef(false);
@@ -533,9 +531,6 @@ async function submit(): Promise<void> {
       </el-button>
       <div>
         <h2>日報（ユーザー）— {{ businessDate }}</h2>
-        <p v-if="isNew" class="audit-note">
-          ユーザーによる追加：{{ auth.user?.username ?? 'OWNER' }} が作成します
-        </p>
       </div>
     </header>
 
@@ -589,7 +584,6 @@ async function submit(): Promise<void> {
         :persons="activePersons"
         :register-float-amount="registerFloatAmount"
         :preview="preview"
-        variant="admin"
         @confirm="goToConfirm"
       />
     </el-form>
@@ -600,7 +594,6 @@ async function submit(): Promise<void> {
 .page { --el-color-primary: var(--fs-accent); --el-color-primary-rgb: 22, 95, 88; width: calc(100% - 36px); max-width: 900px; min-height: var(--fs-vh-100); margin: 0 auto; padding: 20px 0 32px; }
 .bar { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
 .bar h2 { margin: 0; }
-.audit-note { margin: 6px 0 0; color: var(--fs-muted); font-size: 0.82rem; }
 .load-error { padding: 16px; color: var(--el-color-danger); border: 1px solid var(--el-color-danger-light-5); border-radius: var(--fs-radius-sm); }
 .confirm-actions { margin-top: 20px; padding-top: 8px; }
 .submit-btn { width: 100%; max-width: 360px; font-weight: 700; }
@@ -611,7 +604,6 @@ async function submit(): Promise<void> {
   .bar > .el-button { min-width: 52px; min-height: 40px; padding: 0; }
   .bar > div { min-width: 0; }
   .bar h2 { font-size: 1.08rem; line-height: 1.4; word-break: break-word; }
-  .audit-note { line-height: 1.45; }
   .submit-btn { max-width: none; min-height: 48px; }
 }
 </style>

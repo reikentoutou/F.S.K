@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { QuestionFilled } from '@element-plus/icons-vue';
 import { MAX_DAILY_REPORT_AMOUNT_YEN } from '@/utils/daily-report-form-validate';
 import DailyReportSection from './DailyReportSection.vue';
 import type { DailyReportFormFieldsModel } from './daily-report-form.types';
@@ -16,9 +15,6 @@ defineProps<{
   };
 }>();
 
-const cashTooltip =
-  'お手元残高から底銭を引いた金額を、現金入金金額として計算します。';
-
 function yen(n: number): string {
   return `${n.toLocaleString('ja-JP')} 円`;
 }
@@ -31,17 +27,14 @@ function yen(n: number): string {
         <div class="money-cell">
           <span class="sub-label">前期Imos残高</span>
           <el-input-number v-model="form.previousImosBalanceYen" :min="0" controls-position="right" />
-          <p class="field-guide">前回シフト終了時点のImos残高を入力します。</p>
         </div>
         <div class="money-cell">
           <span class="sub-label">現在Imos残高</span>
           <el-input-number v-model="form.currentImosBalanceYen" :min="0" controls-position="right" />
-          <p class="field-guide">このシフト終了時点のImos残高を入力します。</p>
         </div>
         <div class="result-cell">
           <span class="sub-label">Imos売上合計</span>
           <strong>{{ yen(preview.imosSalesYen) }}</strong>
-          <p class="field-guide result-guide">現在残高から前期残高を引いて自動計算されます。</p>
         </div>
       </div>
     </el-form-item>
@@ -49,24 +42,12 @@ function yen(n: number): string {
     <el-form-item label="Newage売上" class="item-plain">
       <div class="field-with-guide">
         <el-input-number v-model="form.newageYen" :min="0" controls-position="right" />
-        <p class="field-guide">Newage側で確認したこのシフトの売上金額を入力します。</p>
       </div>
     </el-form-item>
 
-    <el-form-item class="item-plain">
-      <template #label>
-        <span class="label-with-tip">
-          お手元残高
-          <el-tooltip :content="cashTooltip" placement="top" :show-after="300">
-            <span class="tip-wrap" tabindex="0" role="button" aria-label="お手元残高の説明">
-              <el-icon :size="16"><QuestionFilled /></el-icon>
-            </span>
-          </el-tooltip>
-        </span>
-      </template>
+    <el-form-item label="お手元残高" class="item-plain">
       <div class="field-with-guide">
         <el-input-number v-model="form.cashInDrawerYen" :min="0" controls-position="right" />
-        <p class="field-guide">手元に残っている現金総額を入力します。底銭は下で自動控除されます。</p>
       </div>
       <p class="cash-meta">
         現金入金金額 <strong>{{ yen(preview.cashDepositYen) }}</strong>（底銭
@@ -82,11 +63,10 @@ function yen(n: number): string {
           <div class="receipt-box">
             <span class="receipt-label">領収書確認</span>
             <el-checkbox v-model="form.expenseReceiptStored" class="receipt-check">
-              領収書の受け取りをして、収納しました
+              受取・保管済み
             </el-checkbox>
           </div>
         </div>
-        <p class="field-guide expense-guide">支出がある場合は金額と理由を両方入力してください。</p>
       </div>
     </el-form-item>
 
@@ -120,9 +100,6 @@ function yen(n: number): string {
             <strong>{{ yen(preview.staffMealTotalYen) }}</strong>
           </div>
         </div>
-        <p class="field-guide staff-meal-guide">
-          現金分は現金入金金額に含まれますが、実際売上から除外されます。アリペイ分は個別に保存され、実際売上には含まれません。
-        </p>
       </div>
     </el-form-item>
 
@@ -131,19 +108,14 @@ function yen(n: number): string {
         <div class="result-cell">
           <span class="sub-label">実際売上</span>
           <strong>{{ yen(preview.totalSalesYen) }}</strong>
-          <p class="field-guide result-guide">
-            Newage売上 + 現金入金金額 − スタッフ食事代（現金）です。
-          </p>
         </div>
         <div class="result-cell">
           <span class="sub-label">現金入金金額</span>
           <strong>{{ yen(preview.cashDepositYen) }}</strong>
-          <p class="field-guide result-guide">お手元残高から底銭を引いた金額です。</p>
         </div>
         <div class="result-cell">
           <span class="sub-label">偏差</span>
           <strong>{{ yen(preview.deviationYen) }}</strong>
-          <p class="field-guide result-guide">現金入金金額と実際売上・支出の差額です。</p>
         </div>
       </div>
     </el-form-item>
@@ -177,14 +149,6 @@ function yen(n: number): string {
   width: 100%;
 }
 
-.field-guide {
-  margin: 0;
-  max-width: 34ch;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--fs-muted, var(--el-text-color-secondary));
-}
-
 .money-row,
 .totals-grid {
   display: grid;
@@ -215,26 +179,9 @@ function yen(n: number): string {
   color: var(--fs-ink, var(--el-text-color-primary));
 }
 
-.result-guide {
-  max-width: none;
-  font-size: 12px;
-}
-
 .sub-label {
   font-size: 12px;
   font-weight: 600;
-  color: var(--fs-muted, var(--el-text-color-secondary));
-}
-
-.label-with-tip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.tip-wrap {
-  display: inline-flex;
-  cursor: help;
   color: var(--fs-muted, var(--el-text-color-secondary));
 }
 
@@ -257,10 +204,6 @@ function yen(n: number): string {
   align-items: start;
 }
 
-.expense-guide {
-  margin-top: 8px;
-}
-
 .staff-meal-wrap {
   width: 100%;
 }
@@ -270,11 +213,6 @@ function yen(n: number): string {
   grid-template-columns: repeat(3, minmax(160px, 200px));
   gap: 14px 20px;
   width: 100%;
-}
-
-.staff-meal-guide {
-  max-width: 72ch;
-  margin-top: 8px;
 }
 
 .receipt-box {
