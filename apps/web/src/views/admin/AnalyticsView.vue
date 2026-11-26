@@ -126,6 +126,8 @@ import {
 } from 'vue';
 
 import { storeLabel } from '@fsk/domain';
+import { ArrowRight, Download, Refresh } from '@element-plus/icons-vue';
+import ReportAmountGrid from '@/components/daily-report/ReportAmountGrid.vue';
 import { actualSalesBarData } from '@/analytics/report-analytics';
 import { useEchartsBarChart } from '@/composables/useEchartsBarChart';
 import { createDailyReportsRepository } from '@/data/daily-reports';
@@ -169,7 +171,7 @@ const dayRows = computed(() =>
 function formatJaDate(value: string): string {
   const [year, month, day] = value.split('-').map(Number);
   return year && month && day
-    ? `${year}年${month}月${day}日`
+    ? `${year}/${month}/${day}`
     : value;
 }
 
@@ -236,15 +238,20 @@ watch([period, anchorDate], () => void load(), { immediate: true });
   <div v-loading="loading" class="page">
     <section class="panel" aria-labelledby="analytics-heading">
       <header class="panel-head">
-        <div>
-          <h2 id="analytics-heading" class="panel-title">集計・エクスポート</h2>
-        </div>
+        <h2 id="analytics-heading" class="panel-title">集計・エクスポート</h2>
+        <el-button
+          class="export-action"
+          :disabled="!analytics || !loadedSelection || loading"
+          @click="downloadCsv"
+        >
+          <el-icon><Download /></el-icon>CSVを出力
+        </el-button>
       </header>
 
-      <el-form inline class="filters">
+      <el-form class="filters" label-position="top">
         <el-form-item label="期間">
-          <el-select v-model="period" style="width: 150px" aria-label="集計期間">
-            <el-option label="単日（業務日）" value="day" />
+          <el-select v-model="period" aria-label="集計期間">
+            <el-option label="単日" value="day" />
             <el-option label="週" value="week" />
             <el-option label="月" value="month" />
             <el-option label="四半期" value="quarter" />
@@ -259,138 +266,61 @@ watch([period, anchorDate], () => void load(), { immediate: true });
             aria-label="集計基準日"
           />
         </el-form-item>
-        <el-form-item>
-          <el-button :loading="loading" @click="load">再集計</el-button>
-          <el-button
-            type="primary"
-            :disabled="!analytics || !loadedSelection || loading"
-            @click="downloadCsv"
-          >
-            CSVを出力
-          </el-button>
-        </el-form-item>
+        <el-button class="refresh-action" :loading="loading" aria-label="再集計" @click="load">
+          <el-icon v-if="!loading"><Refresh /></el-icon>
+        </el-button>
       </el-form>
 
       <div v-if="analytics && range" class="panel-body">
-        <h3 class="grand-headline">{{ headline }}</h3>
-        <p class="range-sub">
-          集計範囲: {{ range.start }} — {{ range.end }} ／ 対象
-          {{ analytics.totals.count }} 件
-        </p>
-
-        <el-descriptions :column="1" border size="small" class="totals">
-          <el-descriptions-item label="Imos売上合計">
-            {{ formatYen(analytics.totals.imosSalesYen) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="現金入金金額">
-            {{ formatYen(analytics.totals.cashDepositYen) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="支出">
-            {{ formatYen(analytics.totals.expenseYen) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="スタッフ食事代（現金）">
-            {{ formatYen(analytics.totals.staffMealCashYen) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="スタッフ食事代（アリペイ）">
-            {{ formatYen(analytics.totals.staffMealAlipayYen) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="スタッフ食事代合計">
-            {{ formatYen(analytics.totals.staffMealTotalYen) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="実際売上">
-            {{ formatYen(analytics.totals.totalSalesYen) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="偏差">
-            {{ formatYen(analytics.totals.deviationYen) }}
-          </el-descriptions-item>
-        </el-descriptions>
+        <section class="totals" aria-label="期間合計">
+          <header class="totals-head">
+            <h3 class="grand-headline">{{ headline }}</h3>
+            <span>{{ analytics.totals.count }} 件</span>
+          </header>
+          <ReportAmountGrid :amounts="analytics.totals" />
+        </section>
 
         <template v-if="period === 'day'">
           <h3 class="section-title">シフト別内訳</h3>
           <el-empty v-if="dayRows.length === 0" description="この業務日の日報はまだありません" />
-          <div v-for="row in dayRows" :key="row.reportKey" class="day-shift-block">
-            <el-descriptions
-              :title="`${storeLabel(row.storeId)} ${row.shiftNameSnapshot}`.trim()"
-              :column="1"
-              border
-              size="small"
-            >
-              <el-descriptions-item label="責任者">
-                {{ row.responsiblePersonSnapshot }}
-              </el-descriptions-item>
-              <el-descriptions-item label="時間帯">
-                {{ row.timeRangeLabelSnapshot }}
-              </el-descriptions-item>
-              <el-descriptions-item label="Imos売上合計">
-                {{ formatYen(row.imosSalesYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="Newage売上">
-                {{ formatYen(row.newageYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="現金入金金額">
-                {{ formatYen(row.cashDepositYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="支出">
-                {{ formatYen(row.expenseYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="支出理由">
-                {{ row.expenseReason || '—' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="スタッフ食事代（現金）">
-                {{ formatYen(row.staffMealCashYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="スタッフ食事代（アリペイ）">
-                {{ formatYen(row.staffMealAlipayYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="スタッフ食事代合計">
-                {{ formatYen(row.staffMealTotalYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="実際売上">
-                {{ formatYen(row.totalSalesYen) }}
-              </el-descriptions-item>
-              <el-descriptions-item label="偏差">
-                {{ formatYen(row.deviationYen) }}
-              </el-descriptions-item>
-            </el-descriptions>
+          <div class="shift-grid">
+            <details v-for="row in dayRows" :key="row.reportKey" class="shift-details">
+              <summary>
+                <span class="shift-heading">
+                  <strong>{{ storeLabel(row.storeId) }} {{ row.shiftNameSnapshot }}</strong>
+                  <span>{{ row.responsiblePersonSnapshot }} · {{ row.timeRangeLabelSnapshot }}</span>
+                </span>
+                <strong class="shift-total">{{ formatYen(row.totalSalesYen) }}</strong>
+                <el-icon class="disclosure-icon"><ArrowRight /></el-icon>
+              </summary>
+              <ReportAmountGrid :amounts="row" />
+              <dl class="report-extras">
+                <div><dt>Newage売上</dt><dd>{{ formatYen(row.newageYen) }}</dd></div>
+                <div><dt>支出理由</dt><dd>{{ row.expenseReason || '—' }}</dd></div>
+              </dl>
+            </details>
           </div>
         </template>
 
-        <div ref="chartEl" class="chart" aria-label="シフト別実際売上グラフ" />
+        <section class="chart-panel" aria-labelledby="chart-heading">
+          <h3 id="chart-heading" class="section-title">シフト別実際売上</h3>
+          <div ref="chartEl" class="chart" :style="{ height: `${Math.max(160, analytics.byShift.length * 36 + 48)}px` }" aria-label="シフト別実際売上グラフ" />
+        </section>
 
         <h3 class="section-title">シフト別合算</h3>
         <el-empty v-if="analytics.byShift.length === 0" description="この期間の日報はまだありません" />
-        <div
-          v-for="shift in analytics.byShift"
-          :key="shift.shiftId"
-          class="shift-summary"
-        >
-          <el-descriptions :title="shift.shiftName" :column="1" border size="small">
-            <el-descriptions-item label="件数">{{ shift.count }}</el-descriptions-item>
-            <el-descriptions-item label="Imos売上合計">
-              {{ formatYen(shift.imosSalesYen) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="実際売上">
-              {{ formatYen(shift.totalSalesYen) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="現金入金金額">
-              {{ formatYen(shift.cashDepositYen) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="支出">
-              {{ formatYen(shift.expenseYen) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="スタッフ食事代（現金）">
-              {{ formatYen(shift.staffMealCashYen) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="スタッフ食事代（アリペイ）">
-              {{ formatYen(shift.staffMealAlipayYen) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="スタッフ食事代合計">
-              {{ formatYen(shift.staffMealTotalYen) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="偏差">
-              {{ formatYen(shift.deviationYen) }}
-            </el-descriptions-item>
-          </el-descriptions>
+        <div class="shift-grid">
+          <details v-for="shift in analytics.byShift" :key="shift.shiftId" class="shift-details">
+            <summary>
+              <span class="shift-heading">
+                <strong>{{ shift.shiftName }}</strong>
+                <span>{{ shift.count }} 件</span>
+              </span>
+              <strong class="shift-total">{{ formatYen(shift.totalSalesYen) }}</strong>
+              <el-icon class="disclosure-icon"><ArrowRight /></el-icon>
+            </summary>
+            <ReportAmountGrid :amounts="shift" />
+          </details>
         </div>
       </div>
     </section>
@@ -398,69 +328,60 @@ watch([period, anchorDate], () => void load(), { immediate: true });
 </template>
 
 <style scoped>
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.panel-title,
-.grand-headline {
-  margin: 0;
-}
-
-.range-sub {
-  color: var(--fs-muted, var(--el-text-color-secondary));
-  font-size: 0.82rem;
-}
-
-.filters {
-  margin-top: 18px;
-}
-
-.totals,
-.day-shift-block,
-.shift-summary {
-  max-width: 720px;
-  margin-bottom: 16px;
-}
-
-.section-title {
-  margin: 24px 0 12px;
-  font-size: 1rem;
-}
-
-.chart {
-  width: 100%;
-  height: 360px;
-  margin-top: 24px;
-}
-
+.page, .panel, .panel-body { min-width: 0; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.panel-title { margin: 0; font-size: 18px; }
+.export-action { flex-shrink: 0; min-height: 40px; }
+.export-action .el-icon { margin-right: 5px; }
+.filters { display: grid; grid-template-columns: 160px 220px 44px; align-items: end; gap: 10px; margin-bottom: 12px; }
+.filters :deep(.el-form-item) { min-width: 0; margin: 0; }
+.filters :deep(.el-form-item__label) { margin-bottom: 4px; padding: 0; line-height: 18px; font-size: 12px; color: var(--fs-muted); }
+.filters :deep(.el-date-editor) { height: 44px; }
+.filters :deep(.el-date-editor), .filters :deep(.el-select) { width: 100%; min-width: 0; }
+.filters :deep(.el-input__wrapper), .filters :deep(.el-select__wrapper) { min-height: 44px; }
+.refresh-action { width: 44px; height: 44px; margin: 0; padding: 0; font-size: 18px; }
+.totals, .chart-panel, .shift-details { overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
+.totals-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 12px; border-bottom: 1px solid var(--fs-border); }
+.grand-headline { margin: 0; font-size: 15px; font-weight: 600; }
+.totals-head > span { flex-shrink: 0; color: var(--fs-muted); font-size: 12px; }
+.totals :deep(.amount-grid) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.totals :deep(.amount-grid > div) { border-right: 1px solid var(--fs-border); }
+.totals :deep(.amount-grid > div:nth-child(-n + 4)) { border-top: 0; }
+.totals :deep(.amount-grid > div:nth-child(4n)) { border-right: 0; }
+.section-title { margin: 18px 0 8px; font-size: 14px; font-weight: 600; }
+.chart-panel { margin-top: 12px; }
+.chart-panel .section-title { margin: 12px 12px 0; }
+.chart { width: 100%;  }
+.shift-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 8px; }
+.shift-details summary { display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.shift-details summary::-webkit-details-marker { display: none; }
+.shift-details summary:focus-visible { outline: 2px solid var(--fs-accent); outline-offset: -3px; border-radius: var(--fs-radius-md); }
+.shift-heading { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.shift-heading strong { font-size: 14px; overflow-wrap: anywhere; }
+.shift-heading > span { color: var(--fs-muted); font-size: 12px; overflow-wrap: anywhere; }
+.shift-total { font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.disclosure-icon { flex-shrink: 0; color: var(--fs-muted); }
+.shift-details[open] .disclosure-icon { transform: rotate(90deg); }
+.shift-details[open] summary { border-bottom: 1px solid var(--fs-border); }
+.report-extras { margin: 0; padding: 0 12px 10px; }
+.report-extras > div { display: flex; justify-content: space-between; gap: 12px; padding-top: 8px; border-top: 1px solid var(--fs-border); font-size: 12px; }
+.report-extras > div + div { margin-top: 8px; }
+.report-extras dt { flex-shrink: 0; color: var(--fs-muted); }
+.report-extras dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 @media (max-width: 720px) {
-  .page, .panel, .panel-body { min-width: 0; }
-  .panel-head { display: block; }
-  .panel-title { font-size: 1.2rem; }
-  .filters { display: block; margin-top: 14px; }
-  .filters :deep(.el-form-item) { display: block; width: 100%; margin: 0 0 12px; }
-  .filters :deep(.el-form-item__label) { display: block; padding: 0 0 5px; }
-  .filters :deep(.el-form-item__content),
-  .filters :deep(.el-select),
-  .filters :deep(.el-date-editor) { width: 100% !important; }
-  .filters :deep(.el-form-item:last-child .el-form-item__content) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .filters :deep(.el-form-item:last-child .el-button) { min-height: 44px; margin: 0; }
-  .grand-headline { font-size: 1.05rem; }
-  .range-sub { line-height: 1.5; }
-  .totals, .day-shift-block, .shift-summary { width: 100%; max-width: none; }
-  .totals :deep(.el-descriptions__label),
-  .day-shift-block :deep(.el-descriptions__label),
-  .shift-summary :deep(.el-descriptions__label) { width: 48%; min-width: 0; word-break: break-word; }
-  .totals :deep(.el-descriptions__content),
-  .day-shift-block :deep(.el-descriptions__content),
-  .shift-summary :deep(.el-descriptions__content) { min-width: 0; word-break: break-word; }
-  .chart { height: 260px; margin-top: 18px; }
-}
-
-@media (max-width: 390px) {
-  .filters :deep(.el-form-item:last-child .el-form-item__content) { grid-template-columns: 1fr; }
+  .panel-title { font-size: 16px; }
+  .export-action { min-height: 44px; padding: 0 10px; font-size: 12px; }
+  .filters { grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) 44px; gap: 8px; }
+  .filters :deep(.el-input__inner), .filters :deep(.el-select__selected-item) { font-size: 14px; }
+  .filters :deep(.el-input__wrapper) { padding: 1px 8px; }
+  .filters :deep(.el-input__prefix) { display: none; }
+  .totals-head { padding: 10px; }
+  .grand-headline { font-size: 13px; }
+  .totals :deep(.amount-grid) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .totals :deep(.amount-grid > div:nth-child(n + 3)) { border-top: 1px solid var(--fs-border); }
+  .totals :deep(.amount-grid > div:nth-child(even)) { border-right: 0; }
+  .shift-grid { grid-template-columns: minmax(0, 1fr); }
+  .shift-details summary { min-height: 60px; padding: 9px 10px; gap: 8px; }
+  .shift-total { font-size: 13px; }
 }
 </style>

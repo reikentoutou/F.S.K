@@ -134,7 +134,8 @@ function submittedBy(report: ListedReport): string {
     owner?: string | null;
     legacySubmittedByUsername?: string | null;
   };
-  return audit.legacySubmittedByUsername || audit.owner || 'ユーザーによる追加';
+  const identity = audit.legacySubmittedByUsername || audit.owner;
+  return identity?.split('::').at(-1) || 'ユーザーによる追加';
 }
 
 function toggleDate(date: string): void {
@@ -278,10 +279,6 @@ void load();
           <p class="panel-meta">
             <span class="meta-strong">{{ totalDays }}</span> 営業日 ·
             <span class="meta-strong">{{ totalReports }}</span> 件
-            <template v-if="totalReports > 0">
-              · 実際売上合計 <span class="meta-strong">{{ formatYen(totalSalesAll) }}</span>
-              · スタッフ食事代合計 <span class="meta-strong">{{ formatYen(totalStaffMealAll) }}</span>
-            </template>
           </p>
         </div>
         <el-button type="primary" class="head-action" :disabled="deletingReportKey !== null" @click="openNew">
@@ -291,15 +288,6 @@ void load();
       </header>
 
       <div class="summary-grid" aria-label="全日報サマリー">
-        <h2 class="summary-title">全日報サマリー</h2>
-        <div class="summary-item">
-          <span>営業日</span>
-          <strong>{{ totalDays }}</strong>
-        </div>
-        <div class="summary-item">
-          <span>日報数</span>
-          <strong>{{ totalReports }}</strong>
-        </div>
         <div class="summary-item summary-item-wide">
           <span>実際売上合計</span>
           <strong>{{ formatYen(totalSalesAll) }}</strong>
@@ -417,7 +405,6 @@ void load();
               <article v-for="report in list" :key="report.reportKey" class="mobile-report-card">
                 <div class="mobile-report-head">
                   <strong>{{ storeLabel(report.storeId) }} · {{ report.shiftNameSnapshot }}</strong>
-                  <span>{{ submittedBy(report) }}</span>
                 </div>
                 <dl class="mobile-report-metrics">
                   <div>
@@ -429,7 +416,9 @@ void load();
                     <dd>{{ formatYen(rowStaffMealTotalYen(report)) }}</dd>
                   </div>
                 </dl>
-                <div class="mobile-report-actions">
+                <div class="mobile-report-footer">
+                  <span class="mobile-submitter">提出者 {{ submittedBy(report) }}</span>
+                  <div class="mobile-report-actions">
                 <el-button
                   type="primary"
                   plain
@@ -446,6 +435,7 @@ void load();
                   :disabled="loading || deletingReportKey !== null"
                   @click.stop="removeReport(report)"
                 >削除</el-button>
+                  </div>
                 </div>
               </article>
             </div>
@@ -481,79 +471,75 @@ void load();
 
 <style scoped>
 .page { display: flex; flex-direction: column; }
-.panel { padding: 18px 20px 16px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); box-shadow: var(--fs-shadow-soft); }
-.panel-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px 20px; padding-bottom: 14px; border-bottom: 1px solid var(--fs-border); }
-.panel-title { margin: 0 0 6px; font-size: 1.1rem; color: var(--fs-ink); }
-.panel-meta { margin: 0 0 6px; color: var(--fs-muted); font-size: 0.86rem; }
-.meta-strong { font-weight: 700; color: var(--fs-ink); font-variant-numeric: tabular-nums; }
-.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 6px; }
+.panel { min-width: 0; padding: 16px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.panel-title { margin: 0; font-size: 18px; color: var(--fs-ink); }
+.panel-meta { margin: 2px 0 0; color: var(--fs-muted); font-size: 12px; }
+.meta-strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+.head-action { min-height: 44px; margin: 0; }
+.head-action .el-icon { margin-right: 4px; }
+.summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
+.summary-item { min-width: 0; padding: 10px 12px; }
+.summary-item + .summary-item { border-left: 1px solid var(--fs-border); }
+.summary-item span { display: block; color: var(--fs-muted); font-size: 12px; }
+.summary-item strong { display: block; margin-top: 3px; color: var(--fs-accent); font-size: 20px; line-height: 1.4; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0; }
 .filter-label, .filter-action-icon { display: none; }
 .filter-controls { display: flex; align-items: center; gap: 8px; }
-.panel-body { padding-top: 10px; }
-.summary-grid, .mobile-report-list, .list-heading { display: none; }
+.range-separator { color: var(--fs-muted); }
+.mobile-report-list { display: none; }
+.list-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.list-heading h3 { margin: 0; font-size: 14px; }
+.list-heading span { display: inline-flex; align-items: center; gap: 3px; color: var(--fs-muted); font-size: 12px; }
 .list-collapse { border: none; }
 .day-title { display: flex; align-items: center; gap: 12px; width: 100%; padding-right: 8px; }
-.day-date { font-weight: 700; font-variant-numeric: tabular-nums; }
-.day-sum { margin-left: auto; font-weight: 700; color: var(--fs-muted); }
+.day-date { font-weight: 600; font-variant-numeric: tabular-nums; }
+.day-sum { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .day-table { min-width: 980px; }
 .dialog-field { width: 100%; }
-
 @media (max-width: 720px) {
-  .panel { display: flex; flex-direction: column; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-  .panel-head { display: contents; }
-  .panel-intro { display: none; }
-  .head-action { order: 2; width: 100%; min-height: 44px; margin: 0 0 12px; font-weight: 700; }
-  .head-action .el-icon { font-size: 18px; }
-  .summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 12px; overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
-  .summary-grid { order: 1; }
-  .summary-title { grid-column: 1 / -1; margin: 0; padding: 12px 12px 4px; font-size: 14px; }
-  .summary-item { display: flex; min-width: 0; min-height: 64px; flex-direction: column-reverse; justify-content: center; gap: 4px; padding: 8px 12px; border-right: 1px solid var(--fs-border); border-bottom: 1px solid var(--fs-border); }
-  .summary-item:nth-child(3), .summary-item:nth-child(5) { border-right: 0; }
-  .summary-item:nth-last-child(-n + 2) { border-bottom: 0; }
-  .summary-item span { color: var(--fs-muted); font-size: 0.74rem; line-height: 1.25; }
-  .summary-item strong { overflow: hidden; color: var(--fs-accent); font-size: 1.05rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-  .filters { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px 14px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
-  .filters { order: 3; }
-  .filter-label { display: block; grid-column: 1 / -1; color: var(--fs-muted); font-size: 0.75rem; font-weight: 600; }
-  .filter-controls { min-width: 0; }
-  .filter-controls :deep(.el-date-editor) { width: 100%; min-width: 0; }
-  .filter-controls :deep(.el-input__wrapper) { padding-right: 6px; padding-left: 8px; }
+  .panel { padding: 0; border: 0; border-radius: 0; background: transparent; }
+  .panel-title { font-size: 18px; }
+  .head-action { padding: 0 12px; font-size: 13px; }
+  .summary-item { padding: 10px; }
+  .summary-item span { font-size: 11px; }
+  .summary-item strong { font-size: clamp(15px, 4.4vw, 18px); }
+  .filters { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px; }
+  .filter-controls { min-width: 0; gap: 6px; }
+  .filter-controls :deep(.el-date-editor) { width: 100%; min-width: 0; height: 44px; }
+  .filter-controls :deep(.el-input__wrapper) { min-height: 44px; padding: 1px 8px; }
   .filter-controls :deep(.el-input__prefix) { display: none; }
-  .range-separator { flex: 0 0 auto; color: var(--fs-muted); }
+  .filter-controls :deep(.el-input__inner) { font-size: 13px; }
   .filters > .el-button { width: 44px; min-height: 44px; padding: 0; }
   .filter-action-icon { display: inline-flex; font-size: 18px; }
   .filter-action-label { display: none; }
-  .filter-controls :deep(.el-input__wrapper) { min-height: 44px; }
-  .filter-controls :deep(.el-input__inner) { font-size: 13px; }
-  .panel-body { order: 4; padding-top: 12px; }
-  .list-heading { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 9px; }
-  .list-heading h3 { margin: 0; font-size: 1rem; }
-  .list-heading span { display: inline-flex; align-items: center; gap: 3px; color: var(--fs-muted); font-size: 0.76rem; }
   .desktop-report-list { display: none; }
   .mobile-report-list { display: block; overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
   .mobile-day-group + .mobile-day-group { border-top: 1px solid var(--fs-border); }
-  .mobile-day-button { display: grid; width: 100%; min-height: 56px; grid-template-columns: minmax(0, 1fr) auto 20px; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; color: var(--fs-ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
-  .mobile-day-main { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-  .mobile-day-main strong { font-size: 0.92rem; font-variant-numeric: tabular-nums; }
-  .mobile-day-main span { color: var(--fs-muted); font-size: 0.72rem; }
-  .mobile-day-total { font-size: 0.84rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .mobile-day-button .el-icon { color: var(--fs-muted); transition: transform 0.2s ease; }
+  .mobile-day-button { display: grid; width: 100%; min-height: 54px; grid-template-columns: minmax(0, 1fr) auto 16px; align-items: center; gap: 8px; padding: 8px 10px; color: var(--fs-ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
+  .mobile-day-button:focus-visible { outline: 2px solid var(--fs-accent); outline-offset: -3px; }
+  .mobile-day-main { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+  .mobile-day-main strong { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .mobile-day-main span { color: var(--fs-muted); font-size: 11px; }
+  .mobile-day-total { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mobile-day-button .el-icon { color: var(--fs-muted); }
   .mobile-day-button .el-icon.expanded { transform: rotate(90deg); }
-  .mobile-day-details { padding: 0 10px 10px; background: var(--fs-surface); }
-  .mobile-report-card { padding: 13px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-sm); background: var(--fs-surface-elevated); }
+  .mobile-day-details { padding: 8px; border-top: 1px solid var(--fs-border); background: var(--fs-surface); }
+  .mobile-report-card { padding: 10px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-sm); background: var(--fs-surface-elevated); }
   .mobile-report-card + .mobile-report-card { margin-top: 8px; }
-  .mobile-report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-  .mobile-report-head span { overflow: hidden; color: var(--fs-muted); font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }
-  .mobile-report-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+  .mobile-report-head strong { font-size: 13px; font-weight: 600; }
+  .mobile-report-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 8px 0; }
   .mobile-report-metrics div { min-width: 0; }
-  .mobile-report-metrics dt { color: var(--fs-muted); font-size: 0.7rem; }
-  .mobile-report-metrics dd { margin: 3px 0 0; overflow: hidden; font-size: 0.88rem; font-weight: 700; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-  .mobile-report-actions { display: flex; gap: 8px; }
-  .mobile-report-actions .el-button { flex: 1; min-width: 0; min-height: 42px; margin-left: 0; }
+  .mobile-report-metrics dt { color: var(--fs-muted); font-size: 11px; }
+  .mobile-report-metrics dd { margin: 2px 0 0; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .mobile-report-metrics div:first-child dd { color: var(--fs-accent); }
+  .mobile-report-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--fs-border); padding-top: 6px; }
+  .mobile-submitter { min-width: 0; color: var(--fs-muted); font-size: 11px; overflow-wrap: anywhere; }
+  .mobile-report-actions { display: flex; flex-shrink: 0; gap: 6px; }
+  .mobile-report-actions .el-button { min-height: 44px; margin-left: 0; padding: 0 12px; }
   :deep(.el-dialog) { width: calc(100% - 28px) !important; max-width: 480px; margin-top: max(8vh, calc(var(--fs-safe-area-top) + 16px)); }
   :deep(.el-dialog__footer) { display: flex; }
-  :deep(.el-dialog__footer .el-button) { flex: 1; min-height: 42px; }
+  :deep(.el-dialog__footer .el-button) { flex: 1; min-height: 44px; }
 }
-
 </style>

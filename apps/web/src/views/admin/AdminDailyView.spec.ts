@@ -386,6 +386,7 @@ describe('OWNER daily repository orchestration', () => {
                 businessDate: date,
                 shiftId: 'day',
                 shiftNameSnapshot: '日班',
+                owner: 'internal-subject::store02',
                 previousImosBalanceYen: 10_000,
                 currentImosBalanceYen: 14_000,
                 newageYen: 2_000,
@@ -415,8 +416,10 @@ describe('OWNER daily repository orchestration', () => {
     const visible = root.textContent ?? '';
 
     expect(visible).toContain('1 営業日 · 2 件');
-    expect(visible).toContain('実際売上合計 21,700 円');
-    expect(visible).toContain('スタッフ食事代合計 425 円');
+    expect(visible).toContain('store02');
+    expect(visible).not.toContain('internal-subject');
+    expect(root.querySelector('.summary-grid')?.textContent).toContain('実際売上合計21,700 円');
+    expect(root.querySelector('.summary-grid')?.textContent).toContain('スタッフ食事代合計425 円');
     expect(visible).toContain('スタッフ食事代（現金）');
     expect(visible).toContain('100 円');
     expect(visible).toContain('200 円');
@@ -470,8 +473,8 @@ describe('OWNER single report deletion', () => {
     );
     expect(repositoryMocks.deleteByReportKey).toHaveBeenCalledExactlyOnceWith(`${todayTokyo()}#day`);
     expect(root.textContent).toContain('1 営業日 · 1 件');
-    expect(root.textContent).toContain('実際売上合計 11,900 円');
-    expect(root.textContent).toContain('スタッフ食事代合計 150 円');
+    expect(root.querySelector('.summary-grid')?.textContent).toContain('実際売上合計11,900 円');
+    expect(root.querySelector('.summary-grid')?.textContent).toContain('スタッフ食事代合計150 円');
     expect(root.textContent).toContain('夜班');
     expect(root.textContent).not.toContain('日班');
   });

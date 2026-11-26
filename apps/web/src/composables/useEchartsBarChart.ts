@@ -42,16 +42,25 @@ export function useEchartsBarChart(
   function setBarData(categories: string[], series: BarChartSeries[]) {
     const instance = ensureChart();
     if (!instance) return;
+    instance.resize();
     instance.setOption({
-      tooltip: {},
-      xAxis: {
+      color: ['#165f58'],
+      grid: { top: 16, right: 20, bottom: 16, left: 12, containLabel: true },
+      tooltip: { trigger: 'axis', valueFormatter: (value: unknown) => `${Number(value).toLocaleString('ja-JP')} 円` },
+      xAxis: { type: 'value', axisLabel: { color: '#59645d', fontSize: 10 }, splitLine: { lineStyle: { color: '#e8ede8' } } },
+      yAxis: {
         type: 'category',
+        inverse: true,
         data: categories,
+        axisLabel: { color: '#59645d', fontSize: 11, width: 100, overflow: 'break' },
+        axisTick: { show: false },
+        axisLine: { show: false },
       },
-      yAxis: { type: 'value' },
       series: series.map((s) => ({
         name: s.name,
         type: 'bar',
+        barMaxWidth: 24,
+        itemStyle: { borderRadius: [0, 3, 3, 0] },
         data: s.data,
       })),
     });

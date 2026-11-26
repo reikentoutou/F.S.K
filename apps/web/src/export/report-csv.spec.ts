@@ -259,8 +259,9 @@ describe('ECharts host lifecycle', () => {
       addEventListener.mock.calls.filter(([type]) => type === 'resize'),
     ).toHaveLength(1);
 
-    window.dispatchEvent(new Event('resize'));
     expect(chartMocks.instances[1]?.resize).toHaveBeenCalledOnce();
+    window.dispatchEvent(new Event('resize'));
+    expect(chartMocks.instances[1]?.resize).toHaveBeenCalledTimes(2);
 
     app.unmount();
     expect(chartMocks.instances[1]?.dispose).toHaveBeenCalledOnce();

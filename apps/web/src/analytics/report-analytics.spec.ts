@@ -459,7 +459,12 @@ describe('OWNER analytics page', () => {
     const visible = root.textContent ?? '';
 
     expect(repositoryMocks.listByBusinessDate).toHaveBeenCalledTimes(7);
-    expect(visible).toContain('対象 1 件');
+    expect(root.querySelector('.totals-head')?.textContent).toContain('1 件');
+    expect(root.querySelectorAll('.totals .amount-grid > div')).toHaveLength(8);
+    const shiftDetails = root.querySelector<HTMLDetailsElement>('.shift-details');
+    expect(shiftDetails?.open).toBe(false);
+    expect(shiftDetails?.querySelector('summary')?.textContent).toContain('5,500 円');
+    expect(shiftDetails?.querySelector('.amount-grid')?.textContent).toContain('アリペイ');
     expect(visible).toContain('実際売上');
     expect(visible).toContain('5,500 円');
     expect(visible).toContain('スタッフ食事代（現金）');
