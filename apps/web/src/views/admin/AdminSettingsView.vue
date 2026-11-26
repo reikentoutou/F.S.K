@@ -47,11 +47,15 @@ export function updateOwnerPersonActive<T>(
 </script>
 
 <script setup lang="ts">
+
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { onMounted, reactive, shallowRef } from 'vue';
 
 import { DataRepositoryError } from '@/data/errors';
-import { ownerMasterDataRepository } from '@/data/master-data';
+import { useStoreSelection } from '@/stores/store-selection';
+import { createOwnerMasterDataRepository } from '@/data/master-data';
+const storeScope = useStoreSelection().selected;
+const ownerMasterDataRepository = createOwnerMasterDataRepository(undefined, storeScope);
 
 type ShiftRow = {
   id: string;

@@ -1,3 +1,4 @@
+import { storeLabel } from '@fsk/domain';
 import type { CalculatedAnalyticsReport } from '@/analytics/report-analytics';
 
 export const REPORT_CSV_HEADERS = [
@@ -19,6 +20,7 @@ export const REPORT_CSV_HEADERS = [
   '网管餐費合計',
   '実際売上',
   '偏差',
+  '店舗',
 ] as const;
 
 function protectFormula(value: string): string {
@@ -60,6 +62,7 @@ export function buildReportCsv(
       report.staffMealTotalYen,
       report.totalSalesYen,
       report.deviationYen,
+      storeLabel(report.storeId),
     ]
       .map(csvCell)
       .join(','),

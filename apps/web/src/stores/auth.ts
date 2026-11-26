@@ -1,5 +1,6 @@
 import { computed, shallowRef } from 'vue';
 import { defineStore } from 'pinia';
+import { useStoreSelection } from './store-selection';
 import {
   confirmSignIn,
   fetchAuthSession,
@@ -105,6 +106,7 @@ export const useAuthStore = defineStore('auth', () => {
       username: currentUser.username,
       role,
     };
+    useStoreSelection().select('02');
     initialized.value = true;
   }
 
@@ -182,6 +184,7 @@ export const useAuthStore = defineStore('auth', () => {
       user.value = null;
       initialized.value = true;
       newPasswordRequired.value = false;
+      useStoreSelection().select('02');
     }
   }
 

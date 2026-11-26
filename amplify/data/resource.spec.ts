@@ -53,6 +53,9 @@ describe('Amplify Data schema contract', () => {
 
     expect(modelDefinition(output, 'DailyReport').fields).toEqual([
       'reportKey: ID! @primaryKey',
+      'storeId: String!',
+      'registerFloatSnapshot: Int!',
+      'owner: String',
       'businessDate: String! @index(sortKeyFields: ["shiftId"], queryField: "dailyReportsByBusinessDate")',
       'shiftId: ID!',
       'shiftNameSnapshot: String!',
@@ -75,17 +78,20 @@ describe('Amplify Data schema contract', () => {
     ]);
     expect(modelDefinition(output, 'ShiftDefinition').fields).toEqual([
       'id: ID! @primaryKey',
+      'storeId: String!',
       'name: String!',
       'sortOrder: Int!',
       'active: Boolean!',
     ]);
     expect(modelDefinition(output, 'ResponsiblePerson').fields).toEqual([
       'id: ID! @primaryKey',
+      'storeId: String!',
       'name: String!',
       'active: Boolean!',
     ]);
     expect(modelDefinition(output, 'AppSetting').fields).toEqual([
       'id: ID! @primaryKey',
+      'storeId: String!',
       'registerFloatAmount: Int!',
       'setupCompleted: Boolean!',
     ]);
@@ -121,11 +127,11 @@ describe('Amplify Data schema contract', () => {
   it('transforms the exact OWNER and KITCHEN authorization matrix', () => {
     const output = transformedSchema();
     expect(modelDefinition(output, 'DailyReport').directives).toBe(
-      '@model @auth(rules: [{allow: groups, groups: ["OWNER"]}, {allow: owner, operations: [create], ownerField: "owner"}])',
+      '@model @auth(rules: [{allow: groups, groups: ["OWNER"]}])',
     );
     for (const modelName of ['ShiftDefinition', 'ResponsiblePerson']) {
       expect(modelDefinition(output, modelName).directives).toBe(
-        '@model @auth(rules: [{allow: groups, groups: ["OWNER"]}, {allow: groups, operations: [read], groups: ["KITCHEN"]}])',
+        '@model @auth(rules: [{allow: groups, groups: ["OWNER"]}])',
       );
     }
     expect(modelDefinition(output, 'AppSetting').directives).toBe(
@@ -138,7 +144,7 @@ describe('Amplify Data schema contract', () => {
 
     expect(output).toContain('submittedShiftIds: [ID]!');
     expect(output).toContain(
-      'getKitchenContext(businessDate: String): KitchenContext',
+      'getKitchenContext(businessDate: String, storeId: String): KitchenContext',
     );
     expect(output).not.toMatch(/type KitchenContext[\s\S]*cashTotalYen/);
   });

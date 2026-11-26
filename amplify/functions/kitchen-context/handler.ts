@@ -1,3 +1,5 @@
+import { resolveStoreAccess, storeReportKey, storeResourceId, type StoreId } from '../../../packages/domain/src/stores.js';
+
 interface StringAttribute {
   readonly S?: string;
 }
@@ -39,6 +41,7 @@ export interface KitchenContextInput {
     readonly responsiblePerson: string;
   };
   readonly businessDate: string;
+  readonly storeId: StoreId;
   send(command: ReadCommand): Promise<unknown>;
 }
 
@@ -120,12 +123,13 @@ const scanAll = async (
 export async function loadKitchenContext({
   tableNames,
   businessDate,
+  storeId,
   send,
 }: KitchenContextInput): Promise<KitchenContextResult> {
   const settingResponse = (await send({
     operation: 'GetItem',
     input: {
-      Key: { id: { S: 'default' } },
+      Key: { id: { S: storeResourceId(storeId, 'default') } },
       ProjectionExpression: 'registerFloatAmount',
       TableName: tableNames.appSetting,
     },
@@ -136,23 +140,23 @@ export async function loadKitchenContext({
 
   const [shiftItems, responsiblePersonItems] = await Promise.all([
     scanAll(send, {
-      ExpressionAttributeNames: { '#active': 'active', '#name': 'name' },
-      ExpressionAttributeValues: { ':active': { BOOL: true } },
-      FilterExpression: '#active = :active',
-      ProjectionExpression: 'id, #name, sortOrder, #active',
+      ExpressionAttributeNames: { '#active': 'active', '#name': 'name', '#store': 'storeId' },
+      ExpressionAttributeValues: { ':active': { BOOL: true }, ':store': { S: storeId } },
+      FilterExpression: '#active = :active AND #store = :store',
+      ProjectionExpression: 'id, #name, sortOrder, #active, #store',
       TableName: tableNames.shiftDefinition,
     }),
     scanAll(send, {
-      ExpressionAttributeNames: { '#active': 'active', '#name': 'name' },
-      ExpressionAttributeValues: { ':active': { BOOL: true } },
-      FilterExpression: '#active = :active',
-      ProjectionExpression: 'id, #name, #active',
+      ExpressionAttributeNames: { '#active': 'active', '#name': 'name', '#store': 'storeId' },
+      ExpressionAttributeValues: { ':active': { BOOL: true }, ':store': { S: storeId } },
+      FilterExpression: '#active = :active AND #store = :store',
+      ProjectionExpression: 'id, #name, #active, #store',
       TableName: tableNames.responsiblePerson,
     }),
   ]);
 
   const shifts = shiftItems
-    .filter(isActive)
+    .filter((item) => isActive(item) && item.storeId?.S === storeId)
     .map((item) => ({
       id: requiredString(item, 'id'),
       name: requiredString(item, 'name'),
@@ -168,7 +172,7 @@ export async function loadKitchenContext({
         operation: 'GetItem',
         input: {
           ConsistentRead: true,
-          Key: { reportKey: { S: `${businessDate}#${shift.id}` } },
+          Key: { reportKey: { S: storeReportKey(storeId, businessDate, shift.id) } },
           ProjectionExpression: 'reportKey',
           TableName: tableNames.dailyReport,
         },
@@ -184,7 +188,7 @@ export async function loadKitchenContext({
     ),
     shifts,
     responsiblePersons: responsiblePersonItems
-      .filter(isActive)
+      .filter((item) => isActive(item) && item.storeId?.S === storeId)
       .map((item) => ({
         id: requiredString(item, 'id'),
         name: requiredString(item, 'name'),
@@ -217,14 +221,17 @@ interface DynamoDbSdk {
 }
 
 export const handler = async (event: {
-  arguments: { businessDate?: string | null };
+  arguments: { businessDate?: string | null; storeId?: string | null };
+  identity?: { claims?: Record<string, unknown> };
 }): Promise<KitchenContextResult> => {
   // Lambda Node.js runtimes provide AWS SDK v3. Keeping the module name dynamic
   // prevents bundling a second SDK copy into this small read-only function.
   const sdkModuleName = '@aws-sdk/client-dynamodb';
   const sdk = (await import(sdkModuleName)) as DynamoDbSdk;
   const client = new sdk.DynamoDBClient({});
+  const storeId = resolveStoreAccess(event.identity?.claims ?? {}, event.arguments.storeId);
   return loadKitchenContext({
+    storeId,
     tableNames: {
       appSetting: requiredEnvironment('APP_SETTING_TABLE_NAME'),
       dailyReport: requiredEnvironment('DAILY_REPORT_TABLE_NAME'),

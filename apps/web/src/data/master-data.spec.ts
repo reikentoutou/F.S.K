@@ -135,18 +135,18 @@ describe('master data repositories', () => {
     await repository.deleteSetting!('default' as never);
     await repository.getSetting!('default' as never);
 
-    expect(shift.create).toHaveBeenCalledWith(shiftValue);
-    expect(shift.update).toHaveBeenCalledWith(shiftValue);
-    expect(shift.delete).toHaveBeenCalledWith({ id: 'day' });
-    expect(shift.list).toHaveBeenCalledWith(undefined);
-    expect(person.create).toHaveBeenCalledWith(personValue);
-    expect(person.update).toHaveBeenCalledWith(personValue);
-    expect(person.delete).toHaveBeenCalledWith({ id: 'p1' });
-    expect(person.list).toHaveBeenCalledWith(undefined);
-    expect(setting.create).toHaveBeenCalledWith(settingValue);
-    expect(setting.update).toHaveBeenCalledWith(settingValue);
-    expect(setting.delete).toHaveBeenCalledWith({ id: 'default' });
-    expect(setting.get).toHaveBeenCalledWith({ id: 'default' });
+    expect(shift.create).toHaveBeenCalledWith({ ...shiftValue, id: '02_day', storeId: '02' });
+    expect(shift.update).toHaveBeenCalledWith({ ...shiftValue, id: '02_day', storeId: '02' });
+    expect(shift.delete).toHaveBeenCalledWith({ id: '02_day' });
+    expect(shift.list).toHaveBeenCalledWith({ filter: { storeId: { eq: '02' } } });
+    expect(person.create).toHaveBeenCalledWith({ ...personValue, id: '02_p1', storeId: '02' });
+    expect(person.update).toHaveBeenCalledWith({ ...personValue, id: '02_p1', storeId: '02' });
+    expect(person.delete).toHaveBeenCalledWith({ id: '02_p1' });
+    expect(person.list).toHaveBeenCalledWith({ filter: { storeId: { eq: '02' } } });
+    expect(setting.create).toHaveBeenCalledWith({ ...settingValue, id: '02_default', storeId: '02' });
+    expect(setting.update).toHaveBeenCalledWith({ ...settingValue, id: '02_default', storeId: '02' });
+    expect(setting.delete).toHaveBeenCalledWith({ id: '02_default' });
+    expect(setting.get).toHaveBeenCalledWith({ id: '02_default' });
   });
 
   it.each([

@@ -1,6 +1,13 @@
 <script lang="ts">
+import { assertStoreId as assertReportStore, type StoreId } from '@fsk/domain';
 import type { CreateDailyReportCommand as ReportCommand } from '@/data/daily-reports';
 import { DataRepositoryError as RepositoryError } from '@/data/errors';
+
+export function ownerReportStore(key: string | undefined, shift: string | undefined, selected: string): StoreId {
+  const value = key ? key.split('#')[0] : shift?.match(/^(02|03)_/)?.[1] ?? selected;
+  assertReportStore(value);
+  return value;
+}
 
 export type OwnerReportMode = 'create' | 'edit' | null;
 
@@ -172,11 +179,13 @@ import DailyReportFormFields from '@/components/daily-report/DailyReportFormFiel
 import { useDailyReportFormState } from '@/composables/useDailyReportFormState';
 import { useDailyReportPreview } from '@/composables/useDailyReportPreview';
 import {
-  dailyReportsRepository,
+  createDailyReportsRepository,
   type CreateDailyReportCommand,
 } from '@/data/daily-reports';
 import { DataRepositoryError } from '@/data/errors';
-import { ownerMasterDataRepository } from '@/data/master-data';
+import { assertStoreId, storeLabel } from '@fsk/domain';
+import { useStoreSelection } from '@/stores/store-selection';
+import { createOwnerMasterDataRepository } from '@/data/master-data';
 import { confirmCashBeforeSubmit } from '@/utils/coupon-labels';
 import {
   validateDailyReportGoToConfirm,
@@ -218,6 +227,11 @@ type OwnerReportSaveOutcome =
   | { saved: true; mode: 'create' | 'edit' };
 
 const route = useRoute();
+const selectedStore = useStoreSelection().selected;
+const reportStore = ownerReportStore(route.params.reportKey ? String(route.params.reportKey) : undefined, route.query.shiftId ? String(route.query.shiftId) : undefined, selectedStore);
+assertStoreId(reportStore);
+const ownerMasterDataRepository = createOwnerMasterDataRepository(undefined, reportStore);
+const dailyReportsRepository = createDailyReportsRepository(undefined, { storeId: reportStore });
 const router = useRouter();
 const auth = useAuthStore();
 const loading = shallowRef(true);
@@ -297,7 +311,7 @@ async function readPageData(
     request,
     shifts: loadedShiftOptions,
     persons: loadedPersonOptions,
-    registerFloatAmount: floatAmount,
+    registerFloatAmount: report?.registerFloatSnapshot ?? floatAmount,
     report,
   };
 }
@@ -453,6 +467,7 @@ function buildCommand(): CreateDailyReportCommand {
     shiftId.value,
   );
   return {
+    registerFloatSnapshot: registerFloatAmount.value,
     businessDate: payload.reportDate,
     shiftId: payload.shiftId,
     shiftNameSnapshot:
@@ -512,6 +527,7 @@ async function submit(): Promise<void> {
 <template>
   <div class="page" v-loading="loading">
     <header class="bar">
+      <strong>{{ storeLabel(reportStore) }}</strong>
       <el-button link @click="step === 'confirm' ? backToForm() : router.back()">
         {{ step === 'confirm' ? '入力に戻る' : '戻る' }}
       </el-button>

@@ -1,4 +1,4 @@
-import { dailyReportKey } from '@fsk/domain';
+import { storeReportKey, storeResourceId, type StoreScope } from '@fsk/domain';
 
 import { getDataClient, type FskDataClient } from './client';
 import {
@@ -12,6 +12,7 @@ import {
 } from './errors';
 
 export interface CreateDailyReportCommand {
+  registerFloatSnapshot?: number;
   businessDate: string;
   shiftId: string;
   shiftNameSnapshot: string;
@@ -33,6 +34,7 @@ export interface CreateDailyReportCommand {
 
 export interface DailyReportsRepositoryOptions {
   now?: () => Date;
+  storeId?: StoreScope;
 }
 
 export type UpdateDailyReportCommand = Omit<
@@ -65,17 +67,23 @@ export function createDailyReportsRepository(
   client?: FskDataClient,
   options: DailyReportsRepositoryOptions = {},
 ) {
+  const scope = options.storeId ?? '02';
+  const store = () => { if (scope === 'all') throw new Error('STORE_REQUIRED'); return scope; };
+  const assertKey = (key: string) => { if (scope !== 'all' && !key.startsWith(`${scope}#`)) throw new Error('STORE_FORBIDDEN'); };
   const now = options.now ?? (() => new Date());
   const resolveClient = () => client ?? getDataClient();
 
   return {
     async create(command: CreateDailyReportCommand) {
+      if (!Number.isSafeInteger(command.registerFloatSnapshot) || command.registerFloatSnapshot! < 0) throw new Error('INVALID_REGISTER_FLOAT');
       const input = {
-        reportKey: dailyReportKey(command.businessDate, command.shiftId),
+        reportKey: storeReportKey(store(), command.businessDate, command.shiftId),
+        storeId: store(),
+        registerFloatSnapshot: command.registerFloatSnapshot!,
         businessDate: command.businessDate,
-        shiftId: command.shiftId,
+        shiftId: storeResourceId(store(), command.shiftId),
         shiftNameSnapshot: command.shiftNameSnapshot,
-        responsiblePersonId: command.responsiblePersonId,
+        responsiblePersonId: storeResourceId(store(), command.responsiblePersonId),
         responsiblePersonSnapshot: command.responsiblePersonSnapshot,
         startMinuteOfDay: command.startMinuteOfDay,
         endMinuteOfDay: command.endMinuteOfDay,
@@ -107,12 +115,14 @@ export function createDailyReportsRepository(
       }
     },
     async getByReportKey(reportKey: string) {
+      assertKey(reportKey);
       return ownerResult(
         () => resolveClient().models.DailyReport.get({ reportKey }),
         'NOT_FOUND',
       );
     },
     async deleteByReportKey(reportKey: string) {
+      assertKey(reportKey);
       return ownerResult(
         () => resolveClient().models.DailyReport.delete({ reportKey }),
         'NOT_FOUND',
@@ -122,12 +132,14 @@ export function createDailyReportsRepository(
       reportKey: string,
       command: UpdateDailyReportCommand,
     ) {
+      store();
+      assertKey(reportKey);
       return ownerResult(
         () =>
           resolveClient().models.DailyReport.update({
             reportKey,
             shiftNameSnapshot: command.shiftNameSnapshot,
-            responsiblePersonId: command.responsiblePersonId,
+            responsiblePersonId: storeResourceId(store(), command.responsiblePersonId),
             responsiblePersonSnapshot: command.responsiblePersonSnapshot,
             startMinuteOfDay: command.startMinuteOfDay,
             endMinuteOfDay: command.endMinuteOfDay,
@@ -178,7 +190,7 @@ export function createDailyReportsRepository(
         }
       } while (nextToken);
 
-      return reports;
+      return reports.filter((report) => scope === 'all' || report.storeId === scope);
     },
   };
 }

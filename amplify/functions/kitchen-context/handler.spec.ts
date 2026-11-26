@@ -20,6 +20,7 @@ interface KitchenContextModule {
       responsiblePerson: string;
     };
     businessDate: string;
+    storeId: '02' | '03';
     send(command: {
       operation: 'GetItem' | 'Query' | 'Scan';
       input: unknown;
@@ -46,7 +47,7 @@ describe('getKitchenContext', () => {
     const responses = [
       {
         Item: {
-          id: { S: 'default' },
+          id: { S: '02_default' },
           registerFloatAmount: { N: '5000' },
           setupCompleted: { BOOL: true },
           internalNote: { S: 'must-not-leak' },
@@ -54,22 +55,22 @@ describe('getKitchenContext', () => {
       },
       {
         Items: [
-          { id: { S: 'night' }, name: { S: '夜班' }, sortOrder: { N: '20' }, active: { BOOL: true } },
+          { id: { S: 'night' }, name: { S: '夜班' }, sortOrder: { N: '20' }, active: { BOOL: true }, storeId: { S: '02' } },
           { id: { S: 'disabled' }, name: { S: '停用' }, sortOrder: { N: '0' }, active: { BOOL: false } },
-          { id: { S: 'day' }, name: { S: '日班' }, sortOrder: { N: '10' }, active: { BOOL: true } },
+          { id: { S: 'day' }, name: { S: '日班' }, sortOrder: { N: '10' }, active: { BOOL: true }, storeId: { S: '02' } },
         ],
       },
       {
         Items: [
-          { id: { S: 'p2' }, name: { S: '李四' }, active: { BOOL: true } },
+          { id: { S: 'p2' }, name: { S: '李四' }, active: { BOOL: true }, storeId: { S: '02' } },
           { id: { S: 'hidden' }, name: { S: '停用人' }, active: { BOOL: false } },
-          { id: { S: 'p1' }, name: { S: '张三' }, active: { BOOL: true } },
+          { id: { S: 'p1' }, name: { S: '张三' }, active: { BOOL: true }, storeId: { S: '02' } },
         ],
       },
       {},
       {
         Item: {
-          reportKey: { S: '2026-08-23#night' },
+          reportKey: { S: '02#2026-08-23#02_night' },
           businessDate: { S: '2026-08-23' },
           shiftId: { S: 'night' },
           cashTotalYen: { N: '999999' },
@@ -79,6 +80,7 @@ describe('getKitchenContext', () => {
     const commands: unknown[] = [];
 
     const result = await kitchenContextModule!.loadKitchenContext({
+      storeId: '02',
       tableNames: {
         appSetting: 'app-setting-table',
         dailyReport: 'daily-report-table',
@@ -113,7 +115,7 @@ describe('getKitchenContext', () => {
       {
         operation: 'GetItem',
         input: {
-          Key: { id: { S: 'default' } },
+          Key: { id: { S: '02_default' } },
           ProjectionExpression: 'registerFloatAmount',
           TableName: 'app-setting-table',
         },
@@ -121,20 +123,20 @@ describe('getKitchenContext', () => {
       {
         operation: 'Scan',
         input: {
-          ExpressionAttributeValues: { ':active': { BOOL: true } },
-          FilterExpression: '#active = :active',
-          ProjectionExpression: 'id, #name, sortOrder, #active',
-          ExpressionAttributeNames: { '#active': 'active', '#name': 'name' },
+          ExpressionAttributeValues: { ':active': { BOOL: true }, ':store': { S: '02' } },
+          FilterExpression: '#active = :active AND #store = :store',
+          ProjectionExpression: 'id, #name, sortOrder, #active, #store',
+          ExpressionAttributeNames: { '#active': 'active', '#name': 'name', '#store': 'storeId' },
           TableName: 'shift-table',
         },
       },
       {
         operation: 'Scan',
         input: {
-          ExpressionAttributeNames: { '#active': 'active', '#name': 'name' },
-          ExpressionAttributeValues: { ':active': { BOOL: true } },
-          FilterExpression: '#active = :active',
-          ProjectionExpression: 'id, #name, #active',
+          ExpressionAttributeNames: { '#active': 'active', '#name': 'name', '#store': 'storeId' },
+          ExpressionAttributeValues: { ':active': { BOOL: true }, ':store': { S: '02' } },
+          FilterExpression: '#active = :active AND #store = :store',
+          ProjectionExpression: 'id, #name, #active, #store',
           TableName: 'person-table',
         },
       },
@@ -142,7 +144,7 @@ describe('getKitchenContext', () => {
         operation: 'GetItem',
         input: {
           ConsistentRead: true,
-          Key: { reportKey: { S: '2026-08-23#day' } },
+          Key: { reportKey: { S: '02#2026-08-23#02_day' } },
           ProjectionExpression: 'reportKey',
           TableName: 'daily-report-table',
         },
@@ -151,7 +153,7 @@ describe('getKitchenContext', () => {
         operation: 'GetItem',
         input: {
           ConsistentRead: true,
-          Key: { reportKey: { S: '2026-08-23#night' } },
+          Key: { reportKey: { S: '02#2026-08-23#02_night' } },
           ProjectionExpression: 'reportKey',
           TableName: 'daily-report-table',
         },

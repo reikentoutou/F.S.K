@@ -10,6 +10,7 @@ import { Policy, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { applyProductionAuthOverrides } from './auth/overrides.js';
 import { auth } from './auth/resource.js';
 import { data } from './data/resource.js';
+import { submitKitchenReport } from './functions/submit-kitchen-report/resource.js';
 import { kitchenContext } from './functions/kitchen-context/resource.js';
 import { APPLICATION_TAGS } from './infrastructure/application-config.js';
 import {
@@ -22,6 +23,7 @@ export const backend = defineBackend({
   data,
   storage,
   kitchenContext,
+  submitKitchenReport,
 });
 
 const {
@@ -65,6 +67,8 @@ for (const [environmentName, modelName] of kitchenContextTables) {
   if (!table) {
     throw new Error(`KITCHEN_CONTEXT_TABLE_NOT_FOUND:${modelName}`);
   }
+  table.grantReadData(backend.submitKitchenReport.resources.lambda);
+  backend.submitKitchenReport.addEnvironment(environmentName, table.tableName);
   table.grantReadData(backend.kitchenContext.resources.lambda);
   backend.kitchenContext.addEnvironment(environmentName, table.tableName);
 }
@@ -139,3 +143,10 @@ for (const stack of [
     Tags.of(stack).add(key, value);
   }
 }
+
+dailyReportTable.grantReadWriteData(backend.submitKitchenReport.resources.lambda);
+backend.submitKitchenReport.addEnvironment('DAILY_REPORT_TABLE_NAME', dailyReportTable.tableName);
+backend.submitKitchenReport.addEnvironment('USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
+backend.submitKitchenReport.addEnvironment('IDENTITY_POOL_ID', backend.auth.resources.cfnResources.cfnIdentityPool.ref);
+backend.submitKitchenReport.addEnvironment('STORAGE_BUCKET_NAME', backend.storage.resources.bucket.bucketName);
+backend.storage.resources.bucket.grantRead(backend.submitKitchenReport.resources.lambda, 'submissions/*');

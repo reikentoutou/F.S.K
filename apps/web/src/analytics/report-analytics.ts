@@ -1,5 +1,6 @@
 import {
   computeDailyReportTotals,
+  storeLabel,
   type DailyReportRawAmounts,
 } from '@fsk/domain';
 import { DateTime } from 'luxon';
@@ -8,6 +9,8 @@ export type AnalyticsPeriod = 'day' | 'week' | 'month' | 'quarter' | 'year';
 
 export interface AnalyticsReport extends DailyReportRawAmounts {
   reportKey: string;
+  storeId?: string | null;
+  registerFloatSnapshot?: number | null;
   businessDate: string;
   shiftId: string;
   shiftNameSnapshot: string;
@@ -86,10 +89,10 @@ export function buildReportAnalytics(
 ): ReportAnalytics {
   const rows = reports
     .map((report): CalculatedAnalyticsReport => {
-      const totals = computeDailyReportTotals(report, registerFloatYen);
+      const totals = computeDailyReportTotals(report, report.registerFloatSnapshot ?? registerFloatYen);
       return {
         ...report,
-        registerFloatYen,
+        registerFloatYen: report.registerFloatSnapshot ?? registerFloatYen,
         ...totals,
       };
     })
@@ -111,7 +114,7 @@ export function buildReportAnalytics(
     if (!aggregate) {
       aggregate = {
         shiftId: row.shiftId,
-        shiftName: row.shiftNameSnapshot,
+        shiftName: `${storeLabel(row.storeId)} ${row.shiftNameSnapshot}`.trim(),
         sortOrder: shiftSortOrders.get(row.shiftId),
         firstBusinessDate: row.businessDate,
         firstStartMinuteOfDay: row.startMinuteOfDay,

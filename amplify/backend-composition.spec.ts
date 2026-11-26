@@ -897,6 +897,11 @@ describe('active DynamoDB backend composition', () => {
             runtime: 'nodejs22.x',
           },
           {
+            logicalId: 'submitkitchenreportlambda',
+            handler: 'index.handler',
+            runtime: 'nodejs22.x',
+          },
+          {
             logicalId: 'TableManagerCustomProviderframeworkisComplete',
             handler: 'amplify-table-manager-handler.isComplete',
             runtime: 'nodejs24.x',
@@ -964,10 +969,10 @@ describe('active DynamoDB backend composition', () => {
       ]);
       expect(evidence.kitchenContextSchemaLines).toEqual([
         'type KitchenContext @aws_cognito_user_pools(cognito_groups: ["OWNER", "KITCHEN"])',
-        '  getKitchenContext(businessDate: String): KitchenContext @function(name: "FnGetKitchenContext") @auth(rules: [{allow: groups, groups: ["OWNER", "KITCHEN"]}])',
+        '  getKitchenContext(businessDate: String, storeId: String): KitchenContext @function(name: "FnGetKitchenContext") @auth(rules: [{allow: groups, groups: ["OWNER", "KITCHEN"]}])',
       ]);
-      expect(evidence.businessLambdas).toHaveLength(1);
-      expect(evidence.businessLambdas[0]).toMatchObject({
+      expect(evidence.businessLambdas).toHaveLength(2);
+      expect(evidence.businessLambdas.find((fn: { logicalId: string }) => fn.logicalId.startsWith('kitchencontextlambda'))).toMatchObject({
         environmentVariableNames: [
           'AMPLIFY_SSM_ENV_CONFIG',
           'APP_SETTING_TABLE_NAME',
@@ -1148,7 +1153,9 @@ describe('active DynamoDB backend composition', () => {
       expect(businessPolicy).toContain('ShiftDefinition');
       expect(businessPolicy).toContain('ResponsiblePerson');
       expect(businessPolicy).toContain('DailyReport');
-      expect(businessPolicy).not.toContain('s3:');
+      expect(businessPolicy).toContain('s3:GetObject');
+      expect(businessPolicy).not.toContain('s3:PutObject');
+      expect(businessPolicy).not.toContain('s3:DeleteObject');
       expect(businessPolicy).not.toContain('cognito-idp:');
       expect(businessPolicy).not.toContain('GameList');
       expect(existsSync(staleTemplatePath)).toBe(true);

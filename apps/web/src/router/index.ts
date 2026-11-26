@@ -86,7 +86,7 @@ export function createAppRouter(history: RouterHistory) {
       }
     }
 
-    return authorizeNavigation(
+    const authorization = authorizeNavigation(
       {
         path: to.fullPath,
         isPublic: to.meta.public === true,
@@ -94,6 +94,11 @@ export function createAppRouter(history: RouterHistory) {
       },
       auth.user,
     );
+    if (authorization !== true) return authorization;
+    if (to.name === 'owner-report-edit' && !/^(02|03)#/.test(String(to.params.reportKey))) return { name: 'owner-daily' };
+    if (to.name === 'owner-report-new' && !/^(02|03)_/.test(String(to.query.shiftId))) return { name: 'owner-daily' };
+    if (to.name === 'kitchen-report' && !/^(02|03)_/.test(String(to.params.shiftId))) return { name: 'kitchen-home' };
+    return true;
   });
 
   return router;

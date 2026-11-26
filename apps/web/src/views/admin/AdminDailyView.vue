@@ -31,17 +31,22 @@ export async function loadOwnerDailyReports<T>(options: {
 </script>
 
 <script setup lang="ts">
-import { computeDailyReportTotals, staffMealTotalYen } from '@fsk/domain';
+
+import { computeDailyReportTotals, staffMealTotalYen, storeLabel } from '@fsk/domain';
 import { ArrowDown, ArrowRight, EditPen } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onBeforeUnmount, shallowRef } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { businessDateRange, recentTokyoBusinessDateRange } from '@/data/date-range';
-import { dailyReportsRepository } from '@/data/daily-reports';
+import { createDailyReportsRepository } from '@/data/daily-reports';
 import { DataRepositoryError } from '@/data/errors';
-import { ownerMasterDataRepository } from '@/data/master-data';
+import { useStoreSelection } from '@/stores/store-selection';
+import { createOwnerMasterDataRepository } from '@/data/master-data';
 import { todayTokyo } from '@/utils/tokyo';
+const storeScope = useStoreSelection().selected;
+const ownerMasterDataRepository = createOwnerMasterDataRepository(undefined, storeScope);
+const dailyReportsRepository = createDailyReportsRepository(undefined, { storeId: storeScope });
 
 type ListedReport = NonNullable<
   Awaited<ReturnType<typeof dailyReportsRepository.listByBusinessDate>>[number]
@@ -109,7 +114,7 @@ const totalStaffMealAll = computed(() =>
 );
 
 function reportTotalSales(report: ListedReport): number {
-  return computeDailyReportTotals(report, registerFloatAmount.value)
+  return computeDailyReportTotals(report, report.registerFloatSnapshot ?? registerFloatAmount.value)
     .totalSalesYen;
 }
 
@@ -187,6 +192,7 @@ const newForm = shallowRef({
 const shifts = shallowRef<Array<{ id: string; name: string }>>([]);
 
 async function openNew(): Promise<void> {
+  if (storeScope === 'all') { ElMessage.info('店舗を選択してください'); return; }
   try {
     const loaded = await ownerMasterDataRepository.listShifts();
     shifts.value = loaded
@@ -231,7 +237,7 @@ async function removeReport(report: ListedReport): Promise<void> {
   deletingReportKey.value = report.reportKey;
   try {
     await ElMessageBox.confirm(
-      `${report.businessDate}・${report.shiftNameSnapshot}の日報を削除します。売上集計から除外され、元に戻せません。添付ファイルは保管されます。`,
+      `${storeLabel(report.storeId)}・${report.businessDate}・${report.shiftNameSnapshot}の日報を削除します。売上集計から除外され、元に戻せません。添付ファイルは保管されます。`,
       '日報の削除',
       {
         type: 'warning',
@@ -352,6 +358,7 @@ void load();
               tabindex="0"
             >
               <el-table :data="list" size="small" stripe border class="day-table">
+                <el-table-column label="店舗" width="80"><template #default="{ row }">{{ storeLabel(row.storeId) }}</template></el-table-column>
                 <el-table-column prop="shiftNameSnapshot" label="シフト" width="108" />
                 <el-table-column label="実際売上" min-width="120">
                   <template #default="{ row }">{{ formatYen(reportTotalSales(row)) }}</template>
@@ -407,7 +414,7 @@ void load();
             >
               <article v-for="report in list" :key="report.reportKey" class="mobile-report-card">
                 <div class="mobile-report-head">
-                  <strong>{{ report.shiftNameSnapshot }}</strong>
+                  <strong>{{ storeLabel(report.storeId) }} · {{ report.shiftNameSnapshot }}</strong>
                   <span>{{ submittedBy(report) }}</span>
                 </div>
                 <dl class="mobile-report-metrics">

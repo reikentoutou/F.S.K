@@ -2,7 +2,7 @@
 import type { KitchenAttachmentUpload } from '@/data/attachments';
 import { kitchenAttachmentRepository } from '@/data/attachments';
 import type { CreateDailyReportCommand } from '@/data/daily-reports';
-import { dailyReportsRepository } from '@/data/daily-reports';
+import { kitchenReportsRepository as dailyReportsRepository } from '@/data/kitchen-reports';
 import { DataRepositoryError } from '@/data/errors';
 import { todayTokyo } from '@/utils/tokyo';
 import type { KitchenContext } from './KitchenHomeView.vue';
@@ -272,7 +272,7 @@ const submittedTotals = computed(() => {
       staffMealCashYen: report.staffMealCashYen,
       staffMealAlipayYen: report.staffMealAlipayYen,
     },
-    registerFloatAmount.value,
+    report.registerFloatSnapshot ?? registerFloatAmount.value,
   );
 });
 

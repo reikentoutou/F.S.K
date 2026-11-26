@@ -38,10 +38,11 @@ beforeAll(async () => {
 });
 
 const command: CreateDailyReportCommand = {
+  registerFloatSnapshot: 10000,
   businessDate: '2026-08-24',
-  shiftId: 'shift-day',
+  shiftId: '02_shift-day',
   shiftNameSnapshot: '日班',
-  responsiblePersonId: 'person-1',
+  responsiblePersonId: '02_person-1',
   responsiblePersonSnapshot: '张三',
   startMinuteOfDay: 540,
   endMinuteOfDay: 1020,
@@ -58,8 +59,9 @@ const command: CreateDailyReportCommand = {
 };
 
 const createdReport = {
-  reportKey: '2026-08-24#shift-day',
+  reportKey: '02#2026-08-24#02_shift-day',
   ...command,
+  storeId: '02',
   submittedAt: '2026-08-24T10:11:12.000Z',
   createdAt: '2026-08-24T10:11:13.000Z',
   updatedAt: '2026-08-24T10:11:13.000Z',
@@ -276,8 +278,8 @@ describe('daily reports repository', () => {
   });
 
   it('queries every page through the business-date index and never calls a table list', async () => {
-    const first = { ...createdReport, reportKey: '2026-08-24#shift-day' };
-    const second = { ...createdReport, reportKey: '2026-08-24#shift-night' };
+    const first = { ...createdReport, reportKey: '02#2026-08-24#02_shift-day' };
+    const second = { ...createdReport, reportKey: '02#2026-08-24#02_shift-night' };
     const dailyReportsByBusinessDate = vi
       .fn()
       .mockResolvedValueOnce({ data: [first], nextToken: 'page-2', errors: [] })
@@ -327,7 +329,7 @@ describe('daily reports repository', () => {
     });
     const editable = {
       shiftNameSnapshot: '日班（修正）',
-      responsiblePersonId: 'person-2',
+      responsiblePersonId: '02_person-2',
       responsiblePersonSnapshot: '李四',
       startMinuteOfDay: 545,
       endMinuteOfDay: 1025,
@@ -343,8 +345,8 @@ describe('daily reports repository', () => {
       attachmentKeys: ['daily-reports/report-1/att-1/票据.jpg'],
     };
 
-    await repository.getByReportKey('2026-08-24#shift-day');
-    await repository.updateByReportKey('2026-08-24#shift-day', {
+    await repository.getByReportKey('02#2026-08-24#02_shift-day');
+    await repository.updateByReportKey('02#2026-08-24#02_shift-day', {
       ...editable,
       reportKey: 'forged-key',
       businessDate: '2099-01-01',
@@ -359,10 +361,10 @@ describe('daily reports repository', () => {
     } as UpdateDailyReportCommand);
 
     expect(get).toHaveBeenCalledWith({
-      reportKey: '2026-08-24#shift-day',
+      reportKey: '02#2026-08-24#02_shift-day',
     });
     expect(update).toHaveBeenCalledWith({
-      reportKey: '2026-08-24#shift-day',
+      reportKey: '02#2026-08-24#02_shift-day',
       ...editable,
     });
     expectTypeOf<UpdateDailyReportCommand>().not.toHaveProperty('reportKey');
@@ -400,8 +402,8 @@ describe('daily reports repository', () => {
 
     const promise =
       operation === 'get'
-        ? repository.getByReportKey('2026-08-24#shift-day')
-        : repository.updateByReportKey('2026-08-24#shift-day', {
+        ? repository.getByReportKey('02#2026-08-24#02_shift-day')
+        : repository.updateByReportKey('02#2026-08-24#02_shift-day', {
             shiftNameSnapshot: command.shiftNameSnapshot,
             responsiblePersonId: command.responsiblePersonId,
             responsiblePersonSnapshot: command.responsiblePersonSnapshot,
@@ -450,9 +452,9 @@ describe('daily reports repository', () => {
 
     const error = caughtError(
       await (operation === 'get'
-        ? repository.getByReportKey('2026-08-24#shift-day')
+        ? repository.getByReportKey('02#2026-08-24#02_shift-day')
         : repository.updateByReportKey(
-            '2026-08-24#shift-day',
+            '02#2026-08-24#02_shift-day',
             editable,
           )
       ).catch((caught) => caught),
@@ -479,9 +481,9 @@ describe('daily reports repository', () => {
 
     const error = caughtError(
       await (operation === 'get'
-        ? repository.getByReportKey('2026-08-24#shift-day')
+        ? repository.getByReportKey('02#2026-08-24#02_shift-day')
         : repository.updateByReportKey(
-            '2026-08-24#shift-day',
+            '02#2026-08-24#02_shift-day',
             updateCommand(),
           )
       ).catch((caught) => caught),
@@ -527,8 +529,8 @@ describe('daily reports repository', () => {
     };
 
     const result = await (operation === 'get'
-      ? repository.getByReportKey('2026-08-24#shift-day')
-      : repository.updateByReportKey('2026-08-24#shift-day', editable)
+      ? repository.getByReportKey('02#2026-08-24#02_shift-day')
+      : repository.updateByReportKey('02#2026-08-24#02_shift-day', editable)
     ).catch((caught) => caught);
     const error = caughtError(result);
 
@@ -620,11 +622,13 @@ function updateCommand(): UpdateDailyReportCommand {
 
 function createdReportInput(): Record<string, unknown> {
   return {
-    reportKey: '2026-08-24#shift-day',
+    storeId: '02',
+    registerFloatSnapshot: 10000,
+    reportKey: '02#2026-08-24#02_shift-day',
     businessDate: '2026-08-24',
-    shiftId: 'shift-day',
+    shiftId: '02_shift-day',
     shiftNameSnapshot: '日班',
-    responsiblePersonId: 'person-1',
+    responsiblePersonId: '02_person-1',
     responsiblePersonSnapshot: '张三',
     startMinuteOfDay: 540,
     endMinuteOfDay: 1020,

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { createPinia } from 'pinia';
+
 import {
   type App,
   computed,
@@ -38,17 +40,17 @@ vi.mock('element-plus', () => ({
 }));
 
 vi.mock('@/data/daily-reports', () => ({
-  dailyReportsRepository: {
+  createDailyReportsRepository: () => ({
     listByBusinessDate: repositoryMocks.listByBusinessDate,
     deleteByReportKey: repositoryMocks.deleteByReportKey,
-  },
+  }),
 }));
 
 vi.mock('@/data/master-data', () => ({
-  ownerMasterDataRepository: {
+  createOwnerMasterDataRepository: () => ({
     getSetting: repositoryMocks.getSetting,
     listShifts: repositoryMocks.listShifts,
-  },
+  }),
 }));
 
 interface DailyLoader {
@@ -157,6 +159,7 @@ async function mountDailyView(): Promise<{ app: App; root: HTMLElement }> {
   });
   await router.push('/');
   await router.isReady();
+  app.use(createPinia());
   app.use(router);
   for (const name of [
     'ElDatePicker',

@@ -1,4 +1,4 @@
-import { MAX_YEN } from '@fsk/domain';
+import { MAX_YEN, storeResourceId, type StoreScope } from '@fsk/domain';
 
 import { getDataClient, type FskDataClient } from './client';
 import {
@@ -91,67 +91,84 @@ export function createKitchenContextRepository(
 
 export function createOwnerMasterDataRepository(
   client?: FskDataClient,
+  scope: StoreScope = '02',
 ) {
   const resolveClient = () => client ?? getDataClient();
+  const store = () => {
+    if (scope === 'all') throw new Error('STORE_REQUIRED');
+    return scope;
+  };
+  const scoped = <T extends { id: string }>(value: T) => ({ ...value, id: storeResourceId(store(), value.id), storeId: store() });
+  const listScope = <T extends { storeId?: string | null } | null>(values: T[]) => values.filter((value) => value && (scope === 'all' || value.storeId === scope));
   return {
     async createShift(value: ShiftDefinitionInput) {
+      store();
       assertShift(value);
       return dataResult(() =>
-        resolveClient().models.ShiftDefinition.create(value),
+        resolveClient().models.ShiftDefinition.create(scoped(value)),
       );
     },
     async updateShift(value: ShiftDefinitionInput) {
+      store();
       assertShift(value);
       return dataResult(() =>
-        resolveClient().models.ShiftDefinition.update(value),
+        resolveClient().models.ShiftDefinition.update(scoped(value)),
       );
     },
     async deleteShift(id: string) {
+      store();
       return dataResult(() =>
-        resolveClient().models.ShiftDefinition.delete({ id }),
+        resolveClient().models.ShiftDefinition.delete({ id: storeResourceId(store(), id) }),
       );
     },
     async listShifts() {
       return listAll((options) =>
-        resolveClient().models.ShiftDefinition.list(options),
-      );
+        resolveClient().models.ShiftDefinition.list({ ...options, ...(scope === 'all' ? {} : { filter: { storeId: { eq: scope } } }) }),
+      ).then(listScope);
     },
     async createResponsiblePerson(value: ResponsiblePersonInput) {
+      store();
       assertPerson(value);
       return dataResult(() =>
-        resolveClient().models.ResponsiblePerson.create(value),
+        resolveClient().models.ResponsiblePerson.create(scoped(value)),
       );
     },
     async updateResponsiblePerson(value: ResponsiblePersonInput) {
+      store();
       assertPerson(value);
       return dataResult(() =>
-        resolveClient().models.ResponsiblePerson.update(value),
+        resolveClient().models.ResponsiblePerson.update(scoped(value)),
       );
     },
     async deleteResponsiblePerson(id: string) {
+      store();
       return dataResult(() =>
-        resolveClient().models.ResponsiblePerson.delete({ id }),
+        resolveClient().models.ResponsiblePerson.delete({ id: storeResourceId(store(), id) }),
       );
     },
     async listResponsiblePersons() {
       return listAll((options) =>
-        resolveClient().models.ResponsiblePerson.list(options),
-      );
+        resolveClient().models.ResponsiblePerson.list({ ...options, ...(scope === 'all' ? {} : { filter: { storeId: { eq: scope } } }) }),
+      ).then(listScope);
     },
     async createSetting(value: AppSettingInput) {
+      store();
       assertSetting(value);
-      return dataResult(() => resolveClient().models.AppSetting.create(value));
+      return dataResult(() => resolveClient().models.AppSetting.create(scoped(value)));
     },
     async updateSetting(value: AppSettingInput) {
+      store();
       assertSetting(value);
-      return dataResult(() => resolveClient().models.AppSetting.update(value));
+      return dataResult(() => resolveClient().models.AppSetting.update(scoped(value)));
     },
     async deleteSetting(id: string) {
-      return dataResult(() => resolveClient().models.AppSetting.delete({ id }));
+      store();
+      return dataResult(() => resolveClient().models.AppSetting.delete({ id: storeResourceId(store(), id) }));
     },
     async getSetting(id: string) {
+      if (scope === 'all') return { id: 'all', storeId: 'all', registerFloatAmount: 0, setupCompleted: true };
       return dataResult(
-        () => resolveClient().models.AppSetting.get({ id }),
+        () => resolveClient().models.AppSetting.get({ id: storeResourceId(store(), id) }),
         'NOT_FOUND',
       );
     },

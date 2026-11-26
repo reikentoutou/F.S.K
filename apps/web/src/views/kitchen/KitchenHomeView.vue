@@ -179,7 +179,7 @@ async function logout(): Promise<void> {
         <h1 class="title">厨房端末</h1>
       </div>
       <div class="right">
-        <span class="user">{{ auth.user?.username }}</span>
+        <span class="user">{{ auth.user?.username === 'store02' ? '2 店' : auth.user?.username === 'store03' ? '3 店' : auth.user?.username }}</span>
         <el-button link type="primary" class="logout" @click="logout">
           ログアウト
         </el-button>

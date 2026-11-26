@@ -3,5 +3,5 @@ import { RouterView } from 'vue-router';
 </script>
 
 <template>
-  <RouterView />
+  <RouterView :key="$route.name === 'owner-report-edit' ? String($route.params.reportKey) : $route.name === 'owner-report-new' ? $route.fullPath : undefined" />
 </template>

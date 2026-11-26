@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import { Document, Setting, TrendCharts } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
+import { computed, watch } from 'vue';
+import StoreSelector from '@/components/stores/StoreSelector.vue';
+import { useStoreSelection } from '@/stores/store-selection';
 import { useAuthStore } from '@/stores/auth';
 
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
+const stores = useStoreSelection();
+const allowAll = computed(() => !route.path.startsWith('/owner/settings'));
+watch(allowAll, (allowed) => { if (!allowed && stores.selected === 'all') stores.select('02'); }, { immediate: true, flush: 'sync' });
 
 function isActive(path: string): boolean {
   return route.path.startsWith(path);
@@ -45,16 +51,17 @@ async function logout(): Promise<void> {
     </el-aside>
     <el-container class="main-wrap">
       <el-header class="head">
+        <StoreSelector :model-value="stores.selected" :allow-all="allowAll" @update:model-value="stores.select" />
         <span class="mobile-brand">財務日報</span>
         <div class="head-left">
           <span class="head-user">{{ auth.user?.username }}</span>
-          <span class="head-role">ユーザー</span>
+          <span class="head-role">管理者</span>
         </div>
         <el-button class="logout" link type="primary" @click="logout">ログアウト</el-button>
       </el-header>
       <el-main class="main">
         <div class="main-inner">
-          <router-view />
+          <router-view :key="stores.selected" />
         </div>
       </el-main>
     </el-container>
@@ -242,7 +249,7 @@ async function logout(): Promise<void> {
   }
 
   .mobile-brand {
-    display: block;
+    display: none;
     margin-right: auto;
     font-size: 1rem;
     font-weight: 700;

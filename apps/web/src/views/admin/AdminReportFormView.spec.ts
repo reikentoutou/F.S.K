@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { createPinia } from 'pinia';
+
 import { createApp, defineComponent, h, nextTick } from 'vue';
 import { createMemoryHistory, createRouter } from 'vue-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,19 +20,19 @@ const repositoryMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/data/master-data', () => ({
-  ownerMasterDataRepository: {
+  createOwnerMasterDataRepository: () => ({
     getSetting: repositoryMocks.getSetting,
     listShifts: repositoryMocks.listShifts,
     listResponsiblePersons: repositoryMocks.listResponsiblePersons,
-  },
+  }),
 }));
 
 vi.mock('@/data/daily-reports', () => ({
-  dailyReportsRepository: {
+  createDailyReportsRepository: () => ({
     getByReportKey: repositoryMocks.getByReportKey,
     create: repositoryMocks.create,
     updateByReportKey: repositoryMocks.updateByReportKey,
-  },
+  }),
 }));
 
 vi.mock('@/stores/auth', () => ({
@@ -70,6 +72,7 @@ async function renderReportForm(): Promise<HTMLElement> {
     query: { businessDate: '2026-08-24', shiftId: 'day' },
   });
   await router.isReady();
+  app.use(createPinia());
   app.use(router);
   app.component('ElButton', Passthrough);
   app.component('ElForm', Passthrough);
@@ -444,5 +447,13 @@ describe('OWNER report repository actions', () => {
     expect(actions.ownerReportPersonName(existing, 'p2', persons)).toBe(
       '李四',
     );
+  });
+});
+
+describe('store scope in report links', () => {
+  it('keeps store 3 after refresh even when the global store selection resets', () => {
+    const module = reportView as unknown as { ownerReportStore(key: string | undefined, shift: string | undefined, selected: string): string };
+    expect(module.ownerReportStore(undefined, '03_day', '02')).toBe('03');
+    expect(module.ownerReportStore('03#2026-11-26#03_day', undefined, '02')).toBe('03');
   });
 });

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { createPinia } from 'pinia';
+
 import { createApp, defineComponent, h, nextTick, type App } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -34,16 +36,16 @@ const messageMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/data/daily-reports', () => ({
-  dailyReportsRepository: {
+  createDailyReportsRepository: () => ({
     listByBusinessDate: repositoryMocks.listByBusinessDate,
-  },
+  }),
 }));
 
 vi.mock('@/data/master-data', () => ({
-  ownerMasterDataRepository: {
+  createOwnerMasterDataRepository: () => ({
     getSetting: repositoryMocks.getSetting,
     listShifts: repositoryMocks.listShifts,
-  },
+  }),
 }));
 
 vi.mock('@/composables/useEchartsBarChart', () => ({
@@ -132,6 +134,7 @@ async function mountAnalyticsView(): Promise<{
 }> {
   const root = document.createElement('div');
   const app = createApp(analyticsView.default);
+  app.use(createPinia());
   for (const name of [
     'ElForm',
     'ElFormItem',
@@ -705,7 +708,7 @@ describe('OWNER analytics page', () => {
 
     expect(downloadMocks.downloadCsvFile).toHaveBeenCalledWith(
       '\ufeffcsv',
-      `aggregate-week-${expectedRange.start}-${expectedRange.end}.csv`,
+      `02-aggregate-week-${expectedRange.start}-${expectedRange.end}.csv`,
     );
 
     releasePending([]);

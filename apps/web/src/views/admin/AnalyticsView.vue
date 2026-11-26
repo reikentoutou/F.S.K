@@ -114,6 +114,7 @@ export async function loadOwnerAnalytics(
 </script>
 
 <script setup lang="ts">
+
 import { ElMessage } from 'element-plus';
 import {
   computed,
@@ -124,12 +125,17 @@ import {
   watch,
 } from 'vue';
 
+import { storeLabel } from '@fsk/domain';
 import { actualSalesBarData } from '@/analytics/report-analytics';
 import { useEchartsBarChart } from '@/composables/useEchartsBarChart';
-import { dailyReportsRepository } from '@/data/daily-reports';
-import { ownerMasterDataRepository } from '@/data/master-data';
+import { createDailyReportsRepository } from '@/data/daily-reports';
+import { useStoreSelection } from '@/stores/store-selection';
+import { createOwnerMasterDataRepository } from '@/data/master-data';
 import { buildReportCsv, downloadCsvFile } from '@/export/report-csv';
 import { todayTokyo } from '@/utils/tokyo';
+const storeScope = useStoreSelection().selected;
+const ownerMasterDataRepository = createOwnerMasterDataRepository(undefined, storeScope);
+const dailyReportsRepository = createDailyReportsRepository(undefined, { storeId: storeScope });
 
 const period = shallowRef<AnalyticsPeriod>('week');
 const anchorDate = shallowRef(todayTokyo());
@@ -219,7 +225,7 @@ function downloadCsv(): void {
   if (!analytics.value || !loadedSelection.value) return;
   downloadCsvFile(
     buildReportCsv(analytics.value.rows),
-    analyticsCsvFilename(loadedSelection.value),
+    `${storeScope}-${analyticsCsvFilename(loadedSelection.value)}`,
   );
 }
 
@@ -305,7 +311,7 @@ watch([period, anchorDate], () => void load(), { immediate: true });
           <el-empty v-if="dayRows.length === 0" description="この業務日の日報はまだありません" />
           <div v-for="row in dayRows" :key="row.reportKey" class="day-shift-block">
             <el-descriptions
-              :title="row.shiftNameSnapshot"
+              :title="`${storeLabel(row.storeId)} ${row.shiftNameSnapshot}`.trim()"
               :column="1"
               border
               size="small"

@@ -108,4 +108,16 @@ describe('application router session guard', () => {
       expect(authSdk.fetchAuthSession).toHaveBeenCalledOnce();
     },
   );
+  it.each([
+    ['OWNER', '/owner/report/legacy-key', '/owner/daily'],
+    ['OWNER', '/owner/report/new?shiftId=day', '/owner/daily'],
+    ['KITCHEN', '/kitchen/report/2026-11-26/day', '/kitchen'],
+  ] as const)('routes old unscoped bookmarks to the authorized home (%s)', async (role, path, expected) => {
+    authSdk.fetchAuthSession.mockResolvedValue(sessionFor(role));
+    authSdk.getCurrentUser.mockResolvedValue({ userId: 'subject', username: role === 'OWNER' ? 'admin' : 'store02' });
+    const router = createAppRouter(createMemoryHistory());
+    await router.push(path);
+    expect(router.currentRoute.value.path).toBe(expected);
+  });
+
 });
