@@ -37,6 +37,8 @@ defineEmits<{
       :preview="preview"
     />
 
+    <slot name="before-actions" />
+
     <div class="actions">
       <el-button type="primary" size="large" class="confirm-btn" @click="$emit('confirm')">
         入力内容を確認
@@ -49,7 +51,7 @@ defineEmits<{
 .daily-report-form-fields {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 12px;
 }
 
 .actions {
@@ -70,5 +72,15 @@ defineEmits<{
   .confirm-btn {
     transition: transform 0.12s var(--fs-ease-out, cubic-bezier(0.25, 1, 0.5, 1));
   }
+}
+@media (max-width: 640px) {
+  .actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    padding: 8px 0 calc(8px + var(--fs-safe-area-bottom));
+    background: var(--fs-page);
+  }
+  .confirm-btn { max-width: none; min-height: 44px; }
 }
 </style>

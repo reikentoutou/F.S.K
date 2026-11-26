@@ -322,8 +322,8 @@ onMounted(load);
 </template>
 
 <style scoped>
-.settings-page { display: grid; gap: 24px; }
-.settings-section { padding: 18px 20px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
+.settings-page { display: grid; gap: 12px; }
+.settings-section { padding: 16px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
 .settings-section h3 { margin: 0 0 12px; }
 .settings-table { max-width: 680px; margin-bottom: 12px; }
 .add-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

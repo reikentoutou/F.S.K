@@ -14,19 +14,21 @@ defineProps<{
 
 <style scoped>
 .block {
-  padding: 18px 20px 20px;
+  padding: 16px;
   border: 1px solid var(--fs-border, var(--el-border-color));
   border-radius: var(--fs-radius-md, 10px);
   background: var(--fs-surface-elevated, var(--el-bg-color));
-  box-shadow: var(--fs-shadow-soft, none);
+  box-shadow: none;
 }
 
 .block-title {
-  margin: 0 0 14px;
-  font-size: 0.82rem;
+  margin: 0 0 12px;
+  font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--fs-muted, var(--el-text-color-secondary));
+  color: var(--fs-ink, var(--el-text-color-primary));
+}
+@media (max-width: 640px) {
+  .block { padding: 12px; }
+  .block-title { margin-bottom: 10px; }
 }
 </style>

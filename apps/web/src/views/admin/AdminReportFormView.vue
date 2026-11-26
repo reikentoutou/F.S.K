@@ -599,9 +599,9 @@ async function submit(): Promise<void> {
 .submit-btn { width: 100%; max-width: 360px; font-weight: 700; }
 
 @media (max-width: 720px) {
-  .page { width: 100%; padding: 14px 14px calc(28px + var(--fs-safe-area-bottom)); }
-  .bar { gap: 10px; margin-bottom: 14px; }
-  .bar > .el-button { min-width: 52px; min-height: 40px; padding: 0; }
+  .page { width: 100%; padding: 8px 12px calc(12px + var(--fs-safe-area-bottom)); }
+  .bar { gap: 10px; margin-bottom: 8px; }
+  .bar > .el-button { min-width: 52px; min-height: 44px; padding: 0; }
   .bar > div { min-width: 0; }
   .bar h2 { font-size: 1.08rem; line-height: 1.4; word-break: break-word; }
   .submit-btn { max-width: none; min-height: 48px; }

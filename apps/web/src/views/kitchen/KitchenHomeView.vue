@@ -342,19 +342,30 @@ async function logout(): Promise<void> {
 
 @media (max-width: 640px) {
   .bar {
-    padding: 12px 16px;
+    padding: 8px 12px;
   }
 
   .user {
-    display: none;
+    font-size: 12px;
+    white-space: nowrap;
   }
 
   .main {
-    padding: 18px 12px;
+    padding: 12px;
   }
 
   .panel {
-    padding: 20px 16px;
+    padding: 12px;
+    min-height: 0;
   }
+  .title { font-size: 18px; }
+  .logout { min-height: 44px; }
+  .date-field { gap: 8px; }
+  .date-field :deep(.el-date-editor) { flex: 1; width: 0; min-width: 0; }
+  .date-field :deep(.el-input__wrapper) { min-height: 44px; }
+  .shift-list { margin-top: 12px; gap: 0; }
+  .shift-link { min-height: 52px; padding: 10px 0; gap: 12px; border: 0; border-bottom: 1px solid var(--fs-border); border-radius: 0; background: transparent; font-size: 14px; }
+  .shift-link:last-child { border-bottom: 0; }
+  .shift-link > span:last-child { flex-shrink: 0; font-size: 12px; font-weight: 500; }
 }
 </style>

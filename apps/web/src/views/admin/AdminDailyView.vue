@@ -33,7 +33,7 @@ export async function loadOwnerDailyReports<T>(options: {
 <script setup lang="ts">
 
 import { computeDailyReportTotals, staffMealTotalYen, storeLabel } from '@fsk/domain';
-import { ArrowDown, ArrowRight, EditPen } from '@element-plus/icons-vue';
+import { ArrowDown, ArrowRight, EditPen, Refresh } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onBeforeUnmount, shallowRef } from 'vue';
 import { useRouter } from 'vue-router';
@@ -327,7 +327,10 @@ void load();
             aria-label="終了営業日"
           />
         </div>
-        <el-button :loading="loading" :disabled="deletingReportKey !== null" @click="load">読み込む</el-button>
+        <el-button class="filter-action" aria-label="読み込む" :loading="loading" :disabled="deletingReportKey !== null" @click="load">
+          <el-icon v-if="!loading" class="filter-action-icon"><Refresh /></el-icon>
+          <span class="filter-action-label">読み込む</span>
+        </el-button>
       </div>
 
       <div class="panel-body">
@@ -484,7 +487,7 @@ void load();
 .panel-meta { margin: 0 0 6px; color: var(--fs-muted); font-size: 0.86rem; }
 .meta-strong { font-weight: 700; color: var(--fs-ink); font-variant-numeric: tabular-nums; }
 .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 6px; }
-.filter-label { display: none; }
+.filter-label, .filter-action-icon { display: none; }
 .filter-controls { display: flex; align-items: center; gap: 8px; }
 .panel-body { padding-top: 10px; }
 .summary-grid, .mobile-report-list, .list-heading { display: none; }
@@ -500,16 +503,16 @@ void load();
   .panel { display: flex; flex-direction: column; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
   .panel-head { display: contents; }
   .panel-intro { display: none; }
-  .head-action { order: 2; width: 100%; min-height: 46px; margin: 12px 0; font-weight: 700; }
+  .head-action { order: 2; width: 100%; min-height: 44px; margin: 0 0 12px; font-weight: 700; }
   .head-action .el-icon { font-size: 18px; }
   .summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 12px; overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
   .summary-grid { order: 1; }
-  .summary-title { grid-column: 1 / -1; margin: 0; padding: 16px 16px 10px; font-size: 1.05rem; }
-  .summary-item { display: flex; min-width: 0; min-height: 82px; flex-direction: column-reverse; justify-content: center; gap: 5px; padding: 12px 14px; border-right: 1px solid var(--fs-border); border-bottom: 1px solid var(--fs-border); }
+  .summary-title { grid-column: 1 / -1; margin: 0; padding: 12px 12px 4px; font-size: 14px; }
+  .summary-item { display: flex; min-width: 0; min-height: 64px; flex-direction: column-reverse; justify-content: center; gap: 4px; padding: 8px 12px; border-right: 1px solid var(--fs-border); border-bottom: 1px solid var(--fs-border); }
   .summary-item:nth-child(3), .summary-item:nth-child(5) { border-right: 0; }
   .summary-item:nth-last-child(-n + 2) { border-bottom: 0; }
   .summary-item span { color: var(--fs-muted); font-size: 0.74rem; line-height: 1.25; }
-  .summary-item strong { overflow: hidden; color: var(--fs-accent); font-size: 1.22rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+  .summary-item strong { overflow: hidden; color: var(--fs-accent); font-size: 1.05rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .filters { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px 14px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
   .filters { order: 3; }
   .filter-label { display: block; grid-column: 1 / -1; color: var(--fs-muted); font-size: 0.75rem; font-weight: 600; }
@@ -518,7 +521,11 @@ void load();
   .filter-controls :deep(.el-input__wrapper) { padding-right: 6px; padding-left: 8px; }
   .filter-controls :deep(.el-input__prefix) { display: none; }
   .range-separator { flex: 0 0 auto; color: var(--fs-muted); }
-  .filters > .el-button { min-height: 40px; }
+  .filters > .el-button { width: 44px; min-height: 44px; padding: 0; }
+  .filter-action-icon { display: inline-flex; font-size: 18px; }
+  .filter-action-label { display: none; }
+  .filter-controls :deep(.el-input__wrapper) { min-height: 44px; }
+  .filter-controls :deep(.el-input__inner) { font-size: 13px; }
   .panel-body { order: 4; padding-top: 12px; }
   .list-heading { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 9px; }
   .list-heading h3 { margin: 0; font-size: 1rem; }
@@ -526,7 +533,7 @@ void load();
   .desktop-report-list { display: none; }
   .mobile-report-list { display: block; overflow: hidden; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-md); background: var(--fs-surface-elevated); }
   .mobile-day-group + .mobile-day-group { border-top: 1px solid var(--fs-border); }
-  .mobile-day-button { display: grid; width: 100%; min-height: 66px; grid-template-columns: minmax(0, 1fr) auto 20px; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; color: var(--fs-ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
+  .mobile-day-button { display: grid; width: 100%; min-height: 56px; grid-template-columns: minmax(0, 1fr) auto 20px; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; color: var(--fs-ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
   .mobile-day-main { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
   .mobile-day-main strong { font-size: 0.92rem; font-variant-numeric: tabular-nums; }
   .mobile-day-main span { color: var(--fs-muted); font-size: 0.72rem; }
@@ -549,8 +556,4 @@ void load();
   :deep(.el-dialog__footer .el-button) { flex: 1; min-height: 42px; }
 }
 
-@media (max-width: 390px) {
-  .filters { grid-template-columns: 1fr; }
-  .filters > .el-button { width: 100%; }
-}
 </style>

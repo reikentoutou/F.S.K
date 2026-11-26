@@ -451,7 +451,7 @@ async function handleHeaderBackClick(): Promise<void> {
     <template v-else-if="!loading && context && shift">
       <section
         v-if="submission.status !== 'editing'"
-        class="panel"
+        class="confirmation"
         aria-label="提出内容の確認"
       >
         <DailyReportConfirmSummary
@@ -493,7 +493,7 @@ async function handleHeaderBackClick(): Promise<void> {
         v-else
         label-position="top"
         require-asterisk-position="right"
-        class="panel form"
+        class="form"
       >
         <DailyReportFormFields
           :form="form"
@@ -501,17 +501,20 @@ async function handleHeaderBackClick(): Promise<void> {
           :register-float-amount="registerFloatAmount"
           :preview="preview"
           @confirm="goToConfirm"
-        />
-        <div class="attachment-field">
-          <label for="kitchen-receipt">領収書画像（任意）</label>
-          <input
-            id="kitchen-receipt"
-            type="file"
-            accept="image/*,application/pdf"
-            @change="selectReceipt"
-          />
-          <p v-if="receiptFile" class="attachment-name">{{ receiptFile.name }}</p>
-        </div>
+        >
+          <template #before-actions>
+            <div class="attachment-field">
+              <label for="kitchen-receipt">領収書画像（任意）</label>
+              <input
+                id="kitchen-receipt"
+                type="file"
+                accept="image/*,application/pdf"
+                @change="selectReceipt"
+              />
+              <p v-if="receiptFile" class="attachment-name">{{ receiptFile.name }}</p>
+            </div>
+          </template>
+        </DailyReportFormFields>
         <p v-if="submissionMessage" class="submission-message" role="alert">
           {{ submissionMessage }}
         </p>
@@ -558,15 +561,19 @@ async function handleHeaderBackClick(): Promise<void> {
 .attachment-field {
   display: grid;
   gap: 8px;
-  margin-top: 20px;
-  padding-top: 18px;
-  border-top: 1px solid var(--fs-border);
+  padding: 12px 16px;
+  border: 1px solid var(--fs-border);
+  border-radius: var(--fs-radius-md);
+  background: var(--fs-surface-elevated);
+  font-size: 13px;
   color: var(--fs-ink);
   font-weight: 600;
 }
 
 .attachment-field input {
-  max-width: 100%;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
   font: inherit;
 }
 
@@ -639,11 +646,14 @@ async function handleHeaderBackClick(): Promise<void> {
 
 @media (max-width: 640px) {
   .page {
-    padding: 12px;
+    padding: 8px 12px;
   }
 
-  .panel {
-    padding: 16px;
-  }
+  .bar { gap: 12px; margin-bottom: 8px; }
+  .bar > .el-button { min-height: 44px; padding: 0; }
+  .title { font-size: 18px; }
+  .panel { padding: 12px; }
+  .attachment-field { padding: 12px; }
+  .submit-button { max-width: none; min-height: 44px; margin-top: 12px; }
 }
 </style>

@@ -142,10 +142,7 @@ async function submitNewPassword(): Promise<void> {
   align-items: center;
   justify-content: center;
   padding: 24px 16px;
-  background:
-    radial-gradient(1200px 600px at 12% -10%, rgba(22, 95, 88, 0.14), transparent 55%),
-    radial-gradient(900px 480px at 88% 110%, rgba(139, 90, 43, 0.08), transparent 50%),
-    var(--fs-page);
+  background: var(--fs-page);
 }
 
 .panel {

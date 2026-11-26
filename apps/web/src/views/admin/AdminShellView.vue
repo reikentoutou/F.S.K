@@ -107,7 +107,7 @@ async function logout(): Promise<void> {
   display: flex;
   flex-direction: column;
   padding: 0 0 20px;
-  background: linear-gradient(165deg, #2e2a25 0%, #1f1c18 52%, #181612 100%);
+  background: #202b27;
   border-right: 1px solid rgba(255, 255, 255, 0.06);
   box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.25);
 }
@@ -243,7 +243,7 @@ async function logout(): Promise<void> {
   .head {
     position: relative;
     z-index: 10;
-    height: 58px !important;
+    height: 52px !important;
     padding: 0 14px;
     gap: 10px;
   }
@@ -280,7 +280,7 @@ async function logout(): Promise<void> {
   }
 
   .main {
-    padding: 14px 14px calc(84px + var(--fs-safe-area-bottom));
+    padding: 12px 12px calc(72px + var(--fs-safe-area-bottom));
   }
 
   .mobile-nav {
@@ -291,9 +291,9 @@ async function logout(): Promise<void> {
     left: var(--fs-safe-area-left);
     z-index: 20;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    min-height: 70px;
+    min-height: 60px;
     padding: 6px 6px 8px;
-    background: rgba(253, 252, 248, 0.98);
+    background: var(--fs-surface-elevated);
     border-top: 1px solid var(--fs-border);
     box-shadow: 0 -6px 20px rgba(28, 26, 22, 0.06);
   }
@@ -302,7 +302,7 @@ async function logout(): Promise<void> {
     position: relative;
     display: flex;
     min-width: 0;
-    min-height: 54px;
+    min-height: 44px;
     flex-direction: column;
     align-items: center;
     justify-content: center;

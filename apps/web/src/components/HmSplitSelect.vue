@@ -68,7 +68,9 @@ const minute = computed({
 
 <style scoped>
 .hm-split {
-  display: inline-flex;
+  display: flex;
+  width: 100%;
+  min-width: 0;
   align-items: center;
   gap: 4px;
   vertical-align: middle;
@@ -78,10 +80,20 @@ const minute = computed({
   color: var(--el-text-color-regular);
   user-select: none;
 }
-.hm-hour {
-  width: 88px;
-}
+.hm-hour,
 .hm-minute {
-  width: 88px;
+  flex: 1;
+  width: 0;
+  min-width: 0;
+}
+.hm-split :deep(.el-select__wrapper) {
+  min-height: 44px;
+  padding: 0 8px;
+  gap: 4px;
+}
+.hm-split :deep(.el-select__selected-item) { font-size: 16px; }
+@media (max-width: 360px) {
+  .hm-split { gap: 2px; }
+  .hm-split :deep(.el-select__wrapper) { padding: 0 6px; gap: 2px; }
 }
 </style>

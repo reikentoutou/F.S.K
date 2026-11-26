@@ -118,17 +118,17 @@ function yen(n: number): string {
 .confirm-summary {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 12px;
   margin-bottom: 8px;
 }
 
 .intro {
-  padding: 4px 0 8px;
+  padding: 0;
 }
 
 .title {
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 18px;
   font-weight: 700;
   color: var(--fs-ink, var(--el-text-color-primary));
   line-height: 1.25;
@@ -138,7 +138,7 @@ function yen(n: number): string {
   display: grid;
   grid-template-columns: minmax(120px, 42%) 1fr;
   gap: 8px 16px;
-  padding: 10px 0;
+  padding: 8px 0;
   border-bottom: 1px solid var(--fs-border, var(--el-border-color-lighter));
   align-items: baseline;
 }
@@ -182,13 +182,11 @@ function yen(n: number): string {
   background: var(--fs-surface, var(--el-fill-color-blank));
 }
 
-@media (max-width: 520px) {
-  .kv-row {
-    grid-template-columns: 1fr;
-  }
-
-  .kv-value {
-    text-align: left;
-  }
+@media (max-width: 640px) {
+  .kv-row { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 8px; padding: 6px 0; }
+  .kv-label { font-size: 12px; }
+  .kv-value { min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+  .kv-strong { font-size: 15px; }
+  .row-total { margin-top: 4px; padding-top: 8px; }
 }
 </style>

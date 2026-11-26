@@ -15,7 +15,7 @@ defineProps<{
 <template>
   <DailyReportSection title="基本">
     <el-form-item label="責任者" class="item-plain">
-      <div class="field-with-guide">
+      <div class="field-row">
         <el-select v-model="form.responsiblePersonId" class="field-wide" placeholder="選択">
           <el-option v-for="p in persons" :key="p.id" :label="p.name" :value="p.id" />
         </el-select>
@@ -23,7 +23,7 @@ defineProps<{
     </el-form-item>
 
     <el-form-item label="Newage時間" class="item-plain item-time">
-      <div class="time-field-with-guide">
+      <div class="field-row">
         <div class="time-row">
           <div class="time-block">
             <span class="time-tag">開始</span>
@@ -41,62 +41,32 @@ defineProps<{
 </template>
 
 <style scoped>
-.item-plain {
-  margin-bottom: 16px;
-}
-
-.item-plain:last-child {
-  margin-bottom: 0;
-}
-
+.item-plain { margin-bottom: 12px; }
+.item-plain:last-child { margin-bottom: 0; }
 .item-plain :deep(.el-form-item__label) {
+  margin-bottom: 6px;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--fs-ink, var(--el-text-color-primary));
+  line-height: 20px;
+  color: var(--fs-ink);
 }
-
-.field-wide {
-  width: 100%;
-  max-width: 360px;
-}
-
-.field-with-guide,
-.time-field-with-guide {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 8px 14px;
-  width: 100%;
-}
-
+.field-wide { width: 100%; max-width: 360px; }
+.field-row { width: 100%; min-width: 0; }
 .time-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 12px;
+  max-width: 460px;
 }
+.time-block { display: grid; gap: 4px; min-width: 0; }
+.time-tag { font-size: 12px; line-height: 18px; color: var(--fs-muted); }
+.time-dash { padding-bottom: 12px; color: var(--fs-faint); }
+.item-plain :deep(.el-select__wrapper) { min-height: 44px; }
 
-.time-block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.time-tag {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--fs-muted, var(--el-text-color-secondary));
-}
-
-.time-dash {
-  padding-bottom: 8px;
-  font-weight: 700;
-  color: var(--fs-faint, var(--el-text-color-placeholder));
-}
-
-@media (max-width: 720px) {
-  .field-with-guide,
-  .time-field-with-guide {
-    flex-direction: column;
-  }
+@media (max-width: 640px) {
+  .field-wide { max-width: none; }
+  .time-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .time-dash { display: none; }
 }
 </style>
