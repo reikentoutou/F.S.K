@@ -4,11 +4,12 @@ import { createPinia } from 'pinia';
 
 import { createApp, defineComponent, h, nextTick } from 'vue';
 import { createMemoryHistory, createRouter } from 'vue-router';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CreateDailyReportCommand } from '@/data/daily-reports';
 import { DataRepositoryError } from '@/data/errors';
 import * as reportView from './AdminReportFormView.vue';
+import { includeHistoricalMasterOption } from './AdminReportFormView.vue';
 
 const repositoryMocks = vi.hoisted(() => ({
   getSetting: vi.fn(),
@@ -53,7 +54,12 @@ const Passthrough = defineComponent({
   },
 });
 
-async function renderReportForm(): Promise<HTMLElement> {
+const renderedApps: ReturnType<typeof createApp>[] = [];
+afterEach(() => { renderedApps.splice(0).forEach((app) => app.unmount()); });
+
+vi.mock('@/utils/coupon-labels', () => ({ confirmCashBeforeSubmit: vi.fn().mockResolvedValue(undefined) }));
+
+async function renderReportForm(editKey?: string): Promise<HTMLElement> {
   const root = document.createElement('div');
   const app = createApp(reportView.default);
   const router = createRouter({
@@ -64,10 +70,11 @@ async function renderReportForm(): Promise<HTMLElement> {
         name: 'owner-report-new',
         component: reportView.default,
       },
+      { path: '/owner/daily/:reportKey', name: 'owner-report-edit', component: reportView.default },
       { path: '/owner/daily', name: 'owner-daily', component: Passthrough },
     ],
   });
-  await router.push({
+  await router.push(editKey ? { name: 'owner-report-edit', params: { reportKey: editKey } } : {
     name: 'owner-report-new',
     query: { businessDate: '2026-08-24', shiftId: 'day' },
   });
@@ -78,6 +85,7 @@ async function renderReportForm(): Promise<HTMLElement> {
   app.component('ElForm', Passthrough);
   app.directive('loading', {});
   app.mount(root);
+  renderedApps.push(app);
   await new Promise((resolve) => setTimeout(resolve, 0));
   await nextTick();
   return root;
@@ -455,5 +463,40 @@ describe('store scope in report links', () => {
     const module = reportView as unknown as { ownerReportStore(key: string | undefined, shift: string | undefined, selected: string): string };
     expect(module.ownerReportStore(undefined, '03_day', '02')).toBe('03');
     expect(module.ownerReportStore('03#2026-11-26#03_day', undefined, '02')).toBe('03');
+  });
+});
+
+
+describe('historical master options after deletion', () => {
+  it('can confirm and save an old report after both master records were deleted', async () => {
+    const key = '02#2026-08-24#02_day';
+    repositoryMocks.getByReportKey.mockResolvedValue({ ...command, reportKey: key, expenseYen: 0 });
+    repositoryMocks.updateByReportKey.mockResolvedValue({ reportKey: key });
+    const root = await renderReportForm(key);
+    const confirm = root.querySelector<HTMLElement>('.confirm-btn');
+    expect(confirm).not.toBeNull();
+    confirm!.click(); await nextTick();
+    expect(root.textContent).toContain(command.shiftNameSnapshot);
+    expect(root.textContent).toContain(command.responsiblePersonSnapshot);
+    root.querySelector<HTMLElement>('.submit-btn')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0)); await nextTick();
+    expect(repositoryMocks.updateByReportKey).toHaveBeenCalledExactlyOnceWith(key, expect.objectContaining({
+      shiftNameSnapshot: command.shiftNameSnapshot,
+      responsiblePersonId: command.responsiblePersonId,
+      responsiblePersonSnapshot: command.responsiblePersonSnapshot,
+    }));
+    expect(repositoryMocks.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps a deleted shift and person available only as inactive snapshot options for an existing report', () => {
+    const shift = { id: '02_old-shift', name: '旧班次', sortOrder: 0, active: false };
+    const person = { id: '02_old-person', name: '旧担当者', active: false };
+    expect(includeHistoricalMasterOption([], shift)).toEqual([shift]);
+    expect(includeHistoricalMasterOption([], person)).toEqual([person]);
+    expect(includeHistoricalMasterOption([], person).filter((item) => item.active)).toEqual([]);
+  });
+  it('preserves current master entries without replacing them with snapshots', () => {
+    const current = [{ id: '02_person', name: '現在の担当者', active: true }];
+    expect(includeHistoricalMasterOption(current, { id: '02_person', name: '旧名称', active: false })).toBe(current);
   });
 });

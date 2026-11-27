@@ -167,6 +167,15 @@ export function ownerReportPersonName(
   }
   return responsiblePersonSnapshot(existing, selectedId, selected.name);
 }
+
+export function includeHistoricalMasterOption<T extends { id: string }>(
+  options: T[],
+  historical: T,
+): T[] {
+  return options.some((option) => option.id === historical.id)
+    ? options
+    : [...options, historical];
+}
 </script>
 
 <script setup lang="ts">
@@ -307,8 +316,17 @@ async function readPageData(
       : null;
   return {
     request,
-    shifts: loadedShiftOptions,
-    persons: loadedPersonOptions,
+    shifts: report ? includeHistoricalMasterOption(loadedShiftOptions, {
+      id: report.shiftId,
+      name: report.shiftNameSnapshot,
+      sortOrder: 0,
+      active: false,
+    }) : loadedShiftOptions,
+    persons: report ? includeHistoricalMasterOption(loadedPersonOptions, {
+      id: report.responsiblePersonId,
+      name: report.responsiblePersonSnapshot,
+      active: false,
+    }) : loadedPersonOptions,
     registerFloatAmount: report?.registerFloatSnapshot ?? floatAmount,
     report,
   };

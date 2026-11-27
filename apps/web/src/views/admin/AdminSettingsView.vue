@@ -49,7 +49,7 @@ export function updateOwnerPersonActive<T>(
 <script setup lang="ts">
 
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { onMounted, reactive, shallowRef } from 'vue';
+import { onBeforeUnmount, onMounted, reactive, shallowRef } from 'vue';
 
 import { DataRepositoryError } from '@/data/errors';
 import { useStoreSelection } from '@/stores/store-selection';
@@ -98,6 +98,39 @@ const shifts = shallowRef<ShiftRow[]>([]);
 const persons = shallowRef<PersonRow[]>([]);
 const newShift = reactive({ name: '', sortOrder: 10 });
 const newPerson = shallowRef('');
+const pendingMaster = shallowRef<string | null>(null);
+let disposed = false;
+onBeforeUnmount(() => { disposed = true; });
+
+async function removeMaster(row: ShiftRow | PersonRow, kind: 'shift' | 'person'): Promise<void> {
+  if (loading.value || pendingMaster.value || disposed) return;
+  const label = kind === 'shift' ? 'シフト' : '責任者';
+  pendingMaster.value = `${kind}:${row.id}`;
+  try {
+    try {
+      await ElMessageBox.confirm(
+        `「${row.name}」を削除しますか？元に戻せません。既存の日報と保存済みの名称は残ります。`,
+        `${label}を削除`,
+        { confirmButtonText: '削除する', cancelButtonText: 'キャンセル', type: 'warning' },
+      );
+    } catch {
+      return;
+    }
+    if (disposed) return;
+    if (kind === 'shift') {
+      await ownerMasterDataRepository.deleteShift(row.id);
+      if (!disposed) shifts.value = shifts.value.filter((shift) => shift.id !== row.id);
+    } else {
+      await ownerMasterDataRepository.deleteResponsiblePerson(row.id);
+      if (!disposed) persons.value = persons.value.filter((person) => person.id !== row.id);
+    }
+    if (!disposed) ElMessage.success(`${label}を削除しました`);
+  } catch (error: unknown) {
+    if (!disposed) ElMessage.error(ownerDataErrorMessage(error, `${label}の削除に失敗しました`));
+  } finally {
+    pendingMaster.value = null;
+  }
+}
 
 async function load(): Promise<void> {
   loading.value = true;
@@ -152,7 +185,8 @@ async function saveFloat(): Promise<void> {
 
 async function addShift(): Promise<void> {
   const name = newShift.name.trim();
-  if (!name) return;
+  if (!name || loading.value || pendingMaster.value || disposed) return;
+  pendingMaster.value = 'shift:new';
   try {
     await ownerMasterDataRepository.createShift({
       id: `shift_${crypto.randomUUID()}`,
@@ -165,23 +199,31 @@ async function addShift(): Promise<void> {
     await load();
   } catch (error: unknown) {
     ElMessage.error(ownerDataErrorMessage(error, 'シフトの追加に失敗しました'));
+  } finally {
+    pendingMaster.value = null;
   }
 }
 
 async function setShiftActive(row: ShiftRow, active: boolean): Promise<void> {
-  if (!active && !(await confirmDeactivation(row.name, 'シフト'))) return;
+  if (loading.value || pendingMaster.value || disposed) return;
+  pendingMaster.value = `shift:${row.id}:active`;
   try {
+    if (!active && !(await confirmDeactivation(row.name, 'シフト'))) return;
+    if (disposed) return;
     await updateOwnerShiftActive(row, active, ownerMasterDataRepository);
     ElMessage.success(active ? 'シフトを有効にしました' : 'シフトを無効にしました');
     await load();
   } catch (error: unknown) {
     ElMessage.error(ownerDataErrorMessage(error, 'シフトの更新に失敗しました'));
+  } finally {
+    pendingMaster.value = null;
   }
 }
 
 async function addPerson(): Promise<void> {
   const name = newPerson.value.trim();
-  if (!name) return;
+  if (!name || loading.value || pendingMaster.value || disposed) return;
+  pendingMaster.value = 'person:new';
   try {
     await ownerMasterDataRepository.createResponsiblePerson({
       id: `person_${crypto.randomUUID()}`,
@@ -193,17 +235,24 @@ async function addPerson(): Promise<void> {
     await load();
   } catch (error: unknown) {
     ElMessage.error(ownerDataErrorMessage(error, '責任者の追加に失敗しました'));
+  } finally {
+    pendingMaster.value = null;
   }
 }
 
 async function setPersonActive(row: PersonRow, active: boolean): Promise<void> {
-  if (!active && !(await confirmDeactivation(row.name, '責任者'))) return;
+  if (loading.value || pendingMaster.value || disposed) return;
+  pendingMaster.value = `person:${row.id}:active`;
   try {
+    if (!active && !(await confirmDeactivation(row.name, '責任者'))) return;
+    if (disposed) return;
     await updateOwnerPersonActive(row, active, ownerMasterDataRepository);
     ElMessage.success(active ? '責任者を有効にしました' : '責任者を無効にしました');
     await load();
   } catch (error: unknown) {
     ElMessage.error(ownerDataErrorMessage(error, '責任者の更新に失敗しました'));
+  } finally {
+    pendingMaster.value = null;
   }
 }
 
@@ -245,15 +294,19 @@ onMounted(load);
         <el-table-column label="状態" width="90">
           <template #default="{ row }">{{ row.active ? '有効' : '無効' }}</template>
         </el-table-column>
-        <el-table-column label="" width="110" align="right">
+        <el-table-column label="操作" width="160" align="right">
           <template #default="{ row }">
             <el-button
               link
               :type="row.active ? 'danger' : 'primary'"
+              :disabled="pendingMaster !== null"
               @click="setShiftActive(row, !row.active)"
             >
               {{ row.active ? '無効化' : '再有効化' }}
             </el-button>
+            <el-button link type="danger" :aria-label="`${row.name}を削除`"
+              :loading="pendingMaster === `shift:${row.id}`" :disabled="pendingMaster !== null"
+              @click="removeMaster(row, 'shift')">削除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -263,19 +316,25 @@ onMounted(load);
             <strong>{{ shift.name }}</strong>
             <span>表示順 {{ shift.sortOrder }} · {{ shift.active ? '有効' : '無効' }}</span>
           </div>
-          <el-button
-            :type="shift.active ? 'danger' : 'primary'"
-            plain
-            @click="setShiftActive(shift, !shift.active)"
-          >
-            {{ shift.active ? '無効化' : '再有効化' }}
-          </el-button>
+          <div class="master-actions">
+            <el-button
+              :type="shift.active ? 'danger' : 'primary'"
+              plain
+              :disabled="pendingMaster !== null"
+              @click="setShiftActive(shift, !shift.active)"
+            >
+              {{ shift.active ? '無効化' : '再有効化' }}
+            </el-button>
+            <el-button type="danger" plain :aria-label="`${shift.name}を削除`"
+              :loading="pendingMaster === `shift:${shift.id}`" :disabled="pendingMaster !== null"
+              @click="removeMaster(shift, 'shift')">削除</el-button>
+          </div>
         </article>
       </div>
       <div class="add-row">
         <el-input v-model="newShift.name" placeholder="新規シフト名" class="name-input" />
         <el-input-number v-model="newShift.sortOrder" :min="0" aria-label="表示順" />
-        <el-button type="primary" @click="addShift">追加</el-button>
+        <el-button type="primary" :disabled="pendingMaster !== null" @click="addShift">追加</el-button>
       </div>
     </section>
 
@@ -286,15 +345,19 @@ onMounted(load);
         <el-table-column label="状態" width="90">
           <template #default="{ row }">{{ row.active ? '有効' : '無効' }}</template>
         </el-table-column>
-        <el-table-column label="" width="110" align="right">
+        <el-table-column label="操作" width="160" align="right">
           <template #default="{ row }">
             <el-button
               link
               :type="row.active ? 'danger' : 'primary'"
+              :disabled="pendingMaster !== null"
               @click="setPersonActive(row, !row.active)"
             >
               {{ row.active ? '無効化' : '再有効化' }}
             </el-button>
+            <el-button link type="danger" :aria-label="`${row.name}を削除`"
+              :loading="pendingMaster === `person:${row.id}`" :disabled="pendingMaster !== null"
+              @click="removeMaster(row, 'person')">削除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -304,18 +367,24 @@ onMounted(load);
             <strong>{{ person.name }}</strong>
             <span>{{ person.active ? '有効' : '無効' }}</span>
           </div>
-          <el-button
-            :type="person.active ? 'danger' : 'primary'"
-            plain
-            @click="setPersonActive(person, !person.active)"
-          >
-            {{ person.active ? '無効化' : '再有効化' }}
-          </el-button>
+          <div class="master-actions">
+            <el-button
+              :type="person.active ? 'danger' : 'primary'"
+              plain
+              :disabled="pendingMaster !== null"
+              @click="setPersonActive(person, !person.active)"
+            >
+              {{ person.active ? '無効化' : '再有効化' }}
+            </el-button>
+            <el-button type="danger" plain :aria-label="`${person.name}を削除`"
+              :loading="pendingMaster === `person:${person.id}`" :disabled="pendingMaster !== null"
+              @click="removeMaster(person, 'person')">削除</el-button>
+          </div>
         </article>
       </div>
       <div class="add-row">
         <el-input v-model="newPerson" placeholder="新規名前" class="name-input" />
-        <el-button type="primary" @click="addPerson">追加</el-button>
+        <el-button type="primary" :disabled="pendingMaster !== null" @click="addPerson">追加</el-button>
       </div>
     </section>
   </div>
@@ -336,11 +405,12 @@ onMounted(load);
   .settings-section h3 { font-size: 1rem; }
   .settings-table { display: none; }
   .mobile-master-list { display: grid; gap: 8px; margin-bottom: 12px; }
-  .mobile-master-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 11px 12px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-sm); background: var(--fs-surface); }
-  .mobile-master-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-  .mobile-master-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-master-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 11px 12px; border: 1px solid var(--fs-border); border-radius: var(--fs-radius-sm); background: var(--fs-surface); }
+  .mobile-master-copy { display: flex; flex: 1 1 110px; min-width: 0; flex-direction: column; gap: 3px; }
+  .mobile-master-copy strong { overflow-wrap: anywhere; font-size: 14px; }
   .mobile-master-copy span { color: var(--fs-muted); font-size: 0.75rem; }
-  .mobile-master-row .el-button { min-height: 40px; flex-shrink: 0; }
+  .master-actions { display: flex; flex-shrink: 0; gap: 6px; margin-left: auto; }
+  .master-actions .el-button { min-height: 44px; margin-left: 0; padding: 0 10px; }
   .add-row { display: grid; grid-template-columns: 1fr; }
   .add-row > *, .name-input, .add-row :deep(.el-input-number) { width: 100%; max-width: none; }
   .add-row > .el-button { min-height: 44px; }
