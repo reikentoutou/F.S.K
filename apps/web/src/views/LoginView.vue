@@ -186,8 +186,8 @@ async function submitNewPassword(): Promise<void> {
   .card:hover {
     border-color: var(--fs-border-strong);
     box-shadow:
-      0 1px 2px rgba(28, 26, 22, 0.06),
-      0 16px 40px rgba(28, 26, 22, 0.09);
+      0 1px 2px rgba(17, 24, 39, 0.06),
+      0 16px 40px rgba(17, 24, 39, 0.09);
   }
 }
 

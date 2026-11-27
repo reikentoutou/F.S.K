@@ -177,7 +177,7 @@ describe('Home Screen Web App shell', () => {
       .toBuffer({ resolveWithObject: true });
     const pixels = info.width * info.height;
     let lightPixels = 0;
-    let goldPixels = 0;
+    let darkPixels = 0;
     let everyPixelIsOpaque = true;
 
     for (let offset = 0; offset < data.length; offset += info.channels) {
@@ -186,7 +186,7 @@ describe('Home Screen Web App shell', () => {
       const blue = data[offset + 2] ?? 0;
       if (data[offset + 3] !== 255) everyPixelIsOpaque = false;
       if (red > 235 && green > 230 && blue > 215) lightPixels += 1;
-      if (red > 220 && green > 145 && green < 220 && blue < 120) goldPixels += 1;
+      if (red < 40 && green < 40 && blue < 40) darkPixels += 1;
     }
 
     const cornerOffsets = [
@@ -196,11 +196,11 @@ describe('Home Screen Web App shell', () => {
       (pixels - 1) * info.channels,
     ];
     for (const offset of cornerOffsets) {
-      expect([...data.subarray(offset, offset + 4)]).toEqual([22, 95, 88, 255]);
+      expect([...data.subarray(offset, offset + 4)]).toEqual([37, 99, 235, 255]);
     }
     expect(everyPixelIsOpaque).toBe(true);
     expect(lightPixels / pixels).toBeGreaterThan(0.1);
-    expect(goldPixels / pixels).toBeGreaterThan(0.025);
+    expect(darkPixels / pixels).toBeGreaterThan(0.025);
   });
 
   it('reproduces the committed PNG icons byte for byte', async () => {

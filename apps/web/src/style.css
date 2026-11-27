@@ -1,25 +1,38 @@
-/* 全局设计令牌：浅色中性背景与深绿色操作色。 */
+/* 全局设计令牌：白色界面、黑色文字与蓝色操作色。 */
 :root {
-  --fs-ink: #202923;
-  --fs-muted: #59645d;
-  --fs-faint: #78837b;
-  --fs-page: #f1f4f1;
-  --fs-surface: #f6f8f5;
+  --fs-ink: #171717;
+  --fs-muted: #525866;
+  --fs-faint: #737b8a;
+  --fs-page: #f5f6f8;
+  --fs-surface: #f8f9fb;
   --fs-surface-elevated: #ffffff;
-  --fs-border: #dce3dd;
-  --fs-border-strong: #bdc9bf;
-  --fs-accent: #165f58;
-  --fs-accent-muted: #1d7a72;
-  --fs-success-ink: #0d4f2d;
+  --fs-border: #e2e5eb;
+  --fs-border-strong: #c6ccd6;
+  --fs-accent: #2563eb;
+  --fs-accent-muted: #1d4ed8;
+  --fs-success-ink: #1e40af;
   --fs-radius-md: 10px;
   --fs-radius-sm: 8px;
   --fs-shadow-soft:
-    0 1px 2px rgba(28, 26, 22, 0.05),
-    0 3px 12px rgba(28, 40, 32, 0.03);
+    0 1px 2px rgba(17, 24, 39, 0.05),
+    0 3px 12px rgba(17, 24, 39, 0.03);
 
   --el-font-family: 'Noto Sans JP', 'Lexend', ui-sans-serif, system-ui, sans-serif;
   --el-color-primary: var(--fs-accent);
-  --el-color-primary-rgb: 22, 95, 88;
+  --el-color-primary-rgb: 37, 99, 235;
+  --el-color-primary-light-3: #6692f1;
+  --el-color-primary-light-5: #92b1f5;
+  --el-color-primary-light-7: #bed0f9;
+  --el-color-primary-light-8: #d3e0fb;
+  --el-color-primary-light-9: #e9effd;
+  --el-color-primary-dark-2: #1e4fbc;
+  --el-color-success: #2563eb;
+  --el-color-success-light-3: #6692f1;
+  --el-color-success-light-5: #92b1f5;
+  --el-color-success-light-7: #bed0f9;
+  --el-color-success-light-8: #d3e0fb;
+  --el-color-success-light-9: #e9effd;
+  --el-color-success-dark-2: #1e4fbc;
   --el-border-radius-base: var(--fs-radius-sm);
   --el-border-radius-small: 6px;
 
@@ -77,7 +90,7 @@ body {
 }
 
 ::selection {
-  background: rgba(22, 95, 88, 0.2);
+  background: rgba(37, 99, 235, 0.2);
   color: var(--fs-ink);
 }
 

@@ -591,7 +591,7 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
-.page { --el-color-primary: var(--fs-accent); --el-color-primary-rgb: 22, 95, 88; width: calc(100% - 36px); max-width: 900px; min-height: var(--fs-vh-100); margin: 0 auto; padding: 20px 0 32px; }
+.page { --el-color-primary: var(--fs-accent); width: calc(100% - 36px); max-width: 900px; min-height: var(--fs-vh-100); margin: 0 auto; padding: 20px 0 32px; }
 .bar { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
 .bar h2 { margin: 0; }
 .load-error { padding: 16px; color: var(--el-color-danger); border: 1px solid var(--el-color-danger-light-5); border-radius: var(--fs-radius-sm); }

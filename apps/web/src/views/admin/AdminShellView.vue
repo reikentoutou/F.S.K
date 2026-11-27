@@ -35,8 +35,8 @@ async function logout(): Promise<void> {
         class="nav"
         :default-active="$route.path"
         background-color="transparent"
-        text-color="rgba(244, 239, 230, 0.78)"
-        active-text-color="#f2e6c9"
+        text-color="#cbd5e1"
+        active-text-color="#ffffff"
       >
         <el-menu-item index="/owner/daily">
           <span class="nav-label">全日報</span>
@@ -97,7 +97,6 @@ async function logout(): Promise<void> {
 <style scoped>
 .layout {
   --el-color-primary: var(--fs-accent);
-  --el-color-primary-rgb: 22, 95, 88;
   min-height: var(--fs-vh-100);
   height: var(--fs-vh-100);
   background: var(--fs-page);
@@ -107,7 +106,7 @@ async function logout(): Promise<void> {
   display: flex;
   flex-direction: column;
   padding: 0 0 20px;
-  background: #202b27;
+  background: #171717;
   border-right: 1px solid rgba(255, 255, 255, 0.06);
   box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.25);
 }
@@ -122,7 +121,7 @@ async function logout(): Promise<void> {
   font-size: 1.05rem;
   font-weight: 700;
   letter-spacing: 0.06em;
-  color: #f7f2ea;
+  color: #ffffff;
 }
 
 .brand-sub {
@@ -132,7 +131,7 @@ async function logout(): Promise<void> {
   font-weight: 500;
   letter-spacing: 0.28em;
   text-transform: uppercase;
-  color: rgba(244, 239, 230, 0.45);
+  color: #94a3b8;
 }
 
 .nav {
@@ -152,7 +151,7 @@ async function logout(): Promise<void> {
 }
 
 .nav :deep(.el-menu-item.is-active) {
-  background: rgba(255, 255, 255, 0.08) !important;
+  background: var(--fs-accent) !important;
   font-weight: 600;
 }
 
@@ -182,7 +181,7 @@ async function logout(): Promise<void> {
   padding: 0 22px 0 26px;
   background: var(--fs-surface-elevated);
   border-bottom: 1px solid var(--fs-border);
-  box-shadow: 0 1px 0 rgba(28, 26, 22, 0.04);
+  box-shadow: 0 1px 0 rgba(17, 24, 39, 0.04);
 }
 
 .mobile-brand,
@@ -295,7 +294,7 @@ async function logout(): Promise<void> {
     padding: 6px 6px 8px;
     background: var(--fs-surface-elevated);
     border-top: 1px solid var(--fs-border);
-    box-shadow: 0 -6px 20px rgba(28, 26, 22, 0.06);
+    box-shadow: 0 -6px 20px rgba(17, 24, 39, 0.06);
   }
 
   .mobile-nav-item {

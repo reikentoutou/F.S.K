@@ -44,15 +44,15 @@ export function useEchartsBarChart(
     if (!instance) return;
     instance.resize();
     instance.setOption({
-      color: ['#165f58'],
+      color: ['#2563eb'],
       grid: { top: 16, right: 20, bottom: 16, left: 12, containLabel: true },
       tooltip: { trigger: 'axis', valueFormatter: (value: unknown) => `${Number(value).toLocaleString('ja-JP')} 円` },
-      xAxis: { type: 'value', axisLabel: { color: '#59645d', fontSize: 10 }, splitLine: { lineStyle: { color: '#e8ede8' } } },
+      xAxis: { type: 'value', axisLabel: { color: '#525866', fontSize: 10 }, splitLine: { lineStyle: { color: '#e2e5eb' } } },
       yAxis: {
         type: 'category',
         inverse: true,
         data: categories,
-        axisLabel: { color: '#59645d', fontSize: 11, width: 100, overflow: 'break' },
+        axisLabel: { color: '#525866', fontSize: 11, width: 100, overflow: 'break' },
         axisTick: { show: false },
         axisLine: { show: false },
       },
