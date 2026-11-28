@@ -6,10 +6,16 @@ import { DataRepositoryError, hasDataErrors, classifyDataFailure } from './error
 
 export const kitchenReportsRepository = {
   async create(command: CreateDailyReportCommand): Promise<CreateDailyReportCommand & { reportKey: string; submittedAt: string }> {
-    const session = await fetchAuthSession();
-    const storeId = resolveStoreAccess(session.tokens?.idToken?.payload ?? {});
+    const { tokens } = await fetchAuthSession();
+    const idToken = tokens?.idToken;
+    if (!idToken) throw new DataRepositoryError('DATA_UNAUTHORIZED');
+    const storeId = resolveStoreAccess(idToken.payload);
     try {
-      const result = await getDataClient().mutations.submitKitchenReport({ input: JSON.stringify({ ...command, storeId }) });
+      // The backend uses this token with Cognito Identity to verify attachment ownership.
+      const result = await getDataClient().mutations.submitKitchenReport(
+        { input: JSON.stringify({ ...command, storeId }) },
+        { authToken: idToken.toString() },
+      );
       if (hasDataErrors(result.errors)) {
         if (JSON.stringify(result.errors).includes('REPORT_ALREADY_EXISTS')) throw new DataRepositoryError('REPORT_ALREADY_EXISTS');
         throw classifyDataFailure(result.errors);
